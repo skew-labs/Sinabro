@@ -1,130 +1,116 @@
-# Sinabro and Naite Technical Report
+# Sinaite Technical Report
 
-> A local-first coding agent, user-owned memory system, and evidence-gated training loop
->
-> Draft v0.2 | May 27, 2026
+## Sinabro: A Local-First Coding Agent with User-Owned Memory and Evidence-Gated Model Improvement
+
+Draft v0.3 | May 28, 2026
 
 ## Abstract
 
-Sinabro is a local-first coding agent designed to operate near the user's repository, terminal, tools, credentials, memory, and approval boundary. Naite is the project coding model trained from the verified traces that Sinabro produces. The two are deliberately separated. Sinabro is the agent runtime and control plane. Naite is a replaceable accelerator.
+We introduce Sinaite, an open-source project composed of Sinabro, a local-first coding agent runtime, and Naite, a coding model trained from Sinabro's verified development trajectories. The project is motivated by a simple observation: modern coding agents produce useful work, but most of the signal that made the work possible is discarded. Repository reads, failed attempts, compiler diagnostics, test results, proof attempts, gas traces, red-team decisions, tool approvals, memory writes, and human corrections are usually compressed into an opaque chat transcript. Sinaite treats these trajectories as first-class data.
 
-The core thesis is simple: a useful coding agent should not be evaluated only by chat quality or model benchmarks. It should be evaluated by the loop it runs. A strong loop reads the codebase, selects context, decomposes work into atomic units, implements changes, executes tests and static analysis, records evidence, refuses unsafe actions, preserves user-owned memory, and converts verified work into training data. Sinabro is the system layer for that loop. Naite is trained only from data that survives it.
+Sinabro is a Rust control plane that decomposes software work into atomic units, executes tools under capability and approval boundaries, records evidence sidecars, preserves user-owned memory, and exposes a CLI/TUI/Telegram control surface. Naite is not the authority of the system. It is a replaceable accelerator trained from evidence that survives Sinabro's gates. The first specialization is Rust, Move, Sui, Walrus-backed memory, and long-context coding workflows, but the architecture is designed as a general agent loop: plan, act, test, prove, measure, review, record, and learn.
 
-The project begins with Rust, Move, Sui, Walrus, local command execution, tool routing, web research with source evidence, skill discovery, wallet and gas policy, and long-context coding workflows. This is a narrow initial domain, but the underlying loop is general: plan, act, test, prove, measure, review, record, and learn.
+This report describes the system design, data pipeline, safety invariants, serving policy, and evaluation protocol. It is not a production benchmark claim. We intentionally separate completed implementation evidence from design targets. Performance claims must be backed by build states, gate reports, reproducible commands, and signed evidence bundles.
 
-Sinabro is open-source by design and conservative by default. Users can run it without producing training artifacts. They can also opt into local evidence bundles, private Naite diets, private adapters, or redacted contribution packets. Private memory, secrets, provider bodies, wallet material, sponsor keys, and rights-unclear web content do not become public training data.
+## 1. Introduction
 
-This report is a design and architecture document, not a claim of completed production deployment. Implementation status belongs in repository build states, gate reports, and evidence bundles.
+Open-source language models improved rapidly by making model weights, training recipes, and evaluation results inspectable. Coding agents need the same discipline at the systems layer. A patch is not enough. A chat log is not enough. A model saying "I fixed it" is not evidence. The missing unit is a verifiable work trajectory.
 
-## 1. The Problem
+Sinaite follows a DeepSeek-style engineering posture: fewer slogans, more measured efficiency. We optimize the loop before optimizing the narrative. Every useful improvement should either reduce cost, reduce latency, preserve safety, improve verified pass rate, or produce better training data. If it does none of these, it is probably decoration.
 
-Modern coding agents are becoming better at producing patches, but they still lose too much of the work that made the patch possible. A typical successful session contains repository reading, failed hypotheses, command output, compiler diagnostics, test results, security decisions, tool calls, human corrections, and policy denials. Most of that signal disappears into a transcript, if it is stored at all.
+The central thesis is:
 
-That is a poor foundation for a system that should improve over time. A patch is not enough. A chat transcript is not enough. A benchmark score is not enough. The missing unit is a verifiable work trajectory.
+> A coding agent improves only when its work leaves evidence that can be replayed, audited, filtered, and learned from.
 
-Sinabro treats each meaningful step as an atom. An atom is small enough to review and large enough to matter. It has one canonical output, explicit inputs, concrete tests, gate requirements, reuse constraints, and an evidence sidecar. The sidecar records what was read, what was changed, what was attempted, what failed, what passed, what was denied, and why the result can be trusted.
+Sinabro therefore owns the runtime boundary. It decides what tools can run, what memory can be read or written, what provider can answer, what output can be trusted, what side effect needs approval, and what data is eligible for Naite training. Naite learns from the traces, but it does not get broader authority because it becomes better.
 
-This gives Naite a better diet than ordinary instruction data. It does not learn from the model saying "I fixed it." It learns from compiler output, static analysis, test results, proof attempts, gas traces, dependency audits, red-team decisions, approval events, rejected actions, and human-reviewed diffs.
+## 2. Contributions
 
-## 2. System Claims
+This report describes seven contributions.
 
-Sinabro and Naite make four design claims.
+1. **Atom Protocol.** A staged development protocol in which each work unit has one canonical output, explicit reuse constraints, required gates, and a closed evidence sidecar.
+2. **AtomDiet.** A training-data pipeline that converts verified software work into SFT, preference, reward, and evaluation records while rejecting self-reported success.
+3. **User-Owned Memory.** A memory architecture based on user-signed chunks, content digests, Sui `memory_root` and `audit_log` records, deterministic replay, and backend-neutral storage receipts.
+4. **Sinabro Runtime.** A local-first Rust agent control plane with CLI/TUI/Telegram interfaces, provider routing, tool adapters, skill registry, wallet/gas policy, task inbox, checkpoint/rollback, and audit trails.
+5. **Safety by Construction.** No silent fallback, no silent side effects, no hidden permission escalation, no training on private data by default, and no gas sponsorship based on endpoint secrecy.
+6. **Evidence-Backed Optimization.** Trajectory health, route state, prompt-cache boundaries, specialized token compression, and A/B scorecards are recorded as typed evidence rather than prompt-only guidance.
+7. **Naite Training and Serving Plan.** A staged 14B QLoRA/LoRA SFT track followed by strict evaluation, vLLM serving, no-silent-fallback routing, and larger-model promotion only after measured gains.
 
-1. The agent should be useful before the local model is strong.
-2. Long-term memory should be owned by the user, not by a model checkpoint or hosted chat account.
-3. Improvement should leave evidence.
-4. Speed is a systems property, not a slogan.
+## 3. System Overview
 
-The first claim prevents the model from becoming the authority. The runtime owns permissions, routing, memory, approvals, budget, and traces. The model proposes. Sinabro decides what can execute.
-
-The second claim turns memory into a portable asset. A user should be able to change model providers, upgrade Naite, export memory, delete memory, replay work, or migrate storage backends without losing ownership of the work history.
-
-The third claim makes training stricter. Naite is not rewarded for narrative success. It is rewarded for trajectories that pass gates.
-
-The fourth claim follows the direction of recent inference systems: large language model performance is often limited by memory movement, KV cache pressure, prefill/decode interference, queueing, and scheduler behavior. Sinabro therefore separates user hot paths from full scans, full replays, full renders, synchronous network calls, and heavy evidence construction.
-
-## 3. Architecture Overview
-
-Sinabro is organized as a Rust control plane around platform-neutral envelopes.
+Sinaite separates the agent from the model.
 
 ```text
 User
-  -> CLI / TUI / Telegram
-  -> CommandEnvelope / MessageEnvelope
+  -> CLI / TUI / Telegram / API
+  -> MessageEnvelope / CommandEnvelope
   -> Sinabro Rust Core
-       - Runtime supervisor
-       - Turn orchestrator
+       - runtime supervisor
+       - atomic planner
+       - turn orchestrator
        - LLM provider router
-       - Tool adapter dispatcher
-       - Memory engine
-       - Skill registry and runtime
-       - Wallet and gas policy
-       - Evidence collector
-       - Dataset builder
-  -> Model backends
-       - External providers
-       - Local Naite
-       - vLLM endpoint
-  -> Substrates
-       - cargo, clippy, miri, fuzzing, Kani
+       - tool adapter dispatcher
+       - skill registry and WASM runtime
+       - memory engine
+       - wallet and gas policy
+       - checkpoint and rollback manager
+       - evidence collector
+       - dataset builder
+  -> Execution substrates
+       - cargo, rustc, clippy, miri, fuzz, Kani
        - Sui CLI, Move tests, Move Prover
        - Walrus and StorageBackend adapters
-       - Web research and browser tools
+       - web research with source evidence
+       - local and remote model providers
   -> Evidence bundle
-  -> Naite training and evaluation
+  -> Naite training / evaluation / serving
 ```
 
-The router can call external providers or local models, but tool authority remains outside the model. A model can propose a command, web search, memory write, skill install, or transaction. Sinabro checks capability, policy, budget, approval, and evidence requirements before execution.
+The model proposes actions. Sinabro decides whether they can happen. This distinction is the core safety boundary. A model can propose a tool call, memory write, skill installation, provider fallback, wallet signature, gas-sponsored transaction, or chain write. Sinabro checks capability, policy, budget, approval, redaction, and evidence requirements before execution.
 
-## 4. Design Principles
+The initial public surface is intentionally CLI-first:
 
-### 4.1 Agent first
+```bash
+sinabro doctor
+sinabro setup memory
+sinabro
+sinabro tui
+```
 
-Sinabro must remain useful with an external frontier model, a local Naite model, a smaller draft model, or no fine-tuned model at all. The model is not the product boundary. The agent runtime is.
+The product should feel simple at the top and strict underneath. A user should be able to install and reach the first dry run quickly, while every risky action remains auditable.
 
-### 4.2 Evidence over narration
+## 4. The Atom Protocol
 
-A green status must point to evidence: command manifests, output hashes, test reports, prover results, gas traces, redaction reports, dependency audits, and approval receipts. A model statement is not evidence.
+An atom is the smallest unit of planned work that can produce a meaningful, reviewable change. Each atom has nine fields:
 
-### 4.3 User-owned memory
+```text
+id
+file
+canonical OUT
+constraint spec
+tests
+criterion
+gate
+reuse
+next-atom
+```
 
-Memory is not a hidden prompt cache. Memory is a user-owned asset. The root of trust is a composition of user-signed chunks, content digests, Sui `memory_root` and `audit_log` records, deterministic replay hashes, and backend-neutral storage receipts.
+The purpose of this shape is to prevent scope drift. An atom does not finish when code is written. It finishes when code, tests, command output, review records, redaction reports, dependency audits, and evidence hashes agree.
 
-Walrus is the first Sui-native primary backend. It is not the definition of memory ownership. Local encrypted storage, Walrus, mirrors, archives, exports, deletions, and future backends sit behind a `StorageBackend` abstraction. No backend is allowed to replace the user's ownership proof.
+The protocol enforces several rules:
 
-### 4.4 No silent side effects
+- One atom has one canonical output.
+- Existing canonical types must be reused instead of redefined.
+- Tool absence is recorded as `not_verified`, not converted into success.
+- Failed attempts, no-op decisions, denials, and repairs are training data.
+- A model statement is never a gate result.
+- A stage cannot advance without evidence that the previous stage produced its handoff.
 
-Sinabro does not silently execute tools, install skills, spend gas, sign transactions, publish packages, switch providers, train on private data, or fall back to another model. Side effects require capability checks, policy gates, budget checks, approval, and a user-visible trace.
+This gives the project a property that ordinary agent transcripts lack: every improvement has a provenance chain.
 
-### 4.5 Learning is opt-in
+## 5. Evidence Sidecars
 
-Open-source users may choose no learning artifacts, local evidence only, a private Naite diet, a private adapter, or a redacted contribution path. The default is no data egress and no training artifact generation.
-
-### 4.6 Speed is designed, not declared
-
-The system does not call itself fast because it streams text. It measures first-token latency, time per output token, stream gap, queue time, prefill time, decode time, throughput, allocation count, cache hit-rate, VRAM, and quality. A route that cannot explain its speed is not a stable route.
-
-## 5. The Atom Protocol
-
-An atom is the smallest planned unit that can produce a meaningful, reviewable change. Each atom has nine fields:
-
-- `id`
-- `file`
-- `canonical OUT`
-- `constraint spec`
-- `tests`
-- `criterion`
-- `gate`
-- `reuse`
-- `next-atom`
-
-The shape matters. It keeps work bounded, prevents broad self-reported success, and makes training data composable. An atom is not complete when the patch exists. It is complete when the patch, tests, gates, reviews, denials, redactions, and evidence records exist.
-
-The atom protocol also constrains model behavior. A model cannot invent a new canonical type if a previous atom produced one. It cannot broaden the scope without showing the new scope. It cannot mark proof as passed when the tool is absent. It must distinguish failed work, denied work, unverified work, and successful work.
-
-## 6. Evidence Sidecars
-
-Each atom emits a closed sidecar contract. The current training sidecar contains 21 files:
+Each implementation atom emits a closed sidecar contract. The current atom sidecar contains 21 files:
 
 ```text
 input_context.jsonl
@@ -150,62 +136,144 @@ reward_labels.json
 eval_summary.json
 ```
 
-This sidecar is the bridge between engineering and learning. It records the task, environment, context, actions, command results, code changes, security review, dependency audit, redaction status, test outcomes, and reward labels.
+This sidecar is the bridge between engineering and learning. It records what the agent read, what it changed, what it ran, what failed, what passed, what was denied, and what can be replayed.
 
-Two files are especially important.
+Two files are mandatory in every atom:
 
-- `review_5pack.json` captures performance, security, chain, agent-token budget, and developer-experience review.
-- `deny_audit.json` captures dependency, license, advisory, banned-surface, and source checks.
+- `review_5pack.json`: performance, security, chain, agent-token budget, and developer-experience review.
+- `deny_audit.json`: dependency, license, advisory, banned surface, and source audit.
 
-The point is not to create paperwork. The point is to make the system trainable without rewarding hallucinated success.
+These are not paperwork. They prevent Naite from learning that "fast but unsafe" is acceptable. A trajectory that passes tests but violates security, chain, privacy, or gas policy is a negative or no-reward example.
 
-## 7. Memory Ownership and Replay
+## 6. AtomDiet Data Pipeline
 
-Sinabro's memory architecture separates continuity from model weights.
+Naite is trained from verified trajectories, not from raw chat logs. The data pipeline is designed around three separations.
 
-Work memories are typed chunks. A chunk can represent a user instruction, tool result, code change, approval event, test result, skill artifact, or system decision. Chunks are addressed by content digest and can be stored through a `StorageBackend`. Sui anchors a memory root and audit log so ownership and mutation history can be verified.
+### 6.1 Ground Truth vs Narrative
 
-Replay is deterministic. A replay is accepted only if reconstructed content hashes match the expected memory root and audit trail. Deletion semantics are explicit: delete does not mean "hide it from retrieval while keeping it in training." Export, import, delete, anchor, root, and replay must be visible through the CLI.
+S1 records are ground-truth candidates: compiler output, tests, proof attempts, gas traces, replay checks, dependency audits, and verified command results. S2 records are narrative context: explanations, human preferences, failed paths, and review discussion. S2 can be useful for SFT or preference pairs, but it cannot directly produce reward.
 
-This design is intended to give users several concrete properties:
+### 6.2 Data Rights vs Storage Rights
 
-1. A model upgrade does not erase memory.
-2. A storage backend migration does not change ownership.
-3. A hosted service cannot silently claim the memory root.
-4. Training rights are separate from storage rights.
-5. Memory can be audited after a dispute.
+Storing memory is not permission to train on memory. User-owned memory, private repositories, provider outputs, browser bodies, sponsor keys, wallet material, and rights-unclear web content are excluded from public training unless explicit rights, redaction, and contribution gates pass.
 
-Storage is replaceable; ownership is not. Walrus is the first Sui-native primary backend, but Sinabro's memory layer is designed to support local encrypted storage, Walrus, Filecoin/IPFS, Arweave, and future archival backends through the same `StorageBackend` interface. The invariant is that no storage provider becomes the owner of memory.
+### 6.3 Compression vs Evidence
 
-The memory system also treats compression as part of the ownership experience. Long-term memory is only useful if it can be searched, summarized, paged, cached, replayed, and served quickly. Techniques such as prefix cache reuse, KV cache policy, quantized serving, and future TurboQuant-style compression are evaluated as serving optimizations, not as substitutes for verifiable memory roots.
+Context compression is allowed only if evidence remains replayable. Compiler, test, log, and tool outputs use specialized compression policies. The compressed view must preserve first failure, file and line, command hash, root cause, redaction proof, and a raw replay hash or path.
 
-## 8. Adapter Boundaries
+The resulting dataset can produce:
 
-Sinabro should use the external AI ecosystem without surrendering its safety model.
+- SFT conversations from verified work.
+- Preference pairs from failed vs repaired attempts.
+- Reward labels from reverified S1 evidence.
+- Red-team examples from denied unsafe actions.
+- Evaluation records from held-out gates.
+- Trajectory-health labels for loop, drift, contradiction, and verification-skip failures.
+
+## 7. User-Owned Memory
+
+Sinabro memory is not a hidden prompt cache. It is a user-owned asset.
+
+The root of trust is:
+
+```text
+user signature
+  -> typed chunk
+  -> content digest
+  -> storage receipt
+  -> Sui memory_root / audit_log
+  -> deterministic replay hash
+```
+
+A memory chunk can represent a user instruction, code change, tool result, test result, approval event, skill artifact, red-team decision, or system state. Chunks are addressed by digest and stored through a `StorageBackend`.
+
+Walrus is the first Sui-native primary backend. It is not the definition of memory ownership. Local encrypted storage, Walrus, IPFS/Filecoin mirrors or archives, and future backends must pass through the same ownership, deletion, export, replay, and training-rights semantics.
+
+The memory layer is designed to give users five properties:
+
+1. Model upgrades do not erase memory.
+2. Provider changes do not erase memory.
+3. Storage migrations do not change ownership.
+4. Deletion semantics override retrieval and training.
+5. Replay can prove what was known at the time of a decision.
+
+## 8. Provider, Tool, and Command Boundaries
+
+Sinabro uses external systems without surrendering its safety model.
 
 ### 8.1 LLM Provider Abstraction
 
-OpenAI, Anthropic, Gemini, local Naite, and vLLM endpoints are called through one provider interface. Model identity, route decision, cost estimate, latency bucket, prompt redaction hash, output hash, and fallback policy are attached at this layer.
+OpenAI, Anthropic, Gemini, local Naite, and vLLM endpoints are called through one provider interface. Each route records model identity, route decision, cost estimate, latency bucket, prompt redaction hash, output hash, and fallback policy.
 
-No silent fallback is allowed. If a route changes from local Naite to a hosted provider, or from one hosted provider to another, the user-visible route state changes.
+No silent fallback is allowed. If the route changes from local Naite to a hosted provider, or from one hosted provider to another, the user-visible route state changes and approval may be required.
 
 ### 8.2 Tool Adapter Abstraction
 
-Python tools, MCP servers, CLI binaries, HTTP services, FastAPI services, and WASM skills are normalized into a common `ToolCall` and `ToolResult`. Capability diff, sandbox tier, budget, approval, revocation, and evidence records are checked before execution.
+Python tools, MCP servers, CLI binaries, HTTP/FastAPI services, and WASM skills normalize into a common `ToolCall` and `ToolResult`. Capability diff, sandbox tier, budget, approval, revocation, and evidence records are enforced before execution.
 
-This avoids a common failure mode: the model cannot bypass safety by choosing a more convenient tool surface.
+This prevents the model from bypassing safety by choosing a convenient tool surface.
 
 ### 8.3 Message and Command Envelope
 
-CLI, TUI, Telegram, future mobile clients, and APIs use the same command semantics. `/kill`, `/approve`, `task resume`, `budget cap`, and `provider route` must mean the same thing no matter where they are issued.
+CLI, TUI, Telegram, future mobile apps, and APIs share the same command semantics. `/kill`, `/approve`, `task resume`, `budget cap`, and `provider route` must mean the same thing everywhere.
 
 ### 8.4 Evidence and Trace Layer
 
-Provider choice, tool execution, cost, latency, output hashes, failures, and approval receipts are recorded. Without this layer, an external model or Python tool could spend money, mutate files, or change routes without leaving a reproducible trail.
+Provider choice, tool execution, cost, latency, output hashes, failures, and approval receipts are recorded. Without this layer, a model or tool could spend money, mutate files, or change routes without leaving a reproducible trail.
 
-## 9. Skills
+## 9. Trajectory Health and Evidence-Backed Hints
 
-The initial skill system is adoption-first. It focuses on discovery, inspection, recommendation, dry-run, installation, provenance, compatibility, and verified use. Distribution economics are outside the core safety loop described in this report.
+Long-running agents often fail before they produce a bad final answer. They loop, skip verification, contradict earlier evidence, drift off task, compress away the important failure, or continue spending tokens after the task is stuck.
+
+Sinabro tracks these states as typed `TrajectoryHealth` records. Planned signals include:
+
+- semantic loop
+- verification skip
+- claim contradiction
+- scope sprawl
+- topic drift
+- cyclic compression
+- evidence mismatch
+- sidecar or gate drift
+- approval bypass attempt
+- memory tombstone resurrection
+- provider silent fallback
+- gas sponsor risk
+- secret surface touch
+- stale proof acceptance
+- tool capability escalation
+
+Route state is user-visible:
+
+```text
+FAST
+NORMAL
+SLOW
+STUCK
+AUDIT
+LOCKDOWN
+USER_FULL
+```
+
+The route state may change the model, retrieval depth, compression policy, tool allowance, or approval level. It cannot bypass no-silent-fallback, budget, or approval gates.
+
+Sinabro also uses evidence-backed hints instead of prompt-only steering. A hint must carry:
+
+```text
+source_atom
+evidence_hash
+memory_root
+gate_result
+expiry
+scope
+redaction_class
+```
+
+If a prior lesson cannot point to evidence, it is not injected as operational truth.
+
+## 10. Skills
+
+The initial skill system is adoption-first. It focuses on discovery, inspection, recommendation, dry-run, installation, provenance, compatibility, and verified use.
 
 Planned commands include:
 
@@ -225,11 +293,11 @@ skill eval
 skill provenance
 ```
 
-Search uses progressive disclosure. The first result should be a compact card: name, description, capability summary, compatibility, evaluation status, security status, provenance, verified installs, and permission diff. Full manifests, WASM metadata, documentation, and eval logs load only after inspection.
+Search uses progressive disclosure. The first result is a compact card: name, description, capability summary, compatibility, evaluation status, security status, provenance, verified installs, and permission diff. Full manifests, WASM metadata, documentation, and eval logs load only after inspection.
 
-Skill execution requires capability checks and user confirmation. A skill is not trusted because it is popular. Verified installs require package signatures, compatibility checks, malicious fixture tests, sandbox evidence, and install receipts.
+Skill execution requires package signatures, compatibility checks, malicious-fixture tests, sandbox evidence, capability diff, dry-run, explicit confirmation, and install receipts.
 
-## 10. Web Research and Source Truth
+## 11. Web Research and Source Truth
 
 Web research is a tool action, not ambient knowledge. A fetched source becomes usable only when it carries:
 
@@ -243,7 +311,7 @@ Web research is a tool action, not ambient knowledge. A fetched source becomes u
 
 Web content can guide an answer. It does not automatically become Naite training data. Public training candidates require explicit rights checks, redaction, and user approval.
 
-## 11. Wallet, Gas, and Chain Safety
+## 12. Wallet, Gas, and Chain Safety
 
 The gasless user experience is designed around a keyless open-source client and a policy-gated Gas Station. Sponsor keys do not appear in the repository, binary, container image, or examples.
 
@@ -261,54 +329,61 @@ Core invariants include:
 - Small hot wallet balances behind cold treasury and multisig refill.
 - Automatic pause on anomaly signals.
 
-Gas sponsorship is separated from skill usage. The initial release allows bounded memory, audit, and registry writes under policy. Economic settlement for third-party skill distribution is outside Gas Station authority.
+Gas sponsorship is separated from memory ownership and skill usage. A sponsor can pay for policy-limited operations. It cannot become the user's memory owner.
 
-## 12. Speed Law
+## 13. Speed Law
 
-Sinabro follows a dual compression speed law.
+Sinaite follows a dual compression speed law.
 
-Model-side compression reduces the cost of inference itself: KV cache policy, quantized serving candidates, active adapter identity, and speculative draft/verify routes are visible in the route trace.
+### 13.1 Model-Side Efficiency
 
-Serving-side compression reduces system overhead around the model: prefix cache, KV reuse, paged trace rendering, background work admission, queue priority, prefill/decode separation candidates, and zero-allocation hot paths.
+Model-side efficiency reduces the cost of inference itself:
 
-The stable route cannot hide behind aggregate latency. It must report:
+- KV-cache policy.
+- BF16/FP8/TurboQuant-style candidates.
+- Active adapter identity.
+- Quantized serving canaries.
+- Speculative draft/verify routes.
+- Prefix and KV hit-rate measurement.
 
-- TTFT: time to first token
-- TPOT: time per output token
-- stream gap
-- queue time
-- prefill time
-- decode time
-- throughput
-- hot path allocation count
-- prefix cache hit-rate
-- KV reuse hit-rate
-- VRAM
-- quality regression
+These are route-visible. A faster route that hides quality regression is not stable.
+
+### 13.2 Serving-Side Efficiency
+
+Serving-side efficiency reduces system overhead around the model:
+
+- prompt-cache boundaries
+- paged trace rendering
+- background work admission
+- interactive-first queue priority
+- prefill/decode split candidates
+- zero-allocation hot paths
+- explicit full/deep jobs
+
+Stable routes must report TTFT, TPOT, stream gap, queue time, prefill time, decode time, throughput, hot-path allocation count, prefix cache hit-rate, KV reuse hit-rate, VRAM, and quality deltas.
 
 Full operations are supported, but only explicitly. `--full`, `--deep`, `export`, `replay`, and `audit` are product features. They run as budgeted, killable, resumable background jobs with progress, paged output, and evidence. They are not allowed to block the interactive hot path.
 
-This is why Sinabro's speed policy is not "do less." It is "do heavy work where it belongs."
+## 14. Training Naite
 
-## 13. Training Naite
+Naite training begins only after dataset and rights gates produce a valid unlock packet. The first training track uses a 14B coding-model lineage with QLoRA/LoRA-style fine-tuning on A100-class hardware. Reinforcement-style methods such as GRPO, MURPHY, and FGO remain locked until SFT smoke tests and evaluations pass.
 
-Naite training begins only after the dataset and rights gates produce a valid unlock packet. The first training track uses a 14B coding-model lineage with QLoRA/LoRA style fine-tuning on A100-class hardware. Reinforcement-style methods such as GRPO, MURPHY, or FGO remain locked until SFT smoke tests and evaluations pass.
-
-Promotion is not based on loss alone. A candidate must preserve or improve results across:
+Promotion is not based on loss alone. A candidate must preserve or improve:
 
 - Rust compile and test outcomes.
-- `cargo fmt`, `cargo clippy`, `cargo miri`, fuzzing, and property tests.
-- Kani checks.
+- `cargo fmt`, `cargo clippy`, `cargo miri`, fuzzing, property tests, and Kani.
 - Move tests and Move Prover repair.
 - Gas and byte-size behavior.
 - Walrus and storage integrity tasks.
 - Korean technical instruction following.
 - Long-context retrieval and packing tests.
 - Held-out security and optimization tasks.
+- Trajectory-health behavior.
+- Token/cost/pass/latency A/B scorecards.
 
-The training split distinguishes verifiable data from narrative data. Compiler and prover output can support reward labels. Self-report, praise, and unsupported summaries cannot. Infrastructure failures such as OOM or provider timeout are masked rather than treated as model failures.
+Infrastructure failures such as OOM, timeout, and provider failure are masked from model reward. They are operational signals, not model-success labels.
 
-## 14. Evaluation
+## 15. Evaluation Protocol
 
 Evaluation covers model quality, agent behavior, system safety, and serving performance.
 
@@ -318,19 +393,20 @@ Evaluation covers model quality, agent behavior, system safety, and serving perf
 | Move and Sui | move test, Move Prover, BCS parity, gas trace, owner invariants |
 | Storage | Walrus PUT/GET, blob-id verification, backend receipts, replay determinism |
 | Memory | root hash, audit log, deletion, export/import, replay hash |
-| Skills | malicious fixtures, capability diffs, signed package checks, no-commerce scans |
+| Skills | malicious fixtures, capability diffs, signed package checks |
 | Web | source metadata, retrieval hashes, rights checks, credential redaction |
 | Router | no silent fallback, route receipts, cost and quality scorecards |
 | Gas | allowlist, dry-run, quotas, gas caps, coin leases, burn caps |
 | Dataset | PII0, secret0, S1/S2 split, reward firewall, dependency audit |
 | Korean | technical parity with equivalent English prompts |
 | Serving | TTFT, TPOT, prefill/decode, prefix/KV hit-rate, allocation, VRAM, quality |
+| Trajectory | loop, drift, verification skip, contradiction, compression failure |
 
 The strongest evaluation target is not memorization of the project itself. The system must improve on held-out Rust, Move, gas, security, and Korean-language technical tasks without relaxing safety gates.
 
-## 15. Open-Source Controls
+## 16. Open-Source Controls
 
-Sinabro is intended to be open-source and user-controlled. The default configuration is conservative.
+Sinaite is open-source by design and conservative by default.
 
 ```toml
 [learning]
@@ -357,37 +433,41 @@ ttft_tpot_split = true
 prefill_decode_split = "candidate"
 hot_path_allocation = "zero"
 background_queue_priority = "interactive_first"
+trajectory_health = "typed"
+route_fsm = "visible"
+evidence_backed_hints = true
+tool_output_compression = "typed_by_output_kind"
 speculative_route = "visible"
 quantized_serving = "canary_only"
 ```
 
 The safety kernel is not optional. Secret redaction, capability diffs, no silent fallback, no auto-merge, wallet preview, gas drain invariants, mainnet approval, and source-evidence requirements remain enforced.
 
-## 16. Roadmap
+## 17. Roadmap
 
 The staged roadmap is designed so each stage leaves a working artifact and an evidence bundle.
 
-- Stage A: core runtime, trace collection, agent loop, typed units, sidecar grammar.
-- Stage B: signed memory chunks, Walrus testnet, Sui memory roots, replay proof.
-- Stage C: GA hardening, gas trace harness, mainnet gate, key isolation.
-- Stage D: skill runtime, open registry, provenance, install receipts, memory intelligence.
-- Stage E: AtomDietRecord builder, redaction, rights checks, reward firewall, training unlock.
-- Stage F: CLI cockpit, provider and tool adapters, web, skill, memory, wallet, gas, train, eval, and feature controls.
-- Stage G: first Naite SFT pass and evaluation on A100.
-- Stage H: vLLM serving, local model router, speed law, no-silent-fallback proof, CLI/Telegram sync.
-- Stage I: read-only mainnet measurement for gas, cycle, and security telemetry.
-- Stage J: open-source readiness, SDKs, public docs, contributor dry-run, review queue.
-- Stage K: larger-model promotion after controlled self-improvement is measured under gates.
+- **Stage A:** core runtime, trace collection, agent loop, typed units, sidecar grammar.
+- **Stage B:** signed memory chunks, Walrus testnet, Sui memory roots, replay proof.
+- **Stage C:** GA hardening, gas trace harness, mainnet gate, key isolation.
+- **Stage D:** skill runtime, open registry, provenance, install receipts, memory intelligence.
+- **Stage E:** AtomDiet builder, redaction, rights checks, reward firewall, training unlock.
+- **Stage F:** CLI cockpit, provider and tool adapters, web, skill, memory, wallet, gas, train, eval, and feature controls.
+- **Stage G:** first Naite SFT pass and evaluation on A100.
+- **Stage H:** vLLM serving, local model router, speed law, no-silent-fallback proof, CLI/Telegram sync.
+- **Stage I:** read-only mainnet measurement for gas, cycle, and security telemetry.
+- **Stage J:** open-source readiness, SDKs, public docs, contributor dry-run, review queue.
+- **Stage K:** larger-model promotion after controlled self-improvement is measured under gates.
 
-## 17. Expected Advantages
+## 18. Expected Advantages
 
-Sinabro and Naite compound in ways a plain chat interface does not.
+Sinaite compounds in ways a plain chat interface does not.
 
 The agent keeps state outside the model. Memory, skills, evidence, and approval records survive provider changes and model upgrades. The training system learns from complete work trajectories instead of isolated answers. The safety model is enforced by runtime policy rather than prompt text. External frontier models can still be used, but their outputs pass through the same trace, privacy, and approval boundaries.
 
 The system is broader than a Web3 assistant and more specific than a general chatbot. Its first deep specialization is Rust, Move, Sui, and storage-backed memory, but the underlying loop is a general coding loop.
 
-## 18. Limitations
+## 19. Limitations
 
 This report describes a staged design, not a completed production deployment.
 
@@ -395,14 +475,18 @@ Naite is not assumed to outperform frontier models at launch. Walrus/Sui memory 
 
 Public training contributions require opt-in consent, redaction, source rights, provider-policy compliance, and provenance. Some evaluation tools may be unavailable in a given local environment; tool absence must be recorded as `not_verified`, not as success.
 
-## 19. Conclusion
+## 20. Conclusion
 
-Sinabro is the agent layer. Naite is the model trained from the agent's verified work. The system is built around one constraint: improvement must leave evidence.
+Sinaite is built around one constraint: improvement must leave evidence.
 
-If the project succeeds, its strength will not come from a single model release. It will come from the loop: user-owned memory, open skills, strict approvals, reproducible traces, speed measured at the systems boundary, and training data earned by real verification rather than asserted by a model.
+Sinabro is the agent layer that owns memory, tools, approvals, routing, and traces. Naite is the model trained from the agent's verified work. The long-term goal is not a louder assistant. It is a quieter and more efficient system where every token, tool call, memory write, and model update can be measured against evidence.
 
 ## References
 
+- DeepSeek-AI. "DeepSeek LLM: Scaling Open-Source Language Models with Longtermism." arXiv:2401.02954, 2024. https://arxiv.org/abs/2401.02954
+- DeepSeek-AI. "DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence." arXiv:2401.14196, 2024. https://arxiv.org/abs/2401.14196
+- DeepSeek-AI. "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models." arXiv:2401.06066, 2024. https://arxiv.org/abs/2401.06066
+- DeepSeek-AI. "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models." arXiv:2402.03300, 2024. https://arxiv.org/abs/2402.03300
 - DeepSeek-AI. "DeepSeek-V3 Technical Report." arXiv:2412.19437, 2024. https://arxiv.org/abs/2412.19437
 - Google Research. "TurboQuant: Redefining AI efficiency with extreme compression." 2026. https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/
 - Kwon et al. "Efficient Memory Management for Large Language Model Serving with PagedAttention." arXiv:2309.06180, 2023. https://arxiv.org/abs/2309.06180
