@@ -12,7 +12,7 @@ Sinabro gives developers ownership over the memory of their work. Decisions, fai
 
 The central claim of this report is that a capable coding agent should not be judged only by model benchmarks or chat quality. It should be judged by the quality of the loop it operates: reading a codebase, reducing a task into atomic work units, implementing changes, running tests and static analysis, collecting proof, refusing unsafe actions, preserving user-owned memory, and turning verified work into training data. Sinabro is the agent layer for that loop. Naite is trained only from data that survives the loop.
 
-The current design targets Rust, Move, Sui, Walrus, local command execution, web research with citations, skill discovery, wallet/gas policy, and long-context coding workflows. The system is open-source by default, conservative by default, and opt-in for any learning artifact that leaves a user's machine.
+The current design targets Rust, Move, Sui, Walrus as the first primary memory backend, local command execution, web research with citations, skill discovery, wallet/gas policy, and long-context coding workflows. The system is open-source by default, conservative by default, and opt-in for any learning artifact that leaves a user's machine.
 
 This document is a design report, not a deployment claim. Implementation status is tracked separately through stage build states, gate results, and evidence bundles.
 
@@ -31,7 +31,7 @@ The public product names are Sinabro for the agent and Naite for the project cod
 The initial release track covers Stages A through H:
 
 - Stage A: core runtime, trace collection, Telegram and CLI foundations.
-- Stage B: memory ownership on testnet through signed chunks, Walrus, and Sui anchors.
+- Stage B: memory ownership on testnet through signed chunks, content digests, StorageBackend receipts, Walrus as the first primary backend, and Sui anchors.
 - Stage C: GA hardening, mainnet gates, gas policy, key isolation.
 - Stage D: skill runtime, open registry, provenance, install receipts, memory intelligence.
 - Stage E: dataset builder and training-rights firewall.
@@ -55,7 +55,9 @@ A green status must point to concrete evidence. Examples include command output,
 
 ### 3.3 User-owned memory
 
-Long-term memory is treated as a user-owned asset rather than a model artifact. Walrus provides blob storage, and Sui anchors memory roots and audit events. A model can be swapped, but the memory root remains.
+Long-term memory is treated as a user-owned asset rather than a model artifact or a vendor account. The root of trust is not Walrus by itself. It is the combination of user-signed chunks, content digests, Sui `memory_root` and `audit_log` records, deterministic replay, and a backend-neutral `StorageBackend` receipt. Walrus is the first Sui-native primary backend, but the memory architecture is designed so that local encrypted storage, mirrors, archives, exports, deletions, and future backends cannot replace the user's ownership proof.
+
+A model can be swapped, a provider can be replaced, and a storage backend can be mirrored or migrated. The memory root should remain portable and auditable across those changes.
 
 ### 3.4 No silent side effects
 
@@ -79,6 +81,7 @@ User
        - provider and model router
        - provider and tool adapter boundary
        - memory engine
+       - StorageBackend boundary
        - skill runtime
        - wallet and gas policy
        - evidence collector
@@ -89,7 +92,7 @@ User
   -> Substrates
        - cargo, clippy, miri, Kani
        - Sui CLI, Move tests, Move Prover
-       - Walrus
+       - Walrus as the first primary storage backend
        - web research and browser tools
   -> Evidence bundle
   -> Dataset builder
@@ -166,9 +169,11 @@ Only data that passes rights, redaction, and verification gates can become Naite
 
 ## 7. Memory and Replay
 
-Sinabro's memory design separates user continuity from model weights.
+Sinabro's memory design separates user continuity from model weights and from any single storage network.
 
-Messages, tool results, skill artifacts, and system memories are encoded as typed chunks. The chunks can be stored through Walrus, verified by local digest and blob-id checks, and anchored through Sui `memory_root` and `audit_log` objects. Replay is accepted only if the reconstructed transcript hash matches the expected evidence.
+Messages, tool results, skill artifacts, and system memories are encoded as typed chunks. Each chunk carries a user signature and a content digest before it becomes retrieval or training material. A `StorageBackend` receipt records where the bytes live and what role the backend plays: local encrypted storage, Walrus primary storage, a future mirror, or a future archive. The receipt is evidence, not the source of truth.
+
+Walrus is the first primary backend because it fits the Sui-native path, supports blob-oriented storage, and can be verified through local digest and blob-id checks. Sui anchors the ownership layer through `memory_root` and `audit_log` objects. Replay is accepted only if the reconstructed transcript hash matches the expected evidence; a backend URL, blob id, CID, deal id, or provider response cannot silently change the memory truth.
 
 This structure has three goals:
 
@@ -176,7 +181,7 @@ This structure has three goals:
 2. Make memory ownership auditable.
 3. Prevent unverified bytes from entering retrieval or training paths.
 
-The memory engine later adds importance scoring, compaction, deletion semantics, export/import, and deterministic replay. These operations are visible through CLI commands and evidence records.
+The memory engine later adds importance scoring, compaction, deletion semantics, export/import, and deterministic replay. These operations are visible through CLI commands and evidence records, including commands for listing, exporting, deleting, anchoring, replaying, and inspecting memory roots. The practical goal is simple: a developer should be able to keep their working memory even when they change models, providers, machines, or storage backends.
 
 ## 8. Skills
 
@@ -254,7 +259,7 @@ Promotion is not based on loss alone. A candidate must preserve or improve resul
 - Kani checks.
 - Move tests and Move Prover repair.
 - Gas and byte-size behavior.
-- Walrus integrity tasks.
+- StorageBackend and Walrus integrity tasks.
 - Korean technical instruction following.
 - Long-context retrieval and packing tests.
 - Held-out security and optimization tasks.
@@ -269,7 +274,7 @@ The evaluation plan combines model quality, agent behavior, and system safety.
 | --- | --- |
 | Rust | fmt, clippy, test, miri, fuzz, criterion, Kani |
 | Move and Sui | move test, Move Prover, BCS parity, gas trace, owner invariants |
-| Walrus | PUT/GET round trip, blob-id derivation, integrity verification |
+| StorageBackend and Walrus | backend-neutral replay hash, PUT/GET round trip, blob-id derivation, integrity verification |
 | Memory | replay determinism, transcript hashes, deletion and export semantics |
 | Skills | malicious fixtures, capability diffs, signed package checks, no-commerce scans |
 | Web | source metadata, retrieval hashes, rights checks, credential redaction |
@@ -296,13 +301,13 @@ Users may run Sinabro without producing training artifacts. They may also choose
 The staged roadmap leaves a working artifact at each step.
 
 - Stage A: core runtime, trace collection, Telegram and CLI foundations.
-- Stage B: signed chunks, Walrus testnet, Sui testnet anchors, replay proof.
+- Stage B: signed chunks, content digests, StorageBackend receipts, Walrus testnet, Sui testnet anchors, replay proof.
 - Stage C: GA hardening, gas trace harness, mainnet gate, key isolation.
 - Stage D: skill runtime, open registry, provenance, install receipts, memory intelligence.
 - Stage E: AtomDietRecord builder, redaction, rights checks, reward firewall, training unlock.
 - Stage F: CLI cockpit, provider/tool adapter, web/skill/memory/wallet/gas/train/eval controls.
 - Stage G: first Naite SFT pass and evaluation on A100.
-- Stage H: vLLM serving, local model router, no-silent-fallback proof, CLI/Telegram sync.
+- Stage H: vLLM serving, local model router, no-silent-fallback proof, CLI/Telegram sync, and measured KV-cache compression candidates such as TurboQuant-style serving optimization.
 - Stage I: read-only mainnet measurement for gas, cycle, and security telemetry.
 - Stage J: open-source readiness, SDKs, public docs, review queue.
 - Stage K: larger-model promotion only after controlled self-improvement is measured under gates.
@@ -313,7 +318,7 @@ Sinabro and Naite compound in ways a plain chat interface does not.
 
 The agent keeps state outside the model. Memory, skills, evidence, and approval records survive provider changes and model upgrades. The training system learns from complete work trajectories instead of isolated answers. The safety model is enforced by the runtime rather than by prompt text alone. The skill registry can grow through verified discovery and installation. External frontier models can still be used, but their outputs pass through the same trace, privacy, and approval boundaries.
 
-This makes the project broader than a Web3 assistant and more specific than a general chatbot. Its first deep specialization is Rust, Move, Sui, and Walrus, but the underlying loop is a general coding loop: plan, implement, test, prove, measure, review, record, and learn.
+This makes the project broader than a Web3 assistant and more specific than a general chatbot. Its first deep specialization is Rust, Move, Sui, and Walrus-backed user memory, but the underlying loop is a general coding loop: plan, implement, test, prove, measure, review, record, and learn.
 
 ## 16. Limitations
 
@@ -321,7 +326,7 @@ The design has clear limits.
 
 - The report describes a staged design, not a completed production deployment.
 - Naite is not assumed to outperform frontier models at launch.
-- Walrus/Sui memory ownership, Gas Station operation, vLLM serving, and mainnet measurement require evidence before public claims.
+- StorageBackend/Walrus/Sui memory ownership, Gas Station operation, vLLM serving, KV-cache compression, and mainnet measurement require evidence before public claims.
 - Self-improvement does not imply permission escalation. A better model does not get broader authority.
 - Public training contributions require opt-in consent, redaction, rights checks, and provenance.
 
@@ -337,3 +342,5 @@ If the project succeeds, its strength will not come from a single model release.
 - Nous Research. "Hermes 3." https://nousresearch.com/hermes3/
 - OpenAI. "GPT-4 Technical Report." arXiv:2303.08774, 2023; revised 2024. https://arxiv.org/abs/2303.08774
 - OpenAI. "GPT-4o System Card." 2024. https://openai.com/index/gpt-4o-system-card/
+- Google Research. "TurboQuant: Redefining AI efficiency with extreme compression." 2026. https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/
+- Amir Zandieh, Majid Daliri, Majid Hadian, Vahab Mirrokni. "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate." arXiv:2504.19874, 2025. https://arxiv.org/abs/2504.19874
