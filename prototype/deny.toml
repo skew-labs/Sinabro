@@ -1,0 +1,126 @@
+# MNEMOS · prototype/deny.toml — atom #46 K.0.1 CI (회귀 자동차단).
+#
+# Schema: cargo-deny v2 (≥ 0.14).
+# Canonical OUT: codifies §3 G-CI policy (MNEMOS_ATOM_PLAN.md line 240) +
+# §9.5 의존성 SHA-pin 보안자세 (line 1298).
+#
+# Pillars (each fail-closed by construction):
+#   (1) advisories — RustSec audit; yanked = deny; vulnerabilities = deny.
+#       Critical-severity advisory ≥ 1 ⇒ workflow FAIL via `cargo audit
+#       --deny warnings` in g-audit. cargo-deny `[advisories]` gives a
+#       second hop (vulnerability + unmaintained + notice).
+#   (2) licenses   — strict allow-list (permissive OSI only).
+#       GPL / LGPL / AGPL / SSPL / BUSL / EUPL fall outside the allow-list
+#       and are DENIED by absence. The workflow additionally runs a manifest
+#       grep cross-check in g-deny so the rejection is auditor-visible even
+#       when cargo-deny output is truncated.
+#   (3) bans       — heavy-error libs forbidden in lib crates (atom #2
+#       source-redaction spine reuse: anyhow / eyre / color_eyre / miette).
+#       Wildcard versions denied (§9.5 SHA-pin discipline).
+#   (4) sources    — crates.io only; unknown-git denied (외부 fork 차단).
+#
+# atom #194 · C.0.23 (C-WP-03A) — mainnet dependency freeze (ADDITIVE NOTE ONLY).
+#   This file's rules are UNCHANGED by atom #194 (evidence-first posture). The
+#   Stage C GA / mainnet-gate "dependency freeze" is the Cargo.lock SHA-pin: the
+#   exact dependency set audited by `cargo deny check` + `cargo audit` is the
+#   set that ships. The lockfile sha256 and the full cargo-deny / cargo-audit
+#   run output are recorded in `ops/evidence/stage_c/dependency_audit.md`. No
+#   advisory mute, no license carve-out, and no new git source may land except
+#   via an audited PR — the four pillars above stay fail-closed by construction.
+
+# atom #194 · C-WP-03A — shipping-graph scope (user-ratified, Session-2 owner override).
+#   GA / mainnet gate audits WHAT SHIPS. The default-feature `--workspace` build is
+#   the shipped binary (agent/cli); `rsa v0.8` count in that graph = 0 (verified).
+#   `all-features = true` previously pulled the OPTIONAL `net-testnet` path
+#   (walrus-core git → fastcrypto → rsa 0.8.2), which the shipping binary never links,
+#   making advisories+sources fail on a non-shipping path. Scoping to default features
+#   audits the real shipping set; external crates.io wildcard/SHA-pin discipline (§9.5)
+#   stays fully enforced (see [bans]). The net-testnet optional-path advisory is NOT
+#   muted into silence — it is carried, auditor-visible, in `audit.toml` (cargo audit
+#   reads the full lockfile) and in ops/evidence/stage_c/dependency_audit.md.
+[graph]
+all-features = false
+no-default-features = false
+exclude = []
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# [advisories]
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+# Empty ignore list — every advisory must be addressed, not muted.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# [licenses]
+# Strict permissive allow-list. Any license not in this list is denied by
+# absence (= the §3 G-CI "GPL/AGPL 신규 reject" guarantee).
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "0BSD",
+  # CDLA-Permissive-2.0 is a permissive data-license used by `webpki-roots`
+  # to ship the embedded trust-root bundle. It is functionally equivalent
+  # to MIT / BSD for the purpose of redistribution; included here so the
+  # transitive dep pulled by `reqwest` (atom #12 net-testnet feature) does
+  # not fail the §3 G-CI license gate.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+# `exceptions` is the cargo-deny v2 mechanism for crates whose license
+# expression is licit only as a per-crate carve-out. Empty by default;
+# any future exception MUST land via an audited PR.
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# [bans]
+# Codifies G-GREP-PANIC heavy-error-lib bans + wildcard version bans.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace-internal `path = "../X"` deps don't carry an explicit version
+# string by design (Cargo treats them as path-overridden). cargo-deny v2
+# offers `allow-wildcard-paths` as the canonical carve-out so the §9.5
+# SHA-pin discipline still applies to *external* crates.io deps while the
+# 14 workspace members + 2 bins keep their existing `path = "../X"` form.
+allow-wildcard-paths = true
+highlight = "all"
+# Heavy-error libraries — forbidden in lib crates (CLAUDE.md §5 + atom #2
+# source-redaction spine). Use `thiserror::Error` + the `MnemosError`
+# carrier in `crates/a-core/src/error.rs` instead.
+deny = [
+  { name = "anyhow",     reason = "MnemosError carrier discipline (a-core)" },
+  { name = "eyre",       reason = "MnemosError carrier discipline (a-core)" },
+  { name = "color-eyre", reason = "MnemosError carrier discipline (a-core)" },
+  { name = "miette",     reason = "MnemosError carrier discipline (a-core)" },
+]
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# [sources]
+# crates.io only. Unknown git registries are denied (외부 fork 차단).
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

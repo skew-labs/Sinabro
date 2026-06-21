@@ -1,0 +1,219 @@
+# MNEMOS · .github/workflows/release.yml — sinabro RELEASE pipeline (DRAFT; Mac+Windows 2026-06-18).
+#
+# Distribution (owner-locked): sinabro ships for macOS AND Windows (Linux CLI kept as a
+# free bonus), in two forms each, all built + checksummed on a `v*` tag and attached to one
+# GitHub Release:
+#   • CLI  — a prebuilt, checksum-verified binary on PATH:
+#       macOS / Linux:  curl -fsSL https://<release-host>/install.sh  | bash
+#       Windows:        irm        https://<release-host>/install.ps1 | iex
+#   • Desktop — the Tauri GUI app:  macOS `.dmg`  /  Windows `.msi` (+ NSIS `.exe`).
+# The CLI matrix matches the installers' `uname` / `$PROCESSOR_ARCHITECTURE` → target maps.
+#
+# ── GO-LIVE GATES (this is a DRAFT; the owner wires these at go-live — RELEASE_CHECKLIST.md) ──
+#   1. code signing — runs ONLY when the platform secret exists; ABSENT ⇒ UNSIGNED draft build
+#      (quarantined on download). macOS: `APPLE_SIGNING_IDENTITY` (Developer-ID + notarytool).
+#      Windows: `WINDOWS_CERT_BASE64` (Authenticode signtool). Both are paid go-live adds.
+#   2. supply-chain integrity: every artifact ships a `.sha256`; a detached signature
+#      (minisign/cosign) over the checksum is the go-live add (pubkey pinned in the installers).
+#   3. SHA-pin: like ci.yml, every external `uses:` is semver here; the `ci.yml` sha-pin-guard
+#      FAILS until each is pinned to a 40-hex commit SHA (do that in the go-live PR).
+#   4. release host: the installers' `SINABRO_BASE_URL` points at the GitHub Release (or a host)
+#      and `RELEASE_READY=true` is flipped — both owner go-live steps.
+#
+# Fail-closed by construction: `permissions: contents: read` default; only the `publish` job
+# elevates to `contents: write` (to create the Release) and ONLY on a `v*` tag; no
+# `pull_request_target`; no `continue-on-error`; no auto-merge. funds/wallet/chain-write are
+# never touched by a build (PD-6). The desktop CodeMirror bundle is VENDORED
+# (`apps/desktop/ui/vendor/codemirror.bundle.js`), so no `node_modules` is fetched to build.
+
+name: sinabro-release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── CLI: cross-platform binary matrix (the curl|bash / irm|iex artifacts) ──
+  build-cli:
+    name: build-cli (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bin_ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-13
+            bin_ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_ext: ".exe"
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            bin_ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            bin_ext: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: prototype
+    steps:
+      - uses: actions/checkout@v4
+      - name: rust toolchain + target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+      - name: linux cross-linker (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> .cargo/config.toml
+      - name: build release binary
+        run: cargo build --release --locked --offline -p sinabro --target ${{ matrix.target }} || cargo build --release -p sinabro --target ${{ matrix.target }}
+      - name: checksum
+        run: |
+          bin="target/${{ matrix.target }}/release/sinabro${{ matrix.bin_ext }}"
+          out="sinabro-${{ matrix.target }}${{ matrix.bin_ext }}"
+          cp "$bin" "$out"
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$out" > "$out.sha256"; else shasum -a 256 "$out" > "$out.sha256"; fi
+      # GO-LIVE: macOS Developer-ID sign — runs ONLY when the Apple signing secret exists.
+      - name: codesign (macOS, go-live)
+        if: ${{ contains(matrix.target, 'apple-darwin') && secrets.APPLE_SIGNING_IDENTITY != '' }}
+        run: |
+          echo "go-live: codesign + notarize sinabro-${{ matrix.target }} with the Developer-ID identity"
+          # codesign --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp "sinabro-${{ matrix.target }}"
+          # xcrun notarytool submit ... --wait ; xcrun stapler staple ...
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      # GO-LIVE: Windows Authenticode sign — runs ONLY when the Windows signing cert secret exists.
+      - name: signtool (Windows, go-live)
+        if: ${{ contains(matrix.target, 'windows') && secrets.WINDOWS_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "go-live: Authenticode-sign sinabro-${{ matrix.target }}.exe with the code-signing cert"
+          # $cert = [IO.Path]::Combine($env:RUNNER_TEMP, 'cert.pfx')
+          # [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          # signtool sign /f $cert /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "sinabro-${{ matrix.target }}.exe"
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      - name: upload cli artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: |
+            prototype/sinabro-${{ matrix.target }}${{ matrix.bin_ext }}
+            prototype/sinabro-${{ matrix.target }}${{ matrix.bin_ext }}.sha256
+          if-no-files-found: error
+
+  # ── DESKTOP (macOS): the Tauri .dmg ──
+  build-desktop-macos:
+    name: build-desktop (macos .dmg)
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: node (tauri cli)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: build tauri bundle
+        working-directory: apps/desktop
+        run: |
+          npm install -g @tauri-apps/cli@2 || true
+          # the CodeMirror bundle is VENDORED (ui/vendor/codemirror.bundle.js) — no npm install needed
+          (cd src-tauri && cargo tauri build) || (cd src-tauri && cargo build --release)
+      - name: checksum bundle
+        working-directory: apps/desktop
+        run: |
+          find src-tauri/target/release/bundle -name '*.dmg' -o -name '*.app' 2>/dev/null | while read -r f; do
+            shasum -a 256 "$f" > "$f.sha256" || true
+          done
+          echo "go-live: codesign + notarize the .dmg with the Developer-ID identity (APPLE_* secrets)"
+      - name: upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/**/*.dmg
+            apps/desktop/src-tauri/target/release/bundle/**/*.dmg.sha256
+          if-no-files-found: warn
+
+  # ── DESKTOP (Windows): the Tauri .msi (+ NSIS .exe) ──
+  build-desktop-windows:
+    name: build-desktop (windows .msi)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: node (tauri cli)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: build tauri bundle
+        working-directory: apps/desktop
+        run: |
+          npm install -g @tauri-apps/cli@2 || true
+          # the CodeMirror bundle is VENDORED (ui/vendor/codemirror.bundle.js) — no npm install needed
+          (cd src-tauri && cargo tauri build) || (cd src-tauri && cargo build --release)
+      - name: checksum bundle
+        working-directory: apps/desktop
+        run: |
+          find src-tauri/target/release/bundle \( -name '*.msi' -o -name '*-setup.exe' \) 2>/dev/null | while read -r f; do
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+          echo "go-live: Authenticode-sign the .msi / setup.exe with the Windows code-signing cert (WINDOWS_CERT_* secrets)"
+      - name: upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/**/*.msi
+            apps/desktop/src-tauri/target/release/bundle/**/*-setup.exe
+            apps/desktop/src-tauri/target/release/bundle/**/*.sha256
+          if-no-files-found: warn
+
+  # ── PUBLISH: create the GitHub Release with the verified artifacts (tag-only) ──
+  publish:
+    name: publish release
+    needs: [build-cli, build-desktop-macos, build-desktop-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # ONLY this job, ONLY on a v* tag — to create the Release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: stage artifacts
+        run: |
+          mkdir -p out
+          find dist -type f \( -name 'sinabro-*' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.sha256' \) -exec cp {} out/ \;
+          ls -la out
+      - name: create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          draft: true # go-live: the owner reviews + flips to a published release + sets installer BASE_URL/RELEASE_READY
+          fail_on_unmatched_files: true

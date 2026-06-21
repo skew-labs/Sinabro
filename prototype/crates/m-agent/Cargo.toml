@@ -1,0 +1,42 @@
+[package]
+name = "mnemos-m-agent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[dependencies]
+# atom #26 · M.0.6: a-core supplies the canonical refusal channel
+# (`MnemosError::budget_exceeded(BudgetAxis::LlmTokens, ...)`) that
+# `DailyTokenBudget::try_charge` returns on a cap-overflow charge.
+# First cross-crate dep on the m-agent crate; atom #21..#25 kept
+# m-agent at zero workspace deps.
+mnemos-a-core = { path = "../a-core" }
+
+[dev-dependencies]
+# atom #22 · M.0.2: proptest powers the "임의 청크분할에서 동일 델타열"
+# invariant (ATOM_PLAN line 1021). criterion drives the AI-HOT bench in
+# `benches/sse.rs` (G-BENCH ±5%, alloc+0). Both are dev-only — release
+# library link graph is unchanged.
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+# atom #22 · M.0.2: SSE delta parser throughput + alloc counters.
+# `harness = false` disables libtest so the bench file owns `fn main`
+# (criterion + global allocator counters pattern, mirrors atom #13's
+# c-walrus `benches/codec.rs`).
+name = "sse"
+harness = false
+
+[[bench]]
+# atom #28 · M.0.8: per-call input-token envelope vs Hermes 32,142
+# baseline. Same `harness = false` pattern as `benches/sse.rs` — the
+# file owns `fn main`, dispatching between a criterion measurement
+# run (envelope computation throughput) and the
+# `MNEMOS_BENCH_EMIT_BASELINE=1` JSON-commit emitter that writes the
+# CI regression baseline. Reuses the `src/token_bench` fixture so
+# `cargo test` and `cargo bench` gate on the same envelope.
+name = "tokens"
+harness = false

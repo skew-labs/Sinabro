@@ -1,0 +1,28 @@
+# atom #276 · D.2.0 — MNEMOS skill-registry Move package (D-WP-03A).
+#
+# ISOLATED from the memory-root `mnemos` package (prototype/move/) but mirrors
+# its OFFLINE build discipline: the Sui framework is pinned to the SAME vendored
+# revision (73dd2c2…) already resolved under ~/.move so `sui move test` runs with
+# zero network egress (Phase 0 ban + macOS offline preference).
+#
+# No buy/sell/payment/checkout/revenue/royalty address, module, or state is
+# defined in this package (active Stage D no-commerce law). Mainnet stays locked:
+# `published-at` and a non-0x0 address are written by an operator only AFTER an
+# explicit, separately-approved testnet publish ceremony — atom #276 does NOT
+# perform any live publish and does NOT autonomously edit these values.
+[package]
+name = "mnemos_skill_registry"
+edition = "2024.beta"
+# published-at = "0x..."  # operator-set after approved publish; NOT this atom.
+
+[addresses]
+# `0x0` is the Sui Move pre-publish placeholder; the operator replaces it with the
+# assigned package_id after an approved publish. atom #276 keeps `0x0`.
+mnemos_skill_registry = "0x0"
+
+[dependencies]
+# Same MystenLabs Sui rev as prototype/move/Move.toml (atom #15 vendored it under
+# ~/.move so resolution is deterministic + offline). NOT bumped this atom.
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "73dd2c2ba6f9fdb21d7ffde2b50a3f2f0ac39bc1" }
+
+[dev-dependencies]

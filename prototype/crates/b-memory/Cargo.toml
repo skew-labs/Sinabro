@@ -1,0 +1,128 @@
+[package]
+name = "mnemos-b-memory"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[features]
+# atom #102 · B.2.1: the Stage B Walrus testnet HTTP client
+# (`stage_b_http::StageBReqwestWalrusClient`) is gated behind this feature. The
+# default build pulls 0 network types and 0 transitive HTTP/TLS deps. `b-memory`
+# declares **no direct `reqwest` dependency** — this feature simply forwards to
+# `mnemos-c-walrus/net-testnet`, so the raw `reqwest::blocking` transport lives in
+# the lowest crate (`c-walrus`, atom #12 · C.0.6) and only the testnet-only
+# orchestration wrapper lives here. This preserves the one-way crate edge
+# `b-memory -> c-walrus` (no cycle) per the #101 Cluster-2-home decision.
+net-testnet = ["mnemos-c-walrus/net-testnet"]
+
+[dependencies]
+# atom #29 · B.0.1: chunk model reuses `c-walrus` codec types verbatim
+# (no `b-memory`-specific wire). The dependency is path-only (workspace
+# member) so no network / no transitive HTTP/TLS deps are pulled in.
+mnemos-c-walrus = { path = "../c-walrus" }
+# atom #84 · B.1.3: the fixed chunk header's `owner` field reuses Stage A's
+# canonical `SuiAddress` (d-move §4.D) verbatim rather than minting a second
+# 32-byte address newtype. Path-only workspace dependency — d-move itself
+# depends only on c-walrus, so no cycle and no network / HTTP / TLS surface
+# is introduced (d-move is a pure type/projection crate this phase).
+mnemos-d-move = { path = "../d-move" }
+# atom #171 · C.0.0 (C-WP-01): the atom #81 `StageBTraceLink` *definition* was
+# relocated to the dependency root `a-core` (`mnemos_a_core::trace`) so the low
+# crates `d-move` (gas trace, #178) and `k-devex` (evidence ref, #177) can
+# compose the Stage C trace without a cyclic dep on `b-memory`. `b-memory`
+# re-exports it verbatim from `stage_b_handoff`, so this new edge
+# `b-memory -> a-core` is one-way and acyclic (a-core depends on no workspace
+# member). Path-only: pure types, no network / HTTP / TLS.
+mnemos-a-core = { path = "../a-core" }
+# atom #89 · B.1.8: the Stage B chunk-signature verify (`verify_stage_b_chunk`)
+# checks a real ed25519 signature over the domain-separated digest preimage with
+# `VerifyingKey::verify_strict`. The same `ed25519-dalek` (v2, default-features
+# off, `std`) that `mnemos-g-wallet` signs with since atom #34 — reused, not a new
+# external surface — so the 64-byte `SignatureBytes` type and the curve agree
+# byte-for-byte across the sign (g-wallet) and verify (b-memory) domains. Pure
+# crypto, no network / HTTP / TLS.
+ed25519-dalek = { workspace = true }
+# atom #159 · B.4.13: the Seal-stub integration on the signed-chunk constructor
+# reuses the §4.4 `StageBSealStubPolicy` / `StageBSealStubEnvelope` /
+# `StageBSealStubError` whose home is `mnemos-f-seal` (atoms #156/#158). The
+# edge `b-memory -> f-seal` is one-way: `f-seal` depends only on `d-move` and
+# `c-walrus`, never on `b-memory`, so no cycle is created. Path-only workspace
+# dep: pure types, no network / HTTP / TLS.
+mnemos-f-seal = { path = "../f-seal" }
+
+[dev-dependencies]
+# atom #30 · B.0.2: criterion drives the AI-HOT bench in
+# `benches/store.rs` (G-BENCH-SMOKE alloc+0 claim on `append`/`get`).
+# Dev-only — release library link graph is unchanged.
+criterion = { workspace = true }
+# atom #32 · B.0.4: proptest powers the deterministic-recovery
+# property over arbitrary anchor sequences (G-PROPTEST). Dev-only —
+# the production replay surface has zero proptest dependency.
+proptest = { workspace = true }
+
+[[bench]]
+# atom #30 · B.0.2: in-mem store `append`/`get`/`recent` throughput +
+# alloc counters. `harness = false` disables libtest so the bench file
+# owns `fn main`, dispatching between a criterion measurement run and
+# the `MNEMOS_BENCH_EMIT_BASELINE=1` JSON-commit emitter (atom #13 /
+# atom #22 / atom #28 pattern). Smoke gate `cargo bench --bench store
+# --no-run --offline --locked` must exit 0 (G-BENCH-SMOKE).
+name = "store"
+harness = false
+
+[[bench]]
+# atom #85 · B.1.4: Stage B chunk-schema AI-HOT paths — `StageBChunkView::new`
+# (borrowed view + content cap, `alloc/op = 0`) and `StageBChunkHeaderV1::to_bytes`
+# (the atom #84 content-free 85-byte encode `alloc = 0` throughput, deferred from
+# #84 and folded into #85's G-B-BENCH). Same dual-mode shape as `benches/store.rs`:
+# criterion sweep + `MNEMOS_BENCH_EMIT_BASELINE=1` JSON emitter. Smoke gate
+# `cargo bench --bench chunk_schema --no-run --offline --locked` must exit 0.
+name = "chunk_schema"
+harness = false
+
+[[bench]]
+# atom #86 · B.1.5: Stage B chunk-digest throughput — `ContentHash32::of`
+# (body-only ARX hash; cost scales with body size) and `stage_b_chunk_digest`
+# (cap re-check + content hash + header/content bind; alloc-free). Same dual-mode
+# shape as `benches/chunk_schema.rs`: criterion sweep + `MNEMOS_BENCH_EMIT_BASELINE=1`
+# JSON emitter. Smoke gate `cargo bench --bench chunk_digest --no-run --offline
+# --locked` must exit 0 (G-B-BENCH).
+name = "chunk_digest"
+harness = false
+
+[[bench]]
+# atom #91 · B.1.10: Stage B canonical encode throughput — `encode_stage_b_chunk`
+# (the thin wrapper over Stage A `encode_chunk_v1`). Cost scales with body size
+# (the body is copied into the output `Vec`); the criterion is "alloc stable" — a
+# constant bounded allocation per call (the single output buffer), not zero, since
+# encode necessarily allocates the wire bytes. Same dual-mode shape as
+# `benches/chunk_digest.rs`: criterion sweep + `MNEMOS_BENCH_EMIT_BASELINE=1` JSON
+# emitter. Smoke gate `cargo bench --bench chunk_codec --no-run --offline --locked`
+# must exit 0 (G-B-BENCH).
+name = "chunk_codec"
+harness = false
+
+[[bench]]
+# atom #107 · B.2.6: Stage B local blob-id derive throughput — `derive_walrus_blob_id`
+# (the thin wrapper over Stage A `derive_blob_id`). The hot work is the zero-copy ARX
+# walk over the encoded chunk bytes; cost scales with body size and the criterion is
+# "alloc/op = 0" (the only output is the 32-byte `BlobId` on the caller stack — no
+# heap entry). Same dual-mode shape as `benches/chunk_codec.rs`: criterion sweep +
+# `MNEMOS_BENCH_EMIT_BASELINE=1` JSON emitter. Smoke gate
+# `cargo bench --bench stage_b_blob_id --no-run --offline --locked` must exit 0
+# (G-B-BENCH).
+name = "stage_b_blob_id"
+harness = false
+
+[[bench]]
+# atom #166 · B.5.3: Stage B replay transcript-hash throughput —
+# `stage_b_transcript_hash` (domain-separated ARX content hash over a finished
+# replay transcript buffer). Cost scales with transcript byte length (records ×
+# 106 B). Same dual-mode shape as `benches/stage_b_blob_id.rs`: criterion sweep +
+# `MNEMOS_BENCH_EMIT_BASELINE=1` JSON emitter. Smoke gate
+# `cargo bench --bench stage_b_replay_transcript --no-run --offline --locked` must
+# exit 0 (G-B-BENCH).
+name = "stage_b_replay_transcript"
+harness = false

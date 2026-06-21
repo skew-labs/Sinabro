@@ -1,0 +1,5 @@
+# Pinned toolchain for the MNEMOS Phase 0 workspace (atom #1 · A.0.1).
+# edition = "2024" requires rustc >= 1.85; this machine builds on 1.94.1.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,20 @@
+[package]
+name = "mnemos-d-move"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #15 · D.0.1 — Rust bindings for the Sui Move `mnemos::memory_root`
+# module. The only dependency added by this atom is `mnemos-c-walrus`
+# (atom #7 · C.0.1), which supplies the canonical-IN reuse surface
+# `BlobId` / `BLOB_ID_BYTES` / `MoveAnchorArgsV1` / `ChunkKind`. No new
+# workspace-level dependency, no new transitive crates in `Cargo.lock`.
+[dependencies]
+mnemos-c-walrus = { path = "../c-walrus" }
+# atom #178 · C.0.7 (C-WP-01): the Stage C gas trace sample stamps a
+# `StageCTraceLink` whose definition home is the dependency root `a-core`
+# (`mnemos_a_core::trace`). This edge `d-move -> a-core` is one-way and acyclic
+# (a-core depends on no workspace member). Path-only: pure types, no network.
+mnemos-a-core = { path = "../a-core" }

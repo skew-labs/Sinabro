@@ -1,0 +1,26 @@
+[package]
+name = "mnemos-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #45 · J.0.5 — repl.rs (Hermes-style local REPL). Adds two
+# path-dep edges:
+#
+# - `mnemos-j-ux` (atom #41..#44 surface): the REPL re-uses the atom #43
+#   `parse_slash` / `SlashCommand` grammar to route `/clear`, `/kill`,
+#   `/budget`, `/skill <id>` before any history persistence; this is the
+#   first bin → j-ux edge per the BUILD_STATE atom #45 reuse note
+#   ("CliRepl wires mnemos-j-ux into the link graph").
+# - `mnemos-m-agent` (atom #21..#27 surface): the REPL's `drive_turn`
+#   helper threads a borrowed `LlmRequestView` through the
+#   [`LlmClient::stream_chat`] trait surface so an inline mock LLM can
+#   drive the turn engine in `j0_5_drives_turn_engine` (canonical OUT
+#   §4.J line 739 — the `/*, llm, store, ... */` placeholder).
+[dependencies]
+mnemos-a-core = { path = "../../crates/a-core" }
+mnemos-j-ux = { path = "../../crates/j-ux" }
+mnemos-m-agent = { path = "../../crates/m-agent" }
+tokio = { workspace = true }

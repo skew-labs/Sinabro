@@ -1,0 +1,26 @@
+[package]
+name = "mnemos-l-dataset"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[dependencies]
+# atom #332 · E.0.1 (E-WP-01): structured parsers over string heuristics (Stage
+# E implementation law). serde_json parses the A-D sidecar JSON/JSONL via
+# tolerant `Value` navigation (per-atom field variance: 8-vs-9 privacy checks,
+# optional fields, consciousness/verifier-section appends). sha2 computes the
+# `[u8; 32]` = sha256 content/path hashes the sidecar contract stores as 64-hex
+# (artifact_hashes.json `algo: "sha256"`). Both are [workspace.dependencies]-
+# declared and Cargo.lock-resident, so no new package enters the lock — only
+# this crate's dependency edges change. `serde` is pulled transitively by
+# serde_json (no direct edge: the model types are not serde-derived in E-WP-01).
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# atom #349 · E.0.18: property-test corpus (generated sidecars) lives in
+# tests/diet_properties.rs only; the production parser surface has zero proptest
+# dependency.
+proptest = { workspace = true }

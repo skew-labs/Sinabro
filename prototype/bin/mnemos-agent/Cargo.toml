@@ -1,0 +1,11 @@
+[package]
+name = "mnemos-agent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[dependencies]
+mnemos-a-core = { path = "../../crates/a-core" }
+tokio = { workspace = true }

@@ -1,0 +1,27 @@
+# C-WP-03A · atoms #192 / #198 — standalone cross-crate Stage C integration-test
+# host. `prototype/` is a pure virtual workspace (no root [package]), so the
+# atom-plan path `prototype/tests/*.rs` is never compiled by cargo; and no
+# existing crate dev-depends on the full a-core+b-memory+c-walrus+d-move+
+# g-wallet+k-devex reach that the redaction canary (#192) and GA E2E dry-run
+# (#198) need. This test-only crate is that home (user-ratified D1; atom-plan
+# canonical OUT verbatim; #182/#183 file-home-correction precedent). It ships an
+# empty lib and adds ZERO new production dependency edge — the six crates are
+# dev-dependencies, scoped to the integration tests only.
+[package]
+name = "mnemos-o-stage-c-e2e"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+mnemos-a-core = { path = "../a-core" }
+mnemos-b-memory = { path = "../b-memory" }
+mnemos-c-walrus = { path = "../c-walrus" }
+mnemos-d-move = { path = "../d-move" }
+mnemos-g-wallet = { path = "../g-wallet" }
+mnemos-k-devex = { path = "../k-devex" }

@@ -1,0 +1,65 @@
+[package]
+name = "mnemos-g-wallet"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #33 · G.0.1 — sealed keystore at rest. The only canonical-IN reuse
+# from a sibling domain is `SuiAddress` from `mnemos-d-move` (atom #15 ·
+# D.0.1) per ATOM_PLAN line 1152. Cryptographic primitives are pulled from
+# the workspace dependency table (declared at atom #33; centralised so
+# version drift across G.0.* atoms = 0).
+[dependencies]
+mnemos-d-move = { path = "../d-move" }
+# atom #34 · G.0.2: reuse `SignatureBytes([u8;64])` from c-walrus per
+# ATOM_PLAN line 1161 so the ed25519 signature type is byte-identical
+# across the C / G domain boundary (no parallel signature shape). 0 new
+# transitive crate is added — c-walrus default features pull no network
+# transport (reqwest gated behind `net-testnet` feature; c-walrus default
+# build = 0 transitive HTTP/TLS deps per atom #12 contract).
+mnemos-c-walrus = { path = "../c-walrus" }
+# atom #146 · B.4.0 (Stage B WorkPackage B-WP-03): reuse the canonical
+# `StageBNetwork` (atom #82, b-memory/src/network.rs) so the Stage B
+# testnet wallet config carries the one-variant, mainnet-unrepresentable
+# network type rather than minting a second copy. `b-memory` default
+# features pull 0 network / HTTP / TLS transitive deps (its `net-testnet`
+# feature is opt-in and is NOT enabled here), and the edge is acyclic:
+# `b-memory` does not depend on `g-wallet`. Also surfaces #88
+# (`SigningPublicKey` / `OwnerPublicKeyBinding`, address seam), #89
+# (`chunk_sign_preimage` / `verify_stage_b_chunk`, chunk-sign domain), and
+# #81 (`StageBTraceLink`, redacted trace) for the rest of the package.
+mnemos-b-memory = { path = "../b-memory" }
+zeroize = { workspace = true }
+aes-gcm-siv = { workspace = true }
+pbkdf2 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake2 = { workspace = true }
+getrandom = { workspace = true }
+# C-WP-05 (atoms #211–#218): the Stage C mainnet / Gas-Station surfaces reuse
+# the §4.0 `StageCTraceLink` and §4.1 `MainnetExecutionState` whose definition
+# home is the dependency root `a-core` (`mnemos_a_core::trace` /
+# `::stage_c_env`). The edge `g-wallet -> a-core` is one-way and acyclic
+# (a-core depends on no workspace member). Path-only: pure types, no network.
+mnemos-a-core = { path = "../a-core" }
+# C-WP-05 (atoms #211 / #213): the multisig roster + timelock policy parse a
+# small `[roster]` / `[timelock]` TOML document into the fixed-width canonical
+# struct, folding any parse error into a data-free variant. `serde`'s
+# `deny_unknown_fields` mirrors the a-core config parser posture (atom #5). No
+# network / runtime is pulled by these crates.
+toml = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Compile-time trait-absence assertions for `ScopedSecretKey` (§10.3
+# 광기: `Debug` / `Display` / `Clone` absent ⇒ log/copy paths fail to
+# compile). Dev-only; release builds drop this entirely.
+static_assertions = { workspace = true }
+# atom #160 · B.4.14: the wallet redteam matrix drives the testnet-only config
+# gate (`StageBTestnetWalletConfig::from_label`) with a `GasBudgetMist` value
+# (d-move §4.D typed unit, atom #15). Dev-only integration-test surface; d-move
+# is below g-wallet in the graph so no cycle. No live network, no signing.
+mnemos-d-move = { path = "../d-move" }

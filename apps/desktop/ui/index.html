@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP intentionally left to conf (csp:null) for the spike: IPC uses the ipc:// scheme
+         which a restrictive default-src would block. Local-only assets + escaped output.
+         Proper Tauri-aware CSP (connect-src ipc: + tauri:) is a hardening follow-up. -->
+    <title>sinabro</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- R2 = the 3-pane IDE shell (the GUI's new SPINE): top bar + [ AGENT |
+         CODE | FILES ] + status bar. Every pane is backed by the real core
+         (dispatch_line → dispatch::run, single truth source). CENTER/RIGHT are
+         HONEST placeholders this slice — the tree wires in R3, the viewer R4,
+         live diff + single approval R5, the HW/context/TPS status bar R6. NOT a
+         Cursor clone: the IA (persisted project-grouped sessions, the ⌘K
+         palette, receipt/verify cards) is ours. -->
+    <div class="app">
+      <!-- ───────────────────────── TOP BAR ───────────────────────── -->
+      <header class="topbar" data-tauri-drag-region>
+        <div class="topbar-left">
+          <div class="brand">
+            <span class="brand-mark">▌</span>
+            <span class="brand-name">sinabro</span>
+            <span class="brand-tag">1.0</span>
+          </div>
+          <button class="root-chip" data-action="open-root" title="Open a workspace folder">
+            <span class="root-ico">⌂</span>
+            <span class="root-label" id="root-label">Open folder…</span>
+          </button>
+        </div>
+        <div class="topbar-right">
+          <button id="model-picker" class="chip chip-model" data-action="model">
+            <span class="dot"></span>
+            <span id="model-label">local · executor</span>
+            <span class="chev">⌄</span>
+          </button>
+          <button class="iconbtn" data-action="disclosure" title="What sinabro can do — capabilities, limits &amp; privacy">?</button>
+          <button class="iconbtn" data-action="settings" title="Settings">⚙</button>
+          <button class="theme-toggle" data-action="theme" title="Toggle theme">◑</button>
+        </div>
+      </header>
+
+      <!-- ─────────────────────── 3-PANE BODY ──────────────────────── -->
+      <div class="body" id="body">
+        <!-- LEFT — AGENT (resident: conversation + composer + receipts = our identity) -->
+        <section class="pane pane-agent">
+          <header class="pane-head agent-head">
+            <button class="session-switcher" data-action="session-switcher" title="Switch session">
+              <span class="ss-ico">◴</span>
+              <span class="ss-title" id="conv-title">New session</span>
+              <span class="ss-chev">⌄</span>
+            </button>
+            <div class="agent-head-actions">
+              <button class="iconbtn sm" data-action="audit" title="Action audit — activity feed">▤</button>
+              <button class="iconbtn sm" data-action="walrus" title="Walrus memory — two-tier long-term memory (encrypted)">⛁</button>
+              <button class="iconbtn sm" data-action="flows" title="Agent flows — orchestrate (two-model) · evolve (autonomous R-E-W) · dynamic-LoRA routing">⚡</button>
+              <button class="iconbtn sm" data-action="mega" title="New capabilities — web3 read · settings-sync (Walrus) · semantic codebase · image (vision) · remote diagnostic (SSH)">✦</button>
+              <button class="iconbtn sm" data-action="rewind" title="Rewind the last applied edit + step the conversation back (⌘⇧Z) — the differentiator: undo a committed edit, not just text">↶</button>
+              <button class="iconbtn sm" data-action="rewind-history" title="Rewind history — pick an earlier committed edit to undo (multi-level; ⌘⇧Z still undoes the most recent)">☰</button>
+              <button class="iconbtn sm" data-action="notifications" title="Notifications — recent toasts (failures don't vanish; errors dwell longer)">🔔</button>
+              <button class="iconbtn sm" data-action="new-session" title="New session (⌘N)">✎</button>
+              <button class="iconbtn sm" data-action="palette" title="Command palette (⌘K)">⌗</button>
+            </div>
+          </header>
+
+          <!-- session switcher popover — OUR model: project-grouped persisted
+               sessions + filter + New. Neither a chat-app sidebar nor a Cursor
+               clone; it reuses the existing app.js session store (#projects). -->
+          <div class="ss-popover" id="ss-popover" hidden>
+            <input id="session-filter" class="session-filter" placeholder="Filter sessions…" autocomplete="off" spellcheck="false" />
+            <div class="ss-popover-scroll">
+              <div class="section-label">Projects</div>
+              <div id="projects"><!-- renderSidebar() renders project groups + sessions --></div>
+            </div>
+            <div class="ss-popover-foot">
+              <button class="suggest" data-action="new-session"><span class="sg-glyph">›</span>New session<span class="kbd">⌘N</span></button>
+            </div>
+          </div>
+
+          <div class="pane-body agent-body">
+            <div id="view"><!-- renderView(): empty-state OR conversation (composer + receipt cards) --></div>
+          </div>
+        </section>
+
+        <div class="splitter" data-split="agent" title="Drag to resize"></div>
+
+        <!-- CENTER — CODE (the file being coded, real-time; viewer R4 · live diff + single approval R5) -->
+        <section class="pane pane-code">
+          <header class="pane-head code-tabs" id="code-tabs">
+            <div class="tab-empty">No file open</div>
+          </header>
+          <div class="pane-body code-body" id="code-body">
+            <div class="editor-placeholder">
+              <div class="ph-mark">⌗</div>
+              <div class="ph-title">Your code, live</div>
+              <div class="ph-sub">Open a file from the tree and it renders here. Agent edits arrive as a diff you approve — never applied silently.</div>
+              <div class="ph-tag">read-only viewer &nbsp;·&nbsp; live diff + single approval</div>
+            </div>
+          </div>
+          <div class="term-dock" id="term-dock">
+            <button class="term-bar" data-action="term-toggle" title="Terminal (gated local exec)">
+              <span class="term-chev">⌃</span><span class="term-name">Terminal</span>
+              <span class="term-tag">local exec · gated</span>
+            </button>
+            <div class="term-body" id="term-body" hidden>
+              <div class="term-hint">Runs as the gated <b>tool run</b> ceremony — Admin · env-scrubbed · no shell · 10s. The preview + <b>Approve</b> appear in the agent pane; the result is a receipt card (no fake shell).</div>
+              <div class="term-inputrow">
+                <span class="term-prompt">$</span>
+                <input id="term-input" class="term-input" placeholder="a local command, e.g.  ls -la  ·  cargo test" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="splitter" data-split="files" title="Drag to resize"></div>
+
+        <!-- RIGHT — FILES (file tree / explorer; click→open feeds the editor in R3, outline later) -->
+        <section class="pane pane-files">
+          <header class="pane-head files-head">
+            <div class="files-modes">
+              <button class="fmode on" data-files-mode="tree" title="File tree">Files</button>
+              <button class="fmode" data-files-mode="outline" title="Outline of the open file">Outline</button>
+            </div>
+            <span class="files-root" id="files-root"></span>
+            <button class="iconbtn sm" data-action="refresh-tree" title="Re-index">↻</button>
+            <button class="iconbtn sm" data-action="open-root" title="Open a folder">+</button>
+          </header>
+          <div class="pane-body files-body" id="files-body">
+            <div class="tree-placeholder">
+              <div class="tph-title">No folder indexed</div>
+              <div class="tph-sub">Pick a folder — its tree renders here (bounded, denylist-pruned), and click-to-open feeds the editor.</div>
+              <button class="suggest" data-action="open-root"><span class="sg-glyph">›</span>Open folder…</button>
+              <div class="tph-tag">tree + click→open</div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ───────────────────────── STATUS BAR ───────────────────────── -->
+      <footer class="statusbar">
+        <div class="status-left">
+          <span class="lockchip" title="funds / wallet / mainnet are HARD-LOCKED in 1.0">funds LOCKED</span>
+          <button class="status-item status-btn" data-action="privacy" title="Privacy &amp; safety — what's local, what's gated, telemetry (opt-in)"><span class="led ok"></span>LOCAL-ONLY</button>
+        </div>
+        <div class="status-right">
+          <span class="status-item muted" id="status-model">local · executor</span>
+          <!-- R6 status meter — the local signature (research D-3/D-5): backed by
+               read_status_view (structured channel, not emit-parse). HW = real
+               core probe; budget = the real pre-dispatch token gate; tps = honest
+               "—" until a live consult measures throughput. No fake numbers. -->
+          <span class="status-item" id="st-hw" title="usable CPU cores (std::available_parallelism) — the always-on local signature. GPU / VRAM / RAM need a probe dependency (owner-gated).">
+            <span class="st-k">hw</span><span class="st-v" id="st-hw-v">—</span>
+          </span>
+          <span class="status-item" id="st-budget" title="session token budget — the pre-dispatch fail-closed gate (the same cap the `budget` command renders). Resets per process; cumulative live spend is metered inside a consult.">
+            <span class="st-k">budget</span><span class="st-v" id="st-budget-v">—</span>
+          </span>
+          <span class="status-item muted" id="st-tps" title="output tokens/sec — measured during a live consult. No throughput feed is wired yet, so this is an honest “—”, never a placeholder number.">
+            <span class="st-k">tps</span><span class="st-v" id="st-tps-v">—</span>
+          </span>
+        </div>
+      </footer>
+    </div>
+
+    <!-- floating command palette / search overlay (⌘K · /) -->
+    <div id="overlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <input id="overlay-input" class="overlay-input" placeholder="Search commands…  (e.g. provider, chain status)" />
+          <button class="overlay-close" data-action="overlay-close" title="Close (esc)">✕</button>
+        </div>
+        <div id="overlay-list" class="overlay-list"></div>
+        <div class="overlay-hint">↑↓ move · ↵ run · esc close</div>
+      </div>
+    </div>
+
+    <!-- settings / model panel (read-only; reuses the .overlay modal shell) -->
+    <div id="panel" class="overlay" hidden>
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <span id="panel-title" class="panel-title">Settings</span>
+          <button class="overlay-close" data-action="panel-close" title="Close (esc)">✕</button>
+        </div>
+        <div id="panel-body" class="panel-body"></div>
+        <div class="overlay-hint">read-only · esc close</div>
+      </div>
+    </div>
+
+    <!-- A④ KEYSTONE-2: the vendored CodeMirror-6 editor substrate (global `CM`).
+         fetch-once-then-vendor: a LOCAL committed bundle, NO runtime CDN/network —
+         the WKWebView loads only this local file. Built from apps/desktop/cm6-build/. -->
+    <script src="vendor/codemirror.bundle.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
