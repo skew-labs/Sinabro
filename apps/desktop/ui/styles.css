@@ -20,10 +20,20 @@
   --r-sm: 8px;
   --r-xs: 5px;
   --r-lg: 16px;        /* large sheets — overlay card · session popover */
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-  --ease-spring: cubic-bezier(0.34, 1.28, 0.5, 1); /* subtle iOS spring for entrances */
-  --t: 130ms;          /* speed is a design metric — fast, not snappy/janky */
-  --t-2: 220ms;        /* slower beat for card / sheet entrances */
+  /* motion — 144hz-aware: animate transform/opacity ONLY, via off-main-thread CSS
+     transitions (keeps hitting the display refresh even while tokens stream). ease-OUT
+     family (fast start → settle); precise/scientific tone ⇒ low overshoot. Token VALUES
+     only — every component references these by name, so the feel propagates drift-0. */
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);            /* default workhorse (premium decel) */
+  --ease-quart: cubic-bezier(0.25, 1, 0.5, 1);       /* panels / drawers                  */
+  --ease-quint: cubic-bezier(0.22, 1, 0.36, 1);      /* snappy — the Walrus-fan curve     */
+  --ease-emph-in: cubic-bezier(0.05, 0.7, 0.1, 1);   /* element ENTER                     */
+  --ease-emph-out: cubic-bezier(0.3, 0, 0.8, 0.15);  /* element EXIT                      */
+  --ease-spring: cubic-bezier(0.34, 1.12, 0.64, 1);  /* gentle settle (overshoot↓: precise, not toy) */
+  --t: 130ms;          /* micro / hover — fast, not janky */
+  --t-2: 220ms;        /* card / sheet entrance beat */
+  --t-micro: 110ms;    /* press / toggle */
+  --t-enter: 300ms;    /* element enter (asymmetric: exit ~⅔) */
   --w-agent: 340px;    /* AGENT pane (left) default width  */
   --w-files: 264px;    /* FILES pane (right) default width */
   --code-font: 12px;   /* code viewer font size — set by Settings → Editor (localStorage) */
@@ -212,7 +222,7 @@ input, textarea { font-family: inherit; }
 /* R6 status meter — faint key + emphasized mono/tabular value (numbers = mono, on-brand) */
 .status-item .st-k { color: var(--faint); }
 .status-item .st-v { color: var(--muted); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.mono { font-family: var(--font-mono); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums lining-nums; }
 .lbl { font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted); }
 
 /* ═════════════════════════════ SIDEBAR ═════════════════════════════════ */
@@ -220,6 +230,8 @@ input, textarea { font-family: inherit; }
 .sidebar-top { height: 52px; flex: none; display: flex; align-items: center; padding: 0 16px; }
 .brand { display: flex; align-items: center; gap: 9px; }
 .brand-mark { font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; color: var(--accent); }
+/* real logo mark — app-icon style (rounded), replaces the ▌ placeholder in the topbar brand */
+.brand-logo { width: 22px; height: 22px; border-radius: 6px; display: block; flex: none; box-shadow: 0 0 0 1px var(--border) inset; }
 .brand-name { font-size: 14px; font-weight: 650; letter-spacing: 0.2px; color: var(--text); }
 .brand-tag { font-size: 9.5px; font-weight: 600; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; letter-spacing: 0.3px; }
 
@@ -477,6 +489,27 @@ input, textarea { font-family: inherit; }
 .loading-bar { display: block; width: 36%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: ldSlide 1.25s var(--ease) infinite; }
 @keyframes ldSlide { from { transform: translateX(-115%); } to { transform: translateX(330%); } }
 .loading-bound { margin-top: 9px; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); letter-spacing: 0.2px; }
+/* G — 144hz-smooth streaming: each frame's NEW text fades in (compositor opacity only);
+   a caret pulses at the live edge. No per-token layout thrash, no auto-scroll yank (R11). */
+.sc { animation: scIn 260ms var(--ease) both; }
+@keyframes scIn { from { opacity: 0; } to { opacity: 1; } }
+.loading-feed::after { content: ""; display: inline-block; width: 6px; height: 1.02em; vertical-align: text-bottom; margin-left: 2px; border-radius: 1px; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: caretBlink 1.05s steps(1) infinite; }
+@keyframes caretBlink { 50% { opacity: 0; } }
+
+/* ═══════════════ H — code WORK AREA facelift (prompt composer already glass) ═══════════════
+   Glass chrome (tabs · viewer-meta · diff-head), a readable code surface (the grid canvas
+   stays only for the empty "Your code, live" hero), refined gutter + a glowing placeholder. */
+.code-tabs { background: rgba(14,17,22,0.32); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.tab.active { background: rgba(255,255,255,0.04); }
+.code-body { background: transparent; }
+.viewer, .cm6-host, .diff-body, .viewer-edit-area { background: var(--bg); }
+.cm6-host .cm-editor, .cm6-host .cm-gutters { background: var(--bg); }
+.viewer-gutter { background: rgba(255,255,255,0.014); border-right: 1px solid var(--border); }
+.viewer-meta, .diff-head { background: rgba(19,23,29,0.62); -webkit-backdrop-filter: blur(16px) saturate(180%); backdrop-filter: blur(16px) saturate(180%); }
+.editor-placeholder { gap: 13px; }
+.ph-mark { color: var(--accent); opacity: 0.92; filter: drop-shadow(0 0 16px rgba(141,162,255,0.35)); }
+.ph-mark .ic { width: 40px; height: 40px; }
+.ph-title { font-size: 16px; }
 
 /* ── R11: answer-first consult card — answer big + first, receipts folded ───── */
 .card-lede { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); margin-bottom: 9px; white-space: pre-wrap; word-break: break-word; }
@@ -489,6 +522,42 @@ input, textarea { font-family: inherit; }
 .receipts-details > summary::before { content: "▸ "; color: var(--faint); }
 .receipts-details[open] > summary::before { content: "▾ "; }
 .receipts-body { margin-top: 6px; }
+
+/* ═══════════════ P2 — Agent Activity Timeline ═══════════════════════════════
+   The loop's AUTONOMOUS tool trail, lifted out of the folded receipts into a
+   1st-class strip (acted · walrus-index → walrus-fetch …) so agency is VISIBLE.
+   Step pills fan in STAGGERED — GPU-composited transform+opacity only (the 144hz
+   path), reusing the Walrus "쫙" motion (walrusFanIn). Reduced-motion drops it. */
+.agent-trail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 11px; padding: 7px 9px 7px 11px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
+.trail-lead { font-size: 9px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--faint); margin-right: 2px; flex: none; }
+.trail-step { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 2px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-family: var(--font-mono); font-size: 10.5px; }
+.trail-step .trail-dot { width: 5px; height: 5px; border-radius: 999px; background: var(--accent); flex: none; }
+.trail-step .trail-detail { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trail-arrow { color: var(--faint); font-size: 10px; flex: none; }
+.trail-sum { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+.agent-trail.trail-fan .trail-step { opacity: 0; transform: translateY(6px) scale(0.985); animation: walrusFanIn 380ms var(--ease-quint) both; animation-delay: calc(var(--reveal-i, 0) * 46ms); }
+
+/* D — two-brain route ribbon: frontier (reasons) → local (executes), active brain lit */
+.route-ribbon { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
+.rr-node { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); font-size: 11px; }
+.rr-node .ic { width: 13px; height: 13px; }
+.rr-node.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; box-shadow: 0 0 12px rgba(141,162,255,0.22); }
+.rr-arrow { color: var(--faint); font-size: 11px; }
+.rr-model { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* E — reasoning trace: the activity strip is a <summary> that expands to the step-by-step */
+.agent-trace { margin-bottom: 11px; }
+.agent-trace > summary.agent-trail { margin-bottom: 0; cursor: pointer; list-style: none; }
+.agent-trace > summary::-webkit-details-marker { display: none; }
+.trace-chev { margin-left: 6px; color: var(--faint); display: inline-flex; flex: none; transition: transform var(--t) var(--ease); }
+.trace-chev .ic { width: 13px; height: 13px; }
+.agent-trace[open] .trace-chev { transform: rotate(180deg); }
+.trace-steps { margin: 8px 0 2px; padding: 4px 4px 4px 12px; border-left: 2px solid var(--accent-soft); display: flex; flex-direction: column; gap: 8px; }
+.trace-step { display: flex; align-items: baseline; gap: 10px; font-size: 11.5px; color: var(--text-2); }
+.trace-step .trace-n { width: 15px; flex: none; color: var(--faint); font-size: 10px; text-align: center; }
+.trace-step .trace-arg { margin-left: auto; max-width: 52%; color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-step.done .trace-verb { color: var(--accent); font-weight: 600; }
+.trace-step.done .trace-n { color: var(--accent); }
 
 .reveal { opacity: 0; animation: rin 240ms var(--ease) forwards; }
 @keyframes rin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -705,3 +774,148 @@ input, textarea { font-family: inherit; }
 .disc-details > summary::before { content: "▸ "; color: var(--faint); }
 .disc-details[open] > summary::before { content: "▾ "; }
 .disc-details > summary:hover { color: var(--accent-2); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FACELIFT v2 (2026-06-22) — premium macOS-glass × math-instrument. A VISIBLE pass
+   layered as overrides (token + additive), structure untouched: a deeper graded +
+   GLOWING canvas over a faint coordinate dot-grid, translucent GLASS chrome,
+   accent glow, crisper depth, more confident type. transform/opacity-only motion +
+   reduced-motion stay honored. (Real desktop vibrancy = D1 native NSVisualEffectView.)
+   ════════════════════════════════════════════════════════════════════════════ */
+[data-theme="dark"] {
+  --bg: #06070a; --bg-2: #0a0c11;
+  --surface: #111419; --surface-2: #181c23; --surface-3: #20252e;
+  --border: rgba(255,255,255,0.07); --border-2: rgba(255,255,255,0.13);
+  --text: #f3f5f9; --text-2: #b4bbc7; --muted: #737b88; --faint: #515861;
+  --accent: #8da2ff; --accent-2: #6f7ef0; --accent-soft: rgba(141,162,255,0.16);
+  --select: rgba(141,162,255,0.28);
+}
+/* SIGNATURE canvas — soft top glow (brand cyan → indigo) over a faint coordinate
+   dot-grid (the "instrument" cue + depth). Painted on body so glass chrome blurs it. */
+body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(135% 92% at 50% -10%, rgba(116,186,255,0.13), transparent 55%),
+    radial-gradient(80% 60% at 100% -2%, rgba(141,162,255,0.08), transparent 50%),
+    linear-gradient(rgba(255,255,255,0.026) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.026) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 30px 30px, 30px 30px;
+  background-attachment: fixed;
+}
+/* GLASS chrome — translucent + blur (WKWebView: -webkit FIRST, LITERAL values;
+   saturate restores the chroma the blur washes out). */
+.topbar {
+  background: rgba(13,16,21,0.55);
+  -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%);
+}
+.statusbar {
+  background: rgba(9,11,15,0.55);
+  -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+}
+.pane-agent, .pane-files { background: rgba(10,12,16,0.40); }
+.pane-code { background: transparent; }
+.pane-head, .term-dock {
+  background: rgba(14,17,22,0.30);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+.ss-popover, .overlay-card, .ac, #panel .overlay-card {
+  background: rgba(19,23,29,0.84);
+  -webkit-backdrop-filter: blur(28px) saturate(180%); backdrop-filter: blur(28px) saturate(180%);
+}
+.overlay { background: rgba(0,0,0,0.46); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+/* DEPTH — subtle top-light on raised surfaces (premium elevation, not heavy shadow) */
+.card, .connector { background: linear-gradient(180deg, rgba(255,255,255,0.024), transparent 38%), var(--surface); }
+.composer-box { background: linear-gradient(180deg, rgba(255,255,255,0.028), transparent 34%), var(--surface); }
+.composer-box:focus-within { box-shadow: 0 0 0 3px var(--accent-soft), 0 8px 30px rgba(141,162,255,0.14); }
+/* ACCENT glow — premium, brand-tied */
+.sendbtn { box-shadow: 0 2px 14px rgba(141,162,255,0.34); }
+.sendbtn:hover { box-shadow: 0 4px 20px rgba(141,162,255,0.48); }
+.brand-logo { box-shadow: 0 0 0 1px var(--border) inset, 0 2px 10px rgba(116,186,255,0.28); }
+.splitter:hover::after, .splitter.dragging::after { box-shadow: 0 0 10px var(--accent); }
+/* CONFIDENT type — the boot prompt reads as a product hero, not a dev placeholder */
+.empty-title, .pane-agent .empty-title { font-size: 23px; font-weight: 680; letter-spacing: -0.45px; }
+.empty-mark, .pane-agent .empty-mark { font-size: 30px; }
+.empty-sub { font-size: 13px; }
+.brand-name { font-size: 14.5px; letter-spacing: 0.1px; }
+/* agent-trail picks up the glass treatment too */
+.agent-trail { background: rgba(255,255,255,0.025); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+
+/* hero-mode — first-run welcome: the agent pane goes full-window (a centered hero on the
+   glowing grid canvas); the code/files panes + splitters tuck away. The first turn (or
+   opening a file) reverts to the 3-pane IDE. */
+.body.hero-mode { grid-template-columns: 1fr; }
+.body.hero-mode .pane-code, .body.hero-mode .pane-files, .body.hero-mode .splitter { display: none; }
+.body.hero-mode .pane-agent { background: transparent; }
+.body.hero-mode .empty { padding: 28px 24px 48px; }
+.body.hero-mode .empty-inner { max-width: 640px; gap: 24px; }
+.body.hero-mode .empty-title { font-size: 31px; font-weight: 700; letter-spacing: -0.7px; }
+.body.hero-mode .empty-sub { font-size: 13.5px; max-width: 520px; line-height: 1.55; }
+.body.hero-mode .empty-sub b { color: var(--text-2); font-weight: 600; }
+/* glowing brand logo on the welcome hero — mix-blend drops the dark plate so the cyan
+   vortex floats + glows on the canvas */
+.empty-logo { width: 76px; height: 76px; border-radius: 19px; display: block; mix-blend-mode: screen; filter: drop-shadow(0 0 28px rgba(116,186,255,0.5)); }
+
+/* icon system — stroke SVGs sized by 1em so each scales with its button's font-size */
+.ic { width: 1em; height: 1em; display: inline-block; vertical-align: -0.14em; flex: none; }
+[data-icon] { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+.sendbtn .ic { stroke-width: 2; }
+.suggest .sg-glyph .ic { width: 0.9em; height: 0.9em; }
+
+/* minimal landing — logo-forward, near-zero text (owner: "걍 로고만") */
+.body.hero-mode .empty-logo { width: 92px; height: 92px; border-radius: 23px; }
+.empty-wordmark { font-size: 17px; font-weight: 650; letter-spacing: 0.2px; color: var(--text-2); }
+.body.hero-mode .empty-head { gap: 14px; margin-bottom: 6px; }
+/* connector chips carry the real brand mark (logo fills the chip; no accent plate) */
+.connector-ico.has-logo { background: none; padding: 0; width: 26px; height: 26px; }
+.connector-ico.has-logo svg { width: 26px; height: 26px; display: block; }
+
+/* ═══════════════ FACELIFT C — settings as a VISUAL control panel ═══════════════
+   Toggle switches · segmented controls · one-touch action buttons · logo cards ·
+   status pills. Replaces the text-dump rows. Same design language (glass · indigo). */
+.settings-center { background: rgba(19,23,29,0.5); -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%); }
+.settings-rail-item { gap: 10px; padding: 8px 11px; border-radius: 9px; }
+.settings-rail-item .sri-glyph { width: 16px; height: 16px; display: inline-flex; align-items: center; }
+.settings-rail-item .sri-glyph .ic { width: 16px; height: 16px; }
+.settings-content { padding: 18px 22px 28px; }
+.set-title { font-size: 19px; font-weight: 700; letter-spacing: -0.3px; color: var(--text); }
+.set-lede { font-size: 12px; color: var(--muted); margin: 3px 0 16px; }
+.set-group { font-size: 10.5px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--faint); margin: 18px 2px 8px; }
+.set-card { background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 40%), var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow-sm); }
+.set-card + .set-card { margin-top: 10px; }
+.set-row { display: flex; align-items: center; gap: 13px; padding: 13px 15px; border-bottom: 1px solid var(--border); }
+.set-row:last-child { border-bottom: none; }
+.set-ico { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+.set-ico .ic { width: 19px; height: 19px; }
+.set-ico.plain { background: none; }
+.set-ico.plain svg { width: 32px; height: 32px; display: block; }
+.set-main { flex: 1; min-width: 0; }
+.set-label { font-size: 13px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.set-desc { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.set-ctl { flex: none; display: flex; align-items: center; gap: 8px; }
+.set-btn { font-size: 12px; font-weight: 600; color: var(--accent-ink); background: var(--accent); border-radius: 8px; padding: 7px 14px; box-shadow: 0 2px 12px rgba(141,162,255,0.3); transition: background var(--t) var(--ease); }
+.set-btn:hover { background: var(--accent-2); }
+.set-btn.ghost { color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); box-shadow: none; }
+.set-btn.ghost:hover { color: var(--text); background: var(--surface-3); }
+.sw { position: relative; width: 40px; height: 23px; border-radius: 999px; background: var(--surface-3); cursor: pointer; flex: none; transition: background 0.2s var(--ease); }
+.sw.on { background: var(--accent); box-shadow: 0 0 14px rgba(141,162,255,0.4); }
+.sw::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px; border-radius: 999px; background: #fff; transition: transform 0.22s var(--ease-spring); }
+.sw.on::after { transform: translateX(17px); }
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 2px; gap: 2px; }
+.seg button { padding: 5px 12px; border-radius: 7px; font-size: 11.5px; font-weight: 550; color: var(--text-2); transition: background var(--t) var(--ease), color var(--t) var(--ease); }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--accent-soft); color: var(--accent); }
+.spill { font-size: 9.5px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; }
+.spill.ok { color: var(--ok); background: var(--ok-soft); }
+.spill.lock { color: var(--warn); background: var(--warn-soft); }
+.sdot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+.sdot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.sdot.off { background: var(--faint); }
+/* settings FORM rows — a wide input / select / checkbox group can't fit the inline ctl;
+   wrap so it spans full-width BELOW the label (secrets · config · routing · walrus · adapter). */
+.set-row:has(input), .set-row:has(select) { flex-wrap: wrap; }
+.set-row:has(input) .set-ctl, .set-row:has(select) .set-ctl { flex: 1 1 100%; margin-top: 9px; gap: 7px; flex-wrap: wrap; }
+.set-row .panel-input { flex: 1 1 170px; min-width: 0; }
+.set-row:has(input) .set-btn, .set-row:has(input) .suggest, .set-row:has(select) .set-btn, .set-row:has(select) .suggest { flex: none; }
+/* routing binding rows sit in a bare set-card — restore the card's horizontal padding */
+.set-card #routing-rows { padding: 8px 13px; display: flex; flex-direction: column; gap: 5px; }
+.set-card > .routing-default { padding: 9px 13px; }

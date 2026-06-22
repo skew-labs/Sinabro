@@ -22,12 +22,12 @@
       <header class="topbar" data-tauri-drag-region>
         <div class="topbar-left">
           <div class="brand">
-            <span class="brand-mark">▌</span>
+            <img class="brand-logo" src="sinabro_logo.png" alt="sinabro" width="22" height="22" />
             <span class="brand-name">sinabro</span>
             <span class="brand-tag">1.0</span>
           </div>
           <button class="root-chip" data-action="open-root" title="Open a workspace folder">
-            <span class="root-ico">⌂</span>
+            <span class="root-ico" data-icon="folder"></span>
             <span class="root-label" id="root-label">Open folder…</span>
           </button>
         </div>
@@ -35,11 +35,11 @@
           <button id="model-picker" class="chip chip-model" data-action="model">
             <span class="dot"></span>
             <span id="model-label">local · executor</span>
-            <span class="chev">⌄</span>
+            <span class="chev" data-icon="chevron"></span>
           </button>
-          <button class="iconbtn" data-action="disclosure" title="What sinabro can do — capabilities, limits &amp; privacy">?</button>
-          <button class="iconbtn" data-action="settings" title="Settings">⚙</button>
-          <button class="theme-toggle" data-action="theme" title="Toggle theme">◑</button>
+          <button class="iconbtn" data-action="disclosure" title="What sinabro can do — capabilities, limits &amp; privacy"><span data-icon="help"></span></button>
+          <button class="iconbtn" data-action="settings" title="Settings"><span data-icon="settings"></span></button>
+          <button class="theme-toggle" data-action="theme" title="Toggle theme"><span data-icon="theme"></span></button>
         </div>
       </header>
 
@@ -49,20 +49,20 @@
         <section class="pane pane-agent">
           <header class="pane-head agent-head">
             <button class="session-switcher" data-action="session-switcher" title="Switch session">
-              <span class="ss-ico">◴</span>
+              <span class="ss-ico" data-icon="clock"></span>
               <span class="ss-title" id="conv-title">New session</span>
-              <span class="ss-chev">⌄</span>
+              <span class="ss-chev" data-icon="chevron"></span>
             </button>
             <div class="agent-head-actions">
-              <button class="iconbtn sm" data-action="audit" title="Action audit — activity feed">▤</button>
-              <button class="iconbtn sm" data-action="walrus" title="Walrus memory — two-tier long-term memory (encrypted)">⛁</button>
-              <button class="iconbtn sm" data-action="flows" title="Agent flows — orchestrate (two-model) · evolve (autonomous R-E-W) · dynamic-LoRA routing">⚡</button>
-              <button class="iconbtn sm" data-action="mega" title="New capabilities — web3 read · settings-sync (Walrus) · semantic codebase · image (vision) · remote diagnostic (SSH)">✦</button>
-              <button class="iconbtn sm" data-action="rewind" title="Rewind the last applied edit + step the conversation back (⌘⇧Z) — the differentiator: undo a committed edit, not just text">↶</button>
-              <button class="iconbtn sm" data-action="rewind-history" title="Rewind history — pick an earlier committed edit to undo (multi-level; ⌘⇧Z still undoes the most recent)">☰</button>
-              <button class="iconbtn sm" data-action="notifications" title="Notifications — recent toasts (failures don't vanish; errors dwell longer)">🔔</button>
-              <button class="iconbtn sm" data-action="new-session" title="New session (⌘N)">✎</button>
-              <button class="iconbtn sm" data-action="palette" title="Command palette (⌘K)">⌗</button>
+              <button class="iconbtn sm" data-action="audit" title="Action audit — activity feed"><span data-icon="shield"></span></button>
+              <button class="iconbtn sm" data-action="walrus" title="Walrus memory — two-tier long-term memory (encrypted)"><span data-icon="database"></span></button>
+              <button class="iconbtn sm" data-action="flows" title="Agent flows — orchestrate (two-model) · evolve (autonomous R-E-W) · dynamic-LoRA routing"><span data-icon="zap"></span></button>
+              <button class="iconbtn sm" data-action="mega" title="New capabilities — web3 read · settings-sync (Walrus) · semantic codebase · image (vision) · remote diagnostic (SSH)"><span data-icon="sparkles"></span></button>
+              <button class="iconbtn sm" data-action="rewind" title="Rewind the last applied edit + step the conversation back (⌘⇧Z) — the differentiator: undo a committed edit, not just text"><span data-icon="undo"></span></button>
+              <button class="iconbtn sm" data-action="rewind-history" title="Rewind history — pick an earlier committed edit to undo (multi-level; ⌘⇧Z still undoes the most recent)"><span data-icon="list"></span></button>
+              <button class="iconbtn sm" data-action="notifications" title="Notifications — recent toasts (failures don't vanish; errors dwell longer)"><span data-icon="bell"></span></button>
+              <button class="iconbtn sm" data-action="new-session" title="New session (⌘N)"><span data-icon="edit"></span></button>
+              <button class="iconbtn sm" data-action="palette" title="Command palette (⌘K)"><span data-icon="command"></span></button>
             </div>
           </header>
 
@@ -94,7 +94,7 @@
           </header>
           <div class="pane-body code-body" id="code-body">
             <div class="editor-placeholder">
-              <div class="ph-mark">⌗</div>
+              <div class="ph-mark" data-icon="code"></div>
               <div class="ph-title">Your code, live</div>
               <div class="ph-sub">Open a file from the tree and it renders here. Agent edits arrive as a diff you approve — never applied silently.</div>
               <div class="ph-tag">read-only viewer &nbsp;·&nbsp; live diff + single approval</div>
@@ -125,8 +125,8 @@
               <button class="fmode" data-files-mode="outline" title="Outline of the open file">Outline</button>
             </div>
             <span class="files-root" id="files-root"></span>
-            <button class="iconbtn sm" data-action="refresh-tree" title="Re-index">↻</button>
-            <button class="iconbtn sm" data-action="open-root" title="Open a folder">+</button>
+            <button class="iconbtn sm" data-action="refresh-tree" title="Re-index"><span data-icon="refresh"></span></button>
+            <button class="iconbtn sm" data-action="open-root" title="Open a folder"><span data-icon="plus"></span></button>
           </header>
           <div class="pane-body files-body" id="files-body">
             <div class="tree-placeholder">

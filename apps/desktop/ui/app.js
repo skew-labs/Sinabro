@@ -220,6 +220,52 @@ function nextHint(line) {
    emitted body (probed from dispatch.rs) into ANSWER (big, first) + a folded
    receipt block — PURE VISUAL grouping, zero command-semantics re-implementation
    (dispatch_line → dispatch::run stays the single truth source). */
+/* ── FACELIFT — icon system: one consistent stroke SVG set replaces the mixed
+   unicode/emoji glyphs (the last "toy" tell). Static markup declares `data-icon="name"`
+   (filled by fillIcons on init); dynamic templates call icon(name) inline. Sized by
+   1em (CSS .ic) so each icon scales with its button's font-size. */
+const ICONS = {
+  folder:   '<path d="M3.5 7.3A1.6 1.6 0 0 1 5.1 5.7h3l1.6 1.9H19a1.6 1.6 0 0 1 1.6 1.6v8A1.6 1.6 0 0 1 19 18.8H5.1A1.6 1.6 0 0 1 3.5 17.2z"/>',
+  chevron:  '<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>',
+  chevronR: '<path d="m9.5 6 6 6-6 6"/>',
+  help:     '<circle cx="12" cy="12" r="8.6"/><path d="M9.7 9.4a2.4 2.4 0 1 1 3.4 2.2c-.8.4-1.1.9-1.1 1.7"/><path d="M12 16.6h.01"/>',
+  settings: '<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15.5" cy="12" r="2"/><circle cx="8" cy="17" r="2"/>',
+  theme:    '<circle cx="12" cy="12" r="8.2"/><path d="M12 3.8a8.2 8.2 0 0 0 0 16.4z" fill="currentColor" stroke="none"/>',
+  clock:    '<circle cx="12" cy="12" r="8.4"/><path d="M12 7.6V12l3 1.8"/>',
+  shield:   '<path d="M12 3.4 5.6 6v5c0 3.7 2.8 6.5 6.4 7.5 3.6-1 6.4-3.8 6.4-7.5V6z"/><path d="m9.3 11.7 1.9 1.9 3.6-3.8"/>',
+  database: '<ellipse cx="12" cy="5.7" rx="6.6" ry="2.7"/><path d="M5.4 5.7v12.6c0 1.5 3 2.7 6.6 2.7s6.6-1.2 6.6-2.7V5.7"/><path d="M5.4 12c0 1.5 3 2.7 6.6 2.7s6.6-1.2 6.6-2.7"/>',
+  zap:      '<path d="M13 2.6 4.8 13.4H11l-1 8 8.2-10.8H12z"/>',
+  sparkles: '<path d="M12 3.6 13.5 8 18 9.5 13.5 11 12 15.4 10.5 11 6 9.5 10.5 8z"/><path d="m18.5 15.5.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/>',
+  undo:     '<path d="M3.6 11.6a8.4 8.4 0 1 1 2.2 6"/><path d="M3.1 6.6v5.1h5.1"/>',
+  list:     '<path d="M8.4 6.6H20M8.4 12H20M8.4 17.4H20"/><path d="M4.4 6.6h.01M4.4 12h.01M4.4 17.4h.01"/>',
+  bell:     '<path d="M6.3 9.3a5.7 5.7 0 0 1 11.4 0c0 5.4 2 6.6 2 6.6H4.3s2-1.2 2-6.6"/><path d="M10.2 19.3a2 2 0 0 0 3.6 0"/>',
+  edit:     '<path d="M12.5 19.7H20"/><path d="M16.3 4.2a1.9 1.9 0 0 1 2.6 2.6L8.4 17.3l-3.4.9.9-3.4z"/>',
+  command:  '<rect x="4.3" y="4.3" width="6.1" height="6.1" rx="1.2"/><rect x="13.6" y="4.3" width="6.1" height="6.1" rx="1.2"/><rect x="4.3" y="13.6" width="6.1" height="6.1" rx="1.2"/><rect x="13.6" y="13.6" width="6.1" height="6.1" rx="1.2"/>',
+  refresh:  '<path d="M20.4 11.4a8.4 8.4 0 1 1-2.2-6"/><path d="M20.9 5.2v5.1h-5.1"/>',
+  plus:     '<path d="M12 5.6v12.8M5.6 12h12.8"/>',
+  arrowUp:  '<path d="M12 18.4V6M6.2 11.8 12 6l5.8 5.8"/>',
+  code:     '<path d="m9 8.5-4 3.5 4 3.5"/><path d="m15 8.5 4 3.5-4 3.5"/>',
+};
+function icon(name) {
+  const p = ICONS[name]; if (!p) return "";
+  return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+}
+function fillIcons(root) {
+  (root || document).querySelectorAll("[data-icon]:not([data-icon-done])").forEach((el) => {
+    el.innerHTML = icon(el.dataset.icon);
+    el.setAttribute("data-icon-done", "1");
+  });
+}
+
+/* brand marks for the connector chips (functional identification of each integration).
+   Telegram = its paper-plane; Walrus = a teal wave (decentralized storage); LLM provider
+   = an indigo orbit. Filled/colored (not the monochrome stroke set). */
+const CONNECTOR_LOGOS = {
+  telegram: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#2AABEE"/><path d="M17.6 7.3 15.7 17c-.14.62-.52.77-1.05.48l-2.9-2.13-1.4 1.35c-.15.15-.28.28-.58.28l.2-2.95 5.34-4.83c.23-.2-.05-.32-.36-.12l-6.6 4.15-2.84-.89c-.62-.2-.63-.62.13-.92l11.1-4.28c.51-.19.96.12.79.8z" fill="#fff"/></svg>`,
+  walrus: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#0FB5A6"/><path d="M5 13.2c1.25 0 1.25 1.5 2.5 1.5s1.25-1.5 2.5-1.5 1.25 1.5 2.5 1.5 1.25-1.5 2.5-1.5 1.25 1.5 2.5 1.5M5 9.6c1.25 0 1.25 1.5 2.5 1.5s1.25-1.5 2.5-1.5 1.25 1.5 2.5 1.5 1.25-1.5 2.5-1.5 1.25 1.5 2.5 1.5" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>`,
+  provider: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#5E6AD2"/><circle cx="12" cy="12" r="2.5" fill="#fff"/><path d="M12 5.4a6.6 6.6 0 0 1 5.7 9.9" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>`,
+};
+
 function loadingCardHTML(m) {
   const ld = m.loading || { kind: "consult", cmd: "" };
   // S-C/C2: a REAL progressive token feed — the core streams REDACTED deltas through a
@@ -240,7 +286,7 @@ function loadingCardHTML(m) {
   // STABLE id ⇒ runChatStream appends each delta to this one node (textContent), never
   // rebuilding #messages — the 144hz-smooth path.
   const feed = streaming
-    ? `<div class="loading-feed answer-line" id="live-stream-feed">${esc(m.streamText || "")}</div>`
+    ? `<div class="loading-feed answer-line" id="live-stream-feed" data-shown="${(m.streamText || "").length}">${esc(m.streamText || "")}</div>`
     : "";
   return `
     <div class="card loading-card" aria-busy="true">
@@ -269,6 +315,66 @@ function splitConsult(p) {
     answer: body.slice(hasLede ? 1 : 0, start),
     receipts: body.slice(start),
   };
+}
+
+// P2 — Agent Activity Timeline: lift the loop's AUTONOMOUS tool trail OUT of the folded
+// receipts into a 1st-class strip, so the agent's tool use is VISIBLE (it ran
+// walrus-index → walrus-fetch …), not buried. PURE parse of the core's own `loop:`
+// receipt line — zero new command semantics, single-truth-source preserved.
+function parseAgentTrail(receipts) {
+  const loop = (receipts || []).find((l) => /^loop: turns=/.test(l));
+  if (!loop) return null;
+  const m = loop.match(/trail=\[([^\]]*)\]/);
+  const steps = m && m[1].trim() ? m[1].split(",").map((s) => s.trim()).filter(Boolean) : [];
+  if (!steps.length) return null;
+  const num = (k) => { const r = loop.match(new RegExp("\\b" + k + "=(\\d+)")); return r ? r[1] : null; };
+  return { steps, turns: num("turns"), reads: num("reads") };
+}
+// E — friendly verbs for the reasoning trace: the real tool name → a readable step.
+const TRAIL_VERB = {
+  "walrus-index": "recalled the memory index", "walrus-fetch": "fetched a memory from Walrus",
+  "memory": "recalled memory", "file": "read a file", "search": "searched the code",
+  "codebase": "searched the codebase semantically", "web": "fetched the web",
+  "web-fetch": "fetched the web", "web-search": "searched the web",
+  "audit": "scanned for security leads", "context": "indexed the project",
+  "lsp": "checked diagnostics", "git": "read git", "test": "ran tests", "mcp": "called an MCP tool",
+};
+// The agent activity = a compact strip (summary) that EXPANDS into a step-by-step trace
+// ("how it got here"): friendly labels over the REAL tool trail (no fabricated thinking).
+function agentTrailHTML(tr) {
+  const parsed = tr.steps.map((s) => {
+    const sp = s.indexOf(" ");
+    return { raw: s, kind: sp > 0 ? s.slice(0, sp) : s, detail: sp > 0 ? s.slice(sp + 1) : "" };
+  });
+  const strip = parsed.map((p, i) => `<span class="trail-step" style="--reveal-i:${i}" title="${esc(p.raw)}"><span class="trail-dot" aria-hidden="true"></span>${esc(p.kind)}${p.detail ? `<span class="trail-detail">${esc(p.detail)}</span>` : ""}</span>`).join(`<span class="trail-arrow" aria-hidden="true">→</span>`);
+  const plural = (n, w) => (n ? `${n} ${w}${n === "1" ? "" : "s"}` : null);
+  const sum = [plural(tr.reads, "read"), plural(tr.turns, "turn")].filter(Boolean).join(" · ");
+  const verb = (k) => TRAIL_VERB[k] || ("used " + k);
+  const rows = parsed.map((p, i) => `<div class="trace-step"><span class="trace-n mono">${i + 1}</span><span class="trace-verb">${esc(verb(p.kind))}</span>${p.detail ? `<span class="trace-arg mono">${esc(p.detail)}</span>` : ""}</div>`).join("");
+  return `<details class="agent-trace">`
+    + `<summary class="agent-trail trail-fan" aria-label="agent activity — expand for the step-by-step trace">`
+    + `<span class="trail-lead">acted</span>${strip}`
+    + (sum ? `<span class="trail-sum">${sum}</span>` : "")
+    + `<span class="trace-chev" aria-hidden="true">${icon("chevron")}</span>`
+    + `</summary>`
+    + `<div class="trace-steps">${rows}<div class="trace-step done"><span class="trace-n" aria-hidden="true">→</span><span class="trace-verb">answered</span></div></div>`
+    + `</details>`;
+}
+
+// D — two-brain route ribbon: the README thesis on screen. A frontier model REASONS,
+// a local model EXECUTES; each consult routes to one — parse the core's own lede
+// (LIVE ⇒ frontier · LOCAL ⇒ local) and highlight the brain that produced THIS answer.
+function routeRibbonHTML(lede) {
+  if (!lede) return "";
+  const live = /^LIVE /.test(lede);
+  const m = lede.match(/:\s*([^:]+)\s*$/);
+  const model = m ? m[1].trim() : "";
+  return `<div class="route-ribbon" title="two-brain route — a frontier model reasons, a local model executes">`
+    + `<span class="rr-node rr-frontier${live ? " on" : ""}">${icon("sparkles")}frontier</span>`
+    + `<span class="rr-arrow" aria-hidden="true">→</span>`
+    + `<span class="rr-node rr-local${live ? "" : " on"}">${icon("zap")}local</span>`
+    + (model ? `<span class="rr-model mono">${esc(model)}</span>` : "")
+    + `</div>`;
 }
 
 // The answer is the deliverable (model prose, or a sealed PROPOSE-EDIT render).
@@ -312,7 +418,10 @@ function cardHTML(p) {
   let body;
   if (sc) {
     // answer-first: the model answer renders big + first; the receipt block folds.
-    const lede = sc.lede ? `<div class="card-lede">${esc(sc.lede)}</div>` : "";
+    const lede = sc.lede ? routeRibbonHTML(sc.lede) : "";
+    // P2 — agent activity timeline: the autonomous tool trail, surfaced above the answer.
+    const tr = parseAgentTrail(sc.receipts);
+    const trail = tr ? agentTrailHTML(tr) : "";
     const answer = sc.answer.length
       ? `<div class="card-answer">${sc.answer.map(answerLineHTML).join("")}</div>`
       : `<div class="card-answer"><div class="answer-line answer-empty">(no answer text)</div></div>`;
@@ -320,7 +429,7 @@ function cardHTML(p) {
         <summary>verification &amp; cost</summary>
         <div class="receipts-body">${sc.receipts.map(bodyLineHTML).join("")}</div>
       </details>`;
-    body = lede + answer + receipts;
+    body = lede + trail + answer + receipts;
   } else {
     body = p.body.length
       ? p.body.map(bodyLineHTML).join("")
@@ -474,13 +583,13 @@ function composerTemplate() {
           placeholder="Type a command —  /  or  ⌘K  for everything" spellcheck="false"></textarea>
         <div class="composer-toolbar">
           <div class="tool-left">
-            <button class="iconbtn" data-act="attach" title="Attach a file (drag one onto the window)">+</button>
+            <button class="iconbtn" data-act="attach" title="Attach a file (drag one onto the window)">${icon("plus")}</button>
             <button class="accesschip" data-act="access" title="Current access"><span class="led"></span>LOCAL-ONLY</button>
             <button class="accesschip" data-act="mode" title="Autonomy preset — Ask-first (per-action) · Auto-read · Bold (armed, bounded, revocable). Custody/funds 🔒 in every mode."><span class="dot"></span><span id="mode-mini">${esc(currentMode())}</span></button>
           </div>
           <div class="tool-right">
             <button class="modelchip" data-act="model"><span class="dot"></span><span id="model-mini">local · executor</span></button>
-            <button id="send-btn" class="sendbtn" data-act="send" title="Run (↵)" disabled>↑</button>
+            <button id="send-btn" class="sendbtn" data-act="send" title="Run (↵)" disabled>${icon("arrowUp")}</button>
           </div>
         </div>
       </div>
@@ -520,9 +629,8 @@ function emptyTemplate() {
     <div class="empty">
       <div class="empty-inner">
         <div class="empty-head reveal d1">
-          <div class="empty-mark">▌</div>
-          <div class="empty-title">What can I do in ${esc(state.currentProject)}?</div>
-          <div class="empty-sub">Type a command, or find everything with  /  ·  ⌘K</div>
+          <img class="empty-logo" src="sinabro_logo.png" alt="sinabro" />
+          <div class="empty-wordmark">sinabro</div>
         </div>
         ${keyNudge}
         ${composerTemplate()}
@@ -543,10 +651,11 @@ function emptyTemplate() {
 }
 
 function connectorHTML(id, glyph, title, desc, state) {
+  const logo = CONNECTOR_LOGOS[id];
   return `
     <button class="connector" data-connector="${id}">
       <div class="connector-top">
-        <span class="connector-ico">${esc(glyph)}</span>
+        <span class="connector-ico${logo ? " has-logo" : ""}">${logo || esc(glyph)}</span>
         <span class="connector-state state-gated">${esc(state)}</span>
       </div>
       <div class="connector-title">${esc(title)}</div>
@@ -598,10 +707,13 @@ function renderView() {
   const view = $("#view");
   const s = currentSession();
   const title = $("#conv-title");
+  const bodyEl = $("#body");
   if (!s || s.messages.length === 0) {
     if (title) title.textContent = s ? s.title : "sinabro";
+    if (bodyEl) bodyEl.classList.add("hero-mode");    // full-window welcome hero
     view.innerHTML = emptyTemplate();
   } else {
+    if (bodyEl) bodyEl.classList.remove("hero-mode");  // back to the 3-pane IDE
     if (title) title.textContent = s.title;
     view.innerHTML = conversationTemplate(s);
     const m = $("#messages");
@@ -1019,8 +1131,20 @@ async function runChatStream(wire, displayFallback, pending) {
       raf = requestAnimationFrame(() => {
         raf = 0;
         const el = document.getElementById("live-stream-feed");
-        if (el) el.textContent = pending.streamText; // in-place: no flicker, no reflow of siblings
-        else renderView(); // node not in the DOM (view switched) — one fallback render
+        if (!el) { renderView(); return; } // node gone (view switched) — one fallback render
+        const full = pending.streamText;
+        const shown = el.dataset.shown ? +el.dataset.shown : 0;
+        if (full.length > shown) {
+          // G — append ONLY this frame's NEW text as a fade-in span (compositor opacity,
+          // 144hz-smooth); never re-render the whole feed ⇒ no per-token layout thrash.
+          const span = document.createElement("span");
+          span.className = "sc";
+          span.textContent = full.slice(shown);
+          el.appendChild(span);
+          el.dataset.shown = String(full.length);
+        } else if (full.length < shown) {
+          el.textContent = full; el.dataset.shown = String(full.length); // redaction shrank it — resync
+        }
       });
     };
     const raw = await invoke("consult_stream_line", { line: wire, onDelta: ch });
@@ -1475,12 +1599,13 @@ const CONFIG_KEYS = [
   // by the SAME gated config-save handler, just grouped with the token + status.
 ];
 function configEditorHTML() {
+  // Each config key = a kit row (icon + key label + the live input in the control slot);
+  // a Save row drives the SAME gated setup-persist ceremony, then an honest note.
   const rows = CONFIG_KEYS.map(([k, ph]) =>
-    `<div class="panel-row"><span class="lockchip" style="min-width:150px;">${esc(k)}</span><input class="panel-input" data-config-key="${esc(k)}" placeholder="${esc(ph)}" autocomplete="off" spellcheck="false" /></div>`
-  ).join("");
-  return rows
-    + `<div class="panel-row"><button class="suggest" data-config-save><span class="sg-glyph">›</span>Save config → ~/.mnemos/config.toml (armed)</button></div>`
-    + `<div class="panel-row"><span class="lockchip">only non-empty fields are written, via the gated setup-persist ceremony — validated · secret-screened · atomic; no wallet / funds / chain keys</span></div>`;
+    kRow(icon("command"), esc(k), "", `<input class="panel-input" data-config-key="${esc(k)}" placeholder="${esc(ph)}" autocomplete="off" spellcheck="false" />`)
+  );
+  rows.push(kRow(icon("refresh"), "Save config", "Only non-empty fields are written, via the gated setup-persist ceremony — validated · secret-screened · atomic; no wallet / funds / chain keys.", kBtn("Save → config.toml", "data-config-save")));
+  return kCard(rows);
 }
 function secretsSectionHTML(statuses) {
   // WALRUS_PUBLISHER_TOKEN renders in the dedicated "Walrus (mainnet self-host)" section
@@ -1490,26 +1615,20 @@ function secretsSectionHTML(statuses) {
     const present = !!(st && st.present);
     // TIER-1 (A#4): OPENROUTER_MODEL is a known-model DROPDOWN, not a raw env string. The
     // <select> sets via the SAME data-secret-input / set_secret path (the core validates +
-    // falls back to the default); "" ⇒ the deepseek default.
+    // falls back to the default); "" ⇒ the deepseek default. The control slot carries the
+    // input/select + Set + Clear; the presence pill rides at the end (set/default · not set).
     if (env === "OPENROUTER_MODEL") {
       const opts = KNOWN_MODELS.map((mdl) => `<option value="${esc(mdl)}">${esc(mdl)}</option>`).join("");
-      return `<div class="panel-row">
-        <select class="panel-input" data-secret-input="${esc(env)}"><option value="">— pick a model (default deepseek/deepseek-chat) —</option>${opts}</select>
-        <button class="suggest" data-secret-set="${esc(env)}"><span class="sg-glyph">›</span>Set</button>
-        ${present ? `<button class="suggest" data-secret-clear="${esc(env)}"><span class="sg-glyph">›</span>Clear</button>` : ""}
-        <span class="lockchip">${present ? "● set (memory)" : "○ default"}</span>
-      </div>`;
+      const ctl = `<select class="panel-input" data-secret-input="${esc(env)}"><option value="">— pick a model (default deepseek/deepseek-chat) —</option>${opts}</select>`
+        + kBtn("Set", `data-secret-set="${esc(env)}"`) + (present ? kBtn("Clear", `data-secret-clear="${esc(env)}"`, true) : "") + kPill(present ? "set (memory)" : "default", present ? "ok" : "");
+      return kRow(icon("sparkles"), "Frontier model", "OPENROUTER_MODEL — sets via the same gated path; unset falls back to the deepseek default.", ctl);
     }
-    return `<div class="panel-row">
-        <input class="panel-input" type="${secret ? "password" : "text"}" data-secret-input="${esc(env)}"
-               placeholder="${esc(label)}" autocomplete="off" spellcheck="false" />
-        <button class="suggest" data-secret-set="${esc(env)}"><span class="sg-glyph">›</span>Set</button>
-        ${present ? `<button class="suggest" data-secret-clear="${esc(env)}"><span class="sg-glyph">›</span>Clear</button>` : ""}
-        <span class="lockchip">${present ? "● set (memory)" : "○ not set"}</span>
-      </div>`;
-  }).join("");
-  const note = `<div class="panel-row"><span class="lockchip">memory-only — cleared when the app closes; never written to disk</span></div>`;
-  return rows + note;
+    const ctl = `<input class="panel-input" type="${secret ? "password" : "text"}" data-secret-input="${esc(env)}" placeholder="${esc(label)}" autocomplete="off" spellcheck="false" />`
+      + kBtn("Set", `data-secret-set="${esc(env)}"`) + (present ? kBtn("Clear", `data-secret-clear="${esc(env)}"`, true) : "") + kPill(present ? "set (memory)" : "not set", present ? "ok" : "");
+    return kRow(icon(secret ? "shield" : "command"), esc(label), `${esc(env)} — memory-only; the value is sent to the process env and never read back.`, ctl);
+  });
+  return kCard(rows)
+    + kCard(kRow(icon("clock"), "Memory-only", "Secrets are cleared when the app closes; raw secrets are never written to disk.", kPill("ephemeral", "ok")));
 }
 
 // S4 (WALRUS_MAINNET_SELFHOST) — the dedicated self-host Walrus section: the two endpoint
@@ -1522,77 +1641,70 @@ function walrusSettingsSectionHTML(statuses, wstat) {
   const pubOk = !!(wstat && wstat.publisher_configured);
   const aggOk = !!(wstat && wstat.aggregator_configured);
   const active = pubOk && aggOk; // token optional — some publishers are open
-  const dot = (ok) => (ok ? "● " : "○ ");
-  const intro = `<div class="panel-row"><span class="lockchip">Your OWN Walrus (mainnet). Enter your self-host publisher + aggregator https URLs (and a bearer token if your publisher needs one); your encrypted memory then lives on YOUR Walrus. Our app holds NO Sui key, never signs, never pays — your publisher pays (PD-6 custody HARD-LOCKED).</span></div>`;
-  const pubInput = `<div class="panel-row"><span class="lockchip" style="min-width:150px;">publisher URL</span><input class="panel-input" data-config-key="walrus_publisher_endpoint" placeholder="https://publisher.your-walrus… (https only, no IP/localhost)" autocomplete="off" spellcheck="false" /></div>`;
-  const aggInput = `<div class="panel-row"><span class="lockchip" style="min-width:150px;">aggregator URL</span><input class="panel-input" data-config-key="walrus_aggregator_endpoint" placeholder="https://aggregator.your-walrus… (GET / read side)" autocomplete="off" spellcheck="false" /></div>`;
-  const saveBtn = `<div class="panel-row"><button class="suggest" data-config-save><span class="sg-glyph">›</span>Save Walrus endpoints → ~/.mnemos/config.toml (armed)</button></div>`;
-  const tokRow = `<div class="panel-row">
-      <input class="panel-input" type="password" data-secret-input="WALRUS_PUBLISHER_TOKEN" placeholder="WALRUS_PUBLISHER_TOKEN (bearer; sent only as Authorization: Bearer; NEVER a Sui key)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-secret-set="WALRUS_PUBLISHER_TOKEN"><span class="sg-glyph">›</span>Set</button>
-      ${tokPresent ? `<button class="suggest" data-secret-clear="WALRUS_PUBLISHER_TOKEN"><span class="sg-glyph">›</span>Clear</button>` : ""}
-      <span class="lockchip">${tokPresent ? "● token set (memory)" : "○ token not set (optional)"}</span>
-    </div>`;
-  const status = `<div class="panel-row"><span class="lockchip">${dot(pubOk)}publisher ${pubOk ? "connected" : "not configured"} · ${dot(aggOk)}aggregator ${aggOk ? "connected" : "not configured"} · ${dot(tokPresent)}token ${tokPresent ? "(memory)" : "(none)"} — ${active ? "MAINNET self-host ACTIVE: reads auto-use it; a fresh write is the owner ceremony" : "set BOTH https URLs to activate"}</span></div>`;
-  const note = `<div class="panel-row"><span class="lockchip">https-only + SSRF-walled at use; token is memory-only (cleared on close, never written to disk). Owner write ceremony: <code>memory backup-walrus-mainnet &lt;phrase&gt;</code>.</span></div>`;
-  return intro + pubInput + aggInput + saveBtn + tokRow + status + note;
+  const L = CONNECTOR_LOGOS;
+  const tokClear = tokPresent ? kBtn("Clear", 'data-secret-clear="WALRUS_PUBLISHER_TOKEN"', true) : "";
+  const intro = kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Your OWN Walrus (mainnet)", "Enter your self-host publisher + aggregator https URLs (and a bearer token if your publisher needs one); your encrypted memory then lives on YOUR Walrus. Our app holds NO Sui key, never signs, never pays — your publisher pays (PD-6 custody HARD-LOCKED).", kPill(active ? "active" : "set urls", active ? "ok" : ""));
+  const pubInput = kRow(icon("database"), "Publisher URL", "https only — no IP / localhost.", `<input class="panel-input" data-config-key="walrus_publisher_endpoint" placeholder="https://publisher.your-walrus…" autocomplete="off" spellcheck="false" />`);
+  const aggInput = kRow(icon("database"), "Aggregator URL", "The GET / read side.", `<input class="panel-input" data-config-key="walrus_aggregator_endpoint" placeholder="https://aggregator.your-walrus…" autocomplete="off" spellcheck="false" />`);
+  const saveBtn = kRow(icon("refresh"), "Save endpoints", "Persisted via the gated config-save to ~/.mnemos/config.toml.", kBtn("Save → config.toml", "data-config-save"));
+  const tokCtl = `<input class="panel-input" type="password" data-secret-input="WALRUS_PUBLISHER_TOKEN" placeholder="bearer token (Authorization: Bearer; NEVER a Sui key)" autocomplete="off" spellcheck="false" />`
+    + kBtn("Set", 'data-secret-set="WALRUS_PUBLISHER_TOKEN"') + tokClear + kPill(tokPresent ? "token set" : "token optional", tokPresent ? "ok" : "");
+  const tokRow = kRow(icon("shield"), "Publisher token", "WALRUS_PUBLISHER_TOKEN — sent only as a bearer header; memory-only.", tokCtl);
+  const status = kCard([
+    kFact("Publisher", `${pubOk ? "● connected" : "○ not configured"}`),
+    kFact("Aggregator", `${aggOk ? "● connected" : "○ not configured"}`),
+    kFact("Token", `${tokPresent ? "● memory" : "○ none"}`),
+    kRow(icon("zap"), "Self-host status", active ? "MAINNET self-host ACTIVE — reads auto-use it; a fresh write is the owner ceremony." : "Set BOTH https URLs to activate.", kPill(active ? "active" : "inactive", active ? "ok" : "")),
+  ]);
+  const note = kCard(kRow(icon("shield"), "Safety", "https-only + SSRF-walled at use; the token is memory-only (cleared on close, never written to disk). Owner write ceremony: memory backup-walrus-mainnet &lt;phrase&gt;.", kPill("custody hard-locked", "lock")));
+  return kCard([intro, pubInput, aggInput, saveBtn, tokRow]) + status + note;
 }
 
 async function settingsPanelHTML() {
-  const [sys, prov, sandbox, privacy, secrets, walrusStat] = await Promise.all([
-    runCardHTML("status"),
-    runCardHTML("provider status"),
-    runCardHTML("sandbox status"),
-    runCardHTML("privacy status"),
+  // FACELIFT: General is the keys + config + self-host HUB. The System/Providers/Sandbox/
+  // Privacy status dumps are intentionally dropped here — each has a dedicated section in the
+  // rail (no duplicate text wall). Only the real state the rendered controls need is loaded.
+  const [secrets, walrusStat] = await Promise.all([
     invoke("secret_status").catch(() => []),
     invoke("walrus_status").catch(() => ({})),
   ]);
   const sessions = state.projects.reduce((n, p) => n + p.sessions.length, 0);
-  const storage = infoCardHTML([
-    `sessions=${sessions}`,
-    `store=~/Library/Application Support/com.sinabro.desktop/sessions.json`,
-    `redaction=core (secret-zero); raw secrets are never written`,
-  ]);
-  const appearance = `<div class="panel-row">
-      <button class="suggest" data-theme-set="dark"><span class="sg-glyph">›</span>Dark</button>
-      <button class="suggest" data-theme-set="light"><span class="sg-glyph">›</span>Light</button>
-    </div>`;
-  const safety = `<div class="panel-row"><span class="lockchip">⬤ funds / wallet / mainnet — HARD-LOCKED in 1.0</span></div>`;
-  return [
-    sectionHTML("System", sys),
-    sectionHTML("Providers · model", prov),
-    sectionHTML("Secrets (memory-only)", secretsSectionHTML(secrets)),
-    sectionHTML("Walrus (mainnet self-host)", walrusSettingsSectionHTML(secrets, walrusStat)),
-    sectionHTML("Config (config.toml)", configEditorHTML()),
-    sectionHTML("Sandbox", sandbox),
-    sectionHTML("Privacy · egress", privacy),
-    sectionHTML("Session storage", storage),
-    sectionHTML("Appearance", appearance),
-    sectionHTML("Safety", safety),
-  ].join("");
+  const theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  return `
+    <div class="set-title">General</div>
+    <div class="set-lede">Your keys, config and self-host storage — memory-only secrets, gated writes.</div>
+    ${kGroup("Secrets (memory-only)")}
+    ${secretsSectionHTML(secrets)}
+    ${kGroup("Walrus — mainnet self-host")}
+    ${walrusSettingsSectionHTML(secrets, walrusStat)}
+    ${kGroup("Config — config.toml")}
+    ${configEditorHTML()}
+    ${kGroup("Appearance")}
+    ${kCard(kRow(icon("theme"), "Theme", "Local to this machine.", kSeg(theme, [["dark", "Dark"], ["light", "Light"]], "data-theme-set")))}
+    ${kGroup("Session storage & safety")}
+    ${kCard([
+      kFact("Sessions", esc(String(sessions))),
+      kFact("Store", "~/Library/Application Support/com.sinabro.desktop"),
+      kRow(icon("shield"), "Redaction", "Core secret-zero — raw secrets are never written.", kPill("on", "ok")),
+      kRow(icon("shield"), "Funds &amp; keys", "Wallet · signing · mainnet — HARD-LOCKED in 1.0.", kPill("hard-locked", "lock")),
+    ])}`;
 }
 async function modelPanelHTML() {
-  const prov = await runCardHTML("provider status");
-  const posture = infoCardHTML([
-    `egress=gated (one-shot; bounded; phrase auto-injected for chat)`,
-    `no_silent_fallback=enforced by core`,
-    `model=via OPENROUTER_MODEL (default deepseek/deepseek-chat)`,
-    `key=OPENROUTER_API_KEY env, read only at the TLS boundary, never shown`,
-  ]);
-  // No "Arm" step: chat lines auto-fire a live consult (see dispatch()). This
-  // section just explains the behavior + how to set the key.
-  const consult = `<div class="panel-row"><span class="lockchip">chat = live consult: type a question in the composer and it fires ONE OpenRouter call</span></div>
-    <div class="panel-row"><span class="lockchip">set OPENROUTER_API_KEY in Settings → Secrets first; a line starting with a command word (status, memory, …) runs as that command instead</span></div>`;
-  const actions = `<div class="panel-row">
-      <button class="suggest" data-panel-run="provider status"><span class="sg-glyph">›</span>provider status</button>
-      <button class="suggest" data-panel-run="model status"><span class="sg-glyph">›</span>model status</button>
-    </div>`;
-  return [
-    sectionHTML("Routing", prov),
-    sectionHTML("Egress posture", posture),
-    sectionHTML("Live consult (chat)", consult),
-    sectionHTML("Run in conversation", actions),
-  ].join("");
+  const keyOk = keyPresent === true;
+  return `
+    <div class="set-title">Models &amp; provider</div>
+    <div class="set-lede">A frontier model reasons; a local model executes. Frontier is egress-gated.</div>
+    ${kGroup("Frontier")}
+    ${kCard([
+      kRow(icon("sparkles"), `Provider key ${keyOk ? '<span class="sdot ok"></span>' : '<span class="sdot off"></span>'}`, keyOk ? "OPENROUTER_API_KEY set — read only at the TLS boundary, never shown." : "Set OPENROUTER_API_KEY to consult the frontier.", kBtn(keyOk ? "Change key" : "Set key", 'data-ov-nav="general"', true)),
+      kRow(icon("zap"), "Model", "OPENROUTER_MODEL · default deepseek/deepseek-chat.", `<span class="set-val mono">deepseek-chat</span>`),
+      kRow(icon("shield"), "Egress", "One-shot, bounded, phrase auto-injected; no silent fallback (core-enforced).", kPill("gated", "ok")),
+    ])}
+    ${kGroup("Live consult")}
+    ${kCard([
+      kRow(icon("edit"), "Chat = one live call", "Type a question → ONE OpenRouter call. A line starting with a command word runs as that command instead.", ""),
+      kRow(icon("list"), "Provider status", "Routing, configured providers, posture.", kBtn("Run", 'data-panel-run="provider status"', true)),
+    ])}`;
 }
 /* ── R7b: privacy · safety panel (all REAL backing; no fake claim) ─────────────
    Privacy is a product selling point (research D-4: no-account · opt-in telemetry ·
@@ -1603,45 +1715,29 @@ async function modelPanelHTML() {
    express kill rail is surfaced read-only (probed: phase-0 = no live job to signal),
    never a fake interrupt button. */
 async function privacyPanelHTML() {
-  const [prov, priv_, killCard, tele] = await Promise.all([
-    runCardHTML("provider status"),
-    runCardHTML("privacy"),        // bare verb (explicit `privacy status` = unknown — probed)
-    runCardHTML("kill"),           // the express control rail (read-only; live_jobs/control_version)
-    invoke("telemetry_status").catch(() => false),
-  ]);
-  const account = infoCardHTML([
-    `account=none · no login · no cloud sync`,
-    `identity=local only; sinabro never asks who you are`,
-  ]);
-  const egress = infoCardHTML([
-    `channels=provider · telegram · walrus (ALL gated; off by default)`,
-    `live_calls=0 until you approve one (Intent Preview → single approve)`,
-    `redaction=every outbound fragment is scanned; secret-shaped ⇒ denied, never sent`,
-  ]);
-  const files = infoCardHTML([
-    `store=~/.mnemos/store (memories, AES-256-GCM-SIV at rest)`,
-    `key=~/.mnemos/memory.key (0600, local; not a custody key)`,
-    `proposals=~/.mnemos/proposals (pending edits, sealed)`,
-    `sessions=…/com.sinabro.desktop/sessions.json (redacted projection)`,
-    `file-over-app=your data is local files you own; no plaintext memory on disk`,
-  ]);
-  const telemetry = `<div class="panel-row">
-      <span class="lockchip">${tele ? "● on (opt-in)" : "○ off"}</span>
-      <button class="suggest" data-telemetry-set="${tele ? "off" : "on"}"><span class="sg-glyph">›</span>${tele ? "Disable" : "Enable"}</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">default OFF · when ON, one OTLP span per answered consult lands in ~/.mnemos/otel (loop · cost · guard) — a LOCAL file, not pushed off-box in v1</span></div>`;
-  const safety = infoCardHTML([
-    `loop=bounded by construction: <=5 turns · 20k tokens · 60s deadline (cannot run away)`,
-    `side-effects=single Approve gate (Intent Preview); read-only stays autonomous`,
-  ]);
-  return [
-    sectionHTML("Account", account),
-    sectionHTML("What leaves the machine", egress + prov),
-    sectionHTML("On-device files (file-over-app)", files),
-    sectionHTML("Telemetry (opt-in)", telemetry),
-    sectionHTML("Agent safety (bounded)", safety + killCard),
-    sectionHTML("Privacy scan", priv_),
-  ].join("");
+  const tele = await invoke("telemetry_status").catch(() => false);
+  return `
+    <div class="set-title">Privacy &amp; safety</div>
+    <div class="set-lede">No account, no cloud. Your data is local files you own; nothing leaves unredacted.</div>
+    ${kGroup("Identity")}
+    ${kCard(kRow(icon("shield"), "Account", "None · no login · no cloud sync. sinabro never asks who you are.", kPill("local", "ok")))}
+    ${kGroup("What leaves the machine")}
+    ${kCard([
+      kRow(icon("zap"), "Egress channels", "provider · telegram · walrus — all gated, off by default. 0 live calls until you approve one.", ""),
+      kRow(icon("shield"), "Redaction wall", "Every outbound fragment is scanned; secret-shaped ⇒ denied, never sent.", kPill("on", "ok")),
+      kRow(icon("clock"), "Telemetry", tele ? "On — one local OTLP span per consult in ~/.mnemos/otel; not pushed off-box." : "Off — no spans written. (Opt-in.)", kToggle(tele, `data-telemetry-set="${tele ? "off" : "on"}"`)),
+    ])}
+    ${kGroup("On-device — file-over-app")}
+    ${kCard([
+      kFact("Memory store", "~/.mnemos/store · AES-256-GCM-SIV"),
+      kFact("Memory key", "~/.mnemos/memory.key · 0600 local"),
+      kFact("Proposals", "~/.mnemos/proposals · sealed"),
+    ])}
+    ${kGroup("Agent safety")}
+    ${kCard([
+      kRow(icon("shield"), "Bounded loop", "≤5 turns · 20k tokens · 60s — cannot run away. Side-effects need one Approve.", kPill("bounded", "ok")),
+      kRow(icon("shield"), "Funds &amp; keys", "Wallet · signing · chain-write are unrepresentable.", kPill("hard-locked", "lock")),
+    ])}`;
 }
 /* ── R7c: Action Audit — chronological cross-session activity feed ─────────────
    Research D-3: a timestamped activity feed + session grouping. Real NOW from the
@@ -1675,25 +1771,32 @@ async function auditPanelHTML() {
   const tele = await invoke("telemetry_status").catch(() => false);
   const total = recs.length;
   const attention = recs.filter((r) => /red|degraded/i.test(r.truth)).length;
-  const head = infoCardHTML([
-    `actions=${total} · attention=${attention} (truth=red/degraded)`,
-    `source=persisted sessions (this machine; redacted, secret-zero)`,
+  const summary = kCard([
+    kFact("Actions", esc(String(total))),
+    kFact("Attention", `${esc(String(attention))} (truth=red/degraded)`),
+    kRow(icon("shield"), "Source", "Persisted sessions on this machine — redacted, secret-zero.", kPill("local", "ok")),
   ]);
-  const rows = total
-    ? `<div class="audit-feed">${recs.slice(0, 250).map(auditRowHTML).join("")}</div>${total > 250 ? `<div class="panel-row"><span class="lockchip">showing the 250 most recent of ${total}</span></div>` : ""}`
-    : `<div class="panel-row"><span class="lockchip">no actions yet — run a command and it lands here</span></div>`;
-  const otel = `<div class="panel-row"><span class="lockchip">${tele ? "● telemetry on" : "○ telemetry off"} — richer per-consult spans (loop · cost · guard) record to ~/.mnemos/otel when ON (enable in Privacy)</span></div>`;
-  const undo = infoCardHTML([
-    `undo (pending)=decline before commit — Close the diff to drop a proposed edit`,
-    `undo (applied)=atomic + mode-preserved, but NO journal/undo-blob in v1 — review the diff before Approve`,
-    `staleness=an edit proposed against a since-changed file is refused (no blind re-apply)`,
+  // The feed itself keeps its audit-row markup; the surrounding chrome becomes the kit.
+  const feed = total
+    ? `<div class="set-card"><div class="audit-feed">${recs.slice(0, 250).map(auditRowHTML).join("")}</div></div>${total > 250 ? kCard(kFact("Showing", `the 250 most recent of ${esc(String(total))}`)) : ""}`
+    : kCard(kRow(icon("clock"), "No actions yet", "Run a command and it lands here.", ""));
+  const otel = kCard(kRow(icon("clock"), "Telemetry trail", "Richer per-consult spans (loop · cost · guard) record to ~/.mnemos/otel when ON (enable in Privacy).", kPill(tele ? "on" : "off", tele ? "ok" : "")));
+  const undo = kCard([
+    kRow(icon("refresh"), "Undo — pending", "Decline before commit — close the diff to drop a proposed edit.", ""),
+    kRow(icon("refresh"), "Undo — applied", "Atomic + mode-preserved, but NO journal/undo-blob in v1 — review the diff before Approve.", ""),
+    kRow(icon("shield"), "Staleness", "An edit proposed against a since-changed file is refused (no blind re-apply).", kPill("fail-closed", "ok")),
   ]);
-  return [
-    sectionHTML("Summary", head),
-    sectionHTML("Activity (newest first)", rows),
-    sectionHTML("Telemetry trail", otel),
-    sectionHTML("Undo (honest scope)", undo),
-  ].join("");
+  return `
+    <div class="set-title">Activity &amp; audit</div>
+    <div class="set-lede">Every dispatched action, newest first — the core's own verdict, redacted on this machine.</div>
+    ${kGroup("Summary")}
+    ${summary}
+    ${kGroup("Activity (newest first)")}
+    ${feed}
+    ${kGroup("Telemetry")}
+    ${otel}
+    ${kGroup("Undo — honest scope")}
+    ${undo}`;
 }
 /* ── E14-W2: the two-tier Walrus long-term memory panel ───────────────────────
    The agent's "메인 저장소" (MAIN INDEX) + per-memory "서브 저장소" (detail), surfaced
@@ -1726,21 +1829,22 @@ async function walrusPanelHTML() {
   // testnet — label the MAIN INDEX node with which store the owner is looking at.
   let wstat = {};
   try { wstat = await invoke("walrus_status"); } catch (_) { wstat = {}; }
-  const intro = infoCardHTML([
-    "two-tier=MAIN INDEX (id · topic · sub-blob) → per-memory SUB-STORE detail",
-    "wire=AES-256-GCM-SIV ciphertext on Walrus testnet; decrypted only on this machine",
-    "agent=roams this same index autonomously mid-loop (memory walrus-index / walrus-fetch)",
-    "locked=no funds · custody/wallet/mainnet structurally unreachable (PD-6)",
+  const L = CONNECTOR_LOGOS;
+  const title = `<div class="set-title">Memory · Walrus</div><div class="set-lede">Encrypted two-tier memory the agent roams on its own — ciphertext on the wire, decrypted only here.</div>`;
+  const intro = kCard([
+    kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Two-tier store", "MAIN INDEX (id · topic · sub-blob) → per-memory SUB-STORE detail.", ""),
+    kRow(icon("database"), "Wire", "AES-256-GCM-SIV ciphertext on Walrus testnet; decrypted only on this machine.", kPill("encrypted", "ok")),
+    kRow(icon("zap"), "Autonomous", "The agent roams this same index mid-loop (memory walrus-index / walrus-fetch).", ""),
+    kRow(icon("shield"), "Locked", "No funds · custody / wallet / mainnet structurally unreachable (PD-6).", kPill("hard-locked", "lock")),
   ]);
-  const detailSlot = `<div id="walrus-detail"><div class="panel-row"><span class="lockchip">select a memory above to fetch + decrypt its detail</span></div></div>`;
+  const detailSlot = `<div id="walrus-detail">${kCard(kRow(icon("folder"), "Sub-store detail", "Select a memory above to fetch + decrypt its detail.", ""))}</div>`;
   if (!view || view.kind !== "index") {
     const reason = (view && view.reason) || "no main index";
-    const empty = `<div class="panel-row"><span class="lockchip">${esc(reason)}</span></div>`
-      + `<div class="panel-row"><span class="lockchip">run <span class="mono">memory backup-walrus &lt;phrase&gt;</span> to publish the encrypted index</span></div>`;
-    return [
-      sectionHTML("Two-tier Walrus memory", intro),
-      sectionHTML("Main index", empty),
-    ].join("");
+    const empty = kCard([
+      kRow(icon("database"), "No main index", esc(reason), kPill("empty", "")),
+      kRow(icon("refresh"), "Publish it", "Run memory backup-walrus &lt;phrase&gt; to publish the encrypted index.", ""),
+    ]);
+    return `${title}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${empty}`;
   }
   const entries = view.entries || [];
   const net = wstat && wstat.aggregator_configured ? "MAINNET self-host" : "testnet";
@@ -1751,15 +1855,11 @@ async function walrusPanelHTML() {
       <span class="walrus-main-label">MAIN INDEX</span>
       <span class="walrus-main-sub">${entries.length} sub-store${entries.length === 1 ? "" : "s"} · ${esc(net)} · decrypted locally</span>
     </div>`;
-  const head = infoCardHTML([`memories=${entries.length} on Walrus (MAIN INDEX, decrypted locally)`]);
   const rows = entries.length
     ? `<div class="walrus-feed walrus-fan">${entries.map((e, i) => walrusRowHTML(e, i)).join("")}</div>`
-    : `<div class="panel-row"><span class="lockchip">index is empty — no memories published yet</span></div>`;
-  return [
-    sectionHTML("Two-tier Walrus memory", intro),
-    sectionHTML("Main index", mainNode + head + rows),
-    sectionHTML("Sub-store detail", detailSlot),
-  ].join("");
+    : kCard(kRow(icon("database"), "Index is empty", "No memories published yet.", kPill("empty", "")));
+  const indexCard = `<div class="set-card">${mainNode}${rows}</div>`;
+  return `${title}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${indexCard}${kGroup("Sub-store detail")}${detailSlot}`;
 }
 /* ── R10: first-run capability disclosure + progressive disclosure ─────────────
    Research D-3 (NN/G — declare the capability range on first entry) + D-5 #5
@@ -1844,64 +1944,62 @@ function disclosurePanelHTML() {
    owner's approval, like the chat consult); the CORE stays the sole verifier (redaction,
    bounds, the class-typed ORACLE gate). custody/funds HARD-LOCKED throughout. */
 function flowsPanelHTML() {
-  const intro = infoCardHTML([
-    "orchestrate=frontier PLANS → Sinabro decomposes into typed sub-tasks → a task-routed local LoRA IMPLEMENTS → frontier SYNTHESIZES",
-    "verify=each result is checked by a class-typed ORACLE (a real sui move build in a network-DENIED sandbox); ONLY an oracle-Verified result admits a write — never the model's say-so",
-    "evolve=the autonomous Read-Execute-Write loop: ONLY verified + cross-memory-consistent patterns persist to your encrypted Walrus memory, reinforcing reliability (DGM-H perf)",
-    "needs=a local model server (ollama / vLLM / MLX) on the loopback for the EXECUTE brain; without one the run honest-degrades (it never fakes a result)",
+  const intro = kCard([
+    kRow(icon("zap"), "Orchestrate", "Frontier PLANS → Sinabro decomposes into typed sub-tasks → a task-routed local LoRA IMPLEMENTS → frontier SYNTHESIZES.", ""),
+    kRow(icon("shield"), "Verify", "Each result is checked by a class-typed ORACLE (a real sui move build in a network-DENIED sandbox); ONLY an oracle-verified result admits a write — never the model's say-so.", kPill("oracle-gated", "ok")),
+    kRow(icon("refresh"), "Evolve", "The autonomous Read-Execute-Write loop: ONLY verified + cross-memory-consistent patterns persist to your encrypted Walrus memory (DGM-H perf).", ""),
+    kRow(icon("database"), "Needs", "A local model server (ollama / vLLM / MLX) on the loopback for the EXECUTE brain; without one the run honest-degrades (never a faked result).", ""),
   ]);
-  const orchestrate = `<div class="panel-row">
-      <input class="panel-input" data-flow-input="orchestrate" placeholder="task to orchestrate (e.g. build a Sui counter module)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-flow-run="orchestrate"><span class="sg-glyph">›</span>Run</button>
-    </div>`;
+  const orchestrate = kCard(kRow(icon("zap"), "Orchestrate a task", "Two-model loop — e.g. build a Sui counter module.",
+    `<input class="panel-input" data-flow-input="orchestrate" placeholder="task to orchestrate" autocomplete="off" spellcheck="false" />` + kBtn("Run", 'data-flow-run="orchestrate"')));
   // B⑬ Plan Mode: PLAN first → review the sub-tasks (uncheck any to skip) → Approve & Run the
   // approved subset. The implement+synthesize phases are INERT until the owner approves.
-  const planmode = `<div class="panel-row">
-      <input class="panel-input" data-flow-input="planmode" placeholder="task to PLAN — review the sub-tasks before running" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-planmode-plan><span class="sg-glyph">›</span>Plan</button>
-    </div>
-    <div id="planmode-result" class="planmode-result"></div>`;
-  const evolve = `<div class="panel-row">
-      <input class="panel-input" data-flow-input="evolve" placeholder="goal to autonomously evolve (verified patterns persist to Walrus)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-flow-run="evolve"><span class="sg-glyph">›</span>Run</button>
-    </div>`;
+  const planmode = kCard(kRow(icon("list"), "Plan Mode", "Review the sub-tasks before running — the plan is inert until you approve.",
+    `<input class="panel-input" data-flow-input="planmode" placeholder="task to PLAN" autocomplete="off" spellcheck="false" />` + kBtn("Plan", "data-planmode-plan")))
+    + `<div id="planmode-result" class="planmode-result"></div>`;
+  const evolve = kCard(kRow(icon("refresh"), "Evolve a goal", "Verified patterns persist to your encrypted Walrus memory.",
+    `<input class="panel-input" data-flow-input="evolve" placeholder="goal to autonomously evolve" autocomplete="off" spellcheck="false" />` + kBtn("Run", 'data-flow-run="evolve"')));
   // TIER-2 (B#1/#2): the armed-ceremony buttons — each auto-injects its VERIFIED arm phrase
   // (the GUI run IS the owner's approval, the proven flows/mega pattern); the CORE stays the
   // sole verifier (arm ceremony + bounds + redaction; bold/mutate are bounded + revocable).
   // The arg-needing ceremonies (serve-chat=session, run-frontier=task) show the locked
   // preview (it teaches the exact ceremony) instead of a half-formed command. custody 🔒.
-  const daemon = `<div class="panel-row">
-      <button class="suggest" data-panel-run="daemon status"><span class="sg-glyph">›</span>daemon status</button>
-      <button class="suggest" data-panel-run="daemon serve"><span class="sg-glyph">›</span>daemon serve</button>
-      <button class="suggest" data-panel-run="daemon"><span class="sg-glyph">›</span>autonomy surfaces</button>
-    </div>
-    <div class="panel-row">
-      <button class="suggest" data-panel-run="daemon bold arm-bold-session-edit-run-bounded-revocable"><span class="sg-glyph">›</span>Bold session (arm · edit+run, bounded)</button>
-      <button class="suggest" data-panel-run="daemon run-mutate arm-mutate-local-autonomy-bounded-revocable"><span class="sg-glyph">›</span>Run-mutate (arm · local, bounded)</button>
-      <button class="suggest" data-panel-run="tool exec-apply exec-apply-owner-live"><span class="sg-glyph">›</span>Apply exec proposal</button>
-    </div>
-    <div class="panel-row">
-      <button class="suggest" data-panel-run="daemon serve-chat"><span class="sg-glyph">›</span>Serve-chat ceremony (needs session id)</button>
-      <button class="suggest" data-panel-run="daemon run-frontier"><span class="sg-glyph">›</span>Run-frontier ceremony (needs task)</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">armed buttons auto-inject the verified ceremony phrase — the run IS your approval (bounded · revocable); custody / funds 🔒</span></div>`;
-  const routing = infoCardHTML([
-    "dynamic-LoRA=Sinabro emits (port, model_id) per sub-task; an external multi-LoRA server (vLLM Multi-LoRA / LoRAX) hot-swaps the adapter — sinabro never fakes a missing adapter",
-    "config=~/.mnemos/routing_table.txt — one `kind port model_id` line per expert (+ a `default` line); absent ⇒ the seed table",
-    "seed=sui_move→naite_sui_move · solana_anchor→naite_solana_anchor · web3_frontend→web3_frontend_coder · audit→naite_audit · nl_bridge→nl_bridge",
-    "modes=A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (opt-in)",
-    "local=run ollama / vLLM / MLX on a loopback port + set SINABRO_LOCAL_PORT and the routing config — the SAME dynamic switching, fully on this machine",
+  // The daemon surfaces — read-only status + owner-armed ceremonies. Each button keeps its
+  // exact data-panel-run line (the run IS the owner's approval); custody/funds stay 🔒.
+  const daemon = kCard([
+    kRow(icon("zap"), "Status & surfaces", "Live runner state + the autonomy surfaces (read-only).",
+      kBtn("daemon status", 'data-panel-run="daemon status"', true) + kBtn("daemon serve", 'data-panel-run="daemon serve"', true) + kBtn("autonomy surfaces", 'data-panel-run="daemon"', true)),
+    kRow(icon("edit"), "Armed sessions", "Auto-inject the verified ceremony phrase — bounded · revocable.",
+      kBtn("Bold session (edit+run)", 'data-panel-run="daemon bold arm-bold-session-edit-run-bounded-revocable"') + kBtn("Run-mutate (local)", 'data-panel-run="daemon run-mutate arm-mutate-local-autonomy-bounded-revocable"') + kBtn("Apply exec proposal", 'data-panel-run="tool exec-apply exec-apply-owner-live"')),
+    kRow(icon("command"), "Ceremonies needing an arg", "These show the locked preview (it teaches the exact ceremony).",
+      kBtn("Serve-chat (needs session)", 'data-panel-run="daemon serve-chat"', true) + kBtn("Run-frontier (needs task)", 'data-panel-run="daemon run-frontier"', true)),
+    kRow(icon("shield"), "Safety", "Armed buttons auto-inject the verified ceremony phrase — the run IS your approval.", kPill("custody hard-locked", "lock")),
   ]);
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ funds / wallet / mainnet / chain-write — HARD-LOCKED; the oracle verifies, only verified patterns persist</span></div>`;
-  return [
-    sectionHTML("Agent flows", intro),
-    sectionHTML("Orchestrate — two-model loop", orchestrate),
-    sectionHTML("Plan Mode — review the plan, approve, then run", planmode),
-    sectionHTML("Evolve — autonomous Read-Execute-Write", evolve),
-    sectionHTML("Autonomy (daemon)", daemon),
-    sectionHTML("Dynamic-LoRA routing", routing),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const routing = kCard([
+    kRow(icon("list"), "Dynamic-LoRA", "Sinabro emits (port, model_id) per sub-task; an external multi-LoRA server (vLLM Multi-LoRA / LoRAX) hot-swaps the adapter — never a faked missing adapter.", ""),
+    kFact("Config", "~/.mnemos/routing_table.txt"),
+    kRow(icon("zap"), "Seed table", "sui_move→naite_sui_move · solana_anchor→naite_solana_anchor · web3_frontend→web3_frontend_coder · audit→naite_audit · nl_bridge→nl_bridge.", ""),
+    kRow(icon("refresh"), "Modes", "A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (opt-in).", ""),
+    kRow(icon("database"), "Fully local", "Run ollama / vLLM / MLX on a loopback port + set SINABRO_LOCAL_PORT and the routing config — the SAME dynamic switching, on this machine.", ""),
+  ]);
+  const lock = kCard(kRow(icon("shield"), "Funds &amp; keys", "Wallet · mainnet · chain-write — HARD-LOCKED; the oracle verifies, only verified patterns persist.", kPill("hard-locked", "lock")));
+  return `
+    <div class="set-title">Agent · autonomy</div>
+    <div class="set-lede">A frontier model plans, a local model executes — every result oracle-verified before it persists.</div>
+    ${kGroup("Orchestrate — two-model loop")}
+    ${orchestrate}
+    ${kGroup("Plan Mode — review, approve, then run")}
+    ${planmode}
+    ${kGroup("Evolve — autonomous Read-Execute-Write")}
+    ${evolve}
+    ${kGroup("How it works")}
+    ${intro}
+    ${kGroup("Autonomy (daemon)")}
+    ${daemon}
+    ${kGroup("Dynamic-LoRA routing")}
+    ${routing}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 
 // ── MEGA "BUILD FOR REAL" capabilities panel (web3 read · settings-sync · codebase ·
@@ -2036,23 +2134,24 @@ async function submitPlanmodeRun(out) {
    (#panel) survives ONLY for the first-run disclosure + the quick-access agent-pane buttons
    (▤/⛁/⚡) and the model chip (owner-locked default: leave + also-in-rail). custody/funds stay
    HARD-LOCKED — these are read/preference surfaces, never a custody unlock. */
-let settingsSection = "general";
+let settingsSection = "overview";
 // [key, label, glyph] — the rail. The first 7 reuse the live builders; the last 3 are
 // honest S4 placeholders (LoRA routing editor · skills · evidence) wired in later slices.
 const SETTINGS_SECTIONS = [
-  ["general", "General", "⚙"],
-  ["editor", "Editor", "▤"],
-  ["host", "Host / Remote", "⇅"],
-  ["models", "Models · provider", "◈"],
-  ["privacy", "Privacy · safety", "⛨"],
-  ["walrus", "Memory · Walrus", "⛁"],
-  ["flows", "Agent flows", "⚡"],
-  ["audit", "Activity · audit", "≡"],
-  ["routing", "LoRA / Routing", "⇄"],
-  ["skills", "Skills", "◇"],
-  ["evolution", "Evolution · perf", "✦"],
-  ["evidence", "Evidence", "◎"],
-  ["websetup", "Web / Setup", "⤓"],
+  ["overview", "Overview", "command"],
+  ["models", "Models · provider", "sparkles"],
+  ["walrus", "Memory · Walrus", "database"],
+  ["flows", "Agent · autonomy", "zap"],
+  ["routing", "LoRA / routing", "list"],
+  ["privacy", "Privacy · safety", "shield"],
+  ["editor", "Editor", "edit"],
+  ["general", "General", "settings"],
+  ["host", "Host / Remote", "refresh"],
+  ["audit", "Activity · audit", "clock"],
+  ["skills", "Skills", "help"],
+  ["evolution", "Evolution · perf", "undo"],
+  ["evidence", "Evidence", "folder"],
+  ["websetup", "Web / Setup", "plus"],
 ];
 
 // GUI-owned preferences (LOCAL to this machine; localStorage; no core, no egress).
@@ -2070,27 +2169,20 @@ function editorSettingsHTML() {
   const uiFont = getPref("sinabro.uiFont", "13px");
   const codeFont = getPref("sinabro.codeFont", "12px");
   const theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
-  const btn = (attr, val, cur, label) => `<button class="suggest${val === cur ? " on" : ""}" data-${attr}="${esc(val)}"><span class="sg-glyph">›</span>${esc(label)}</button>`;
-  const uiRow = `<div class="panel-row">${btn("ui-font", "12px", uiFont, "Compact")}${btn("ui-font", "13px", uiFont, "Default")}${btn("ui-font", "14px", uiFont, "Comfortable")}</div>`;
-  const codeRow = `<div class="panel-row">${btn("code-font", "12px", codeFont, "12")}${btn("code-font", "13px", codeFont, "13")}${btn("code-font", "14px", codeFont, "14")}${btn("code-font", "15px", codeFont, "15")}</div>`;
-  const wrapRow = `<div class="panel-row">
-      <span class="lockchip">${viewWrap ? "● soft-wrap on" : "○ soft-wrap off"}</span>
-      <button class="suggest" data-action="wrap-toggle"><span class="sg-glyph">›</span>${viewWrap ? "Disable wrap" : "Enable wrap"}</button>
-    </div>`;
-  const themeRow = `<div class="panel-row">${btn("theme-set", "dark", theme, "Dark")}${btn("theme-set", "light", theme, "Light")}</div>`;
-  const layoutRow = `<div class="panel-row">
-      <button class="suggest" data-layout-reset="1"><span class="sg-glyph">›</span>Reset pane widths</button>
-      <span class="lockchip">restores the default agent / files column widths</span>
-    </div>`;
-  const note = `<div class="panel-row"><span class="lockchip">editor preferences are LOCAL to this machine (localStorage) — no core, no egress, never persisted off-box</span></div>`;
-  return [
-    sectionHTML("UI font size", uiRow),
-    sectionHTML("Code font size", codeRow),
-    sectionHTML("Soft wrap (code viewer)", wrapRow),
-    sectionHTML("Theme", themeRow),
-    sectionHTML("Layout", layoutRow),
-    sectionHTML("Scope", note),
-  ].join("");
+  return `
+    <div class="set-title">Editor</div>
+    <div class="set-lede">Appearance &amp; layout — local to this machine (localStorage), never off-box.</div>
+    ${kGroup("Text")}
+    ${kCard([
+      kRow(icon("edit"), "UI font size", "Interface text.", kSeg(uiFont, [["12px", "Compact"], ["13px", "Default"], ["14px", "Comfortable"]], "data-ui-font")),
+      kRow(icon("code"), "Code font size", "Viewer &amp; editor.", kSeg(codeFont, [["12px", "12"], ["13px", "13"], ["14px", "14"], ["15px", "15"]], "data-code-font")),
+      kRow(icon("list"), "Soft wrap", "Wrap long lines in the code viewer.", kToggle(viewWrap, 'data-action="wrap-toggle"')),
+    ])}
+    ${kGroup("Appearance & layout")}
+    ${kCard([
+      kRow(icon("theme"), "Theme", "", kSeg(theme, [["dark", "Dark"], ["light", "Light"]], "data-theme-set")),
+      kRow(icon("refresh"), "Pane widths", "Restore the default agent / files columns.", kBtn("Reset", 'data-layout-reset="1"', true)),
+    ])}`;
 }
 // Honest placeholder for an S4 rail section not yet wired (never a fake control).
 function s4PlaceholderHTML(title, slice) {
@@ -2117,29 +2209,30 @@ async function routingPanelHTML() {
   let view;
   try { view = await invoke("read_routing_table"); }
   catch (e) { view = { error: String(e && e.message ? e.message : e) }; }
+  const title = `<div class="set-title">LoRA / routing</div><div class="set-lede">Map each expert kind to a (port · model_id) — a multi-LoRA server hot-swaps the adapter per sub-task.</div>`;
   if (!view || view.error) {
-    return sectionHTML("LoRA / Routing", infoCardHTML([`routing unavailable=${esc((view && view.error) || "no response")}`]));
+    return `${title}${kGroup("Dynamic-LoRA routing")}${kCard(kRow(icon("list"), "Routing unavailable", esc((view && view.error) || "no response"), kPill("error", "")))}`;
   }
-  const intro = infoCardHTML([
-    "dynamic-LoRA=sinabro emits (port, model_id) per sub-task; the multi-LoRA server hot-swaps the adapter",
-    "modes=A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (a merged model_id)",
-    "default=the totality anchor (served when a kind is unmapped) — REQUIRED",
-    `config=${esc(view.path || "routing_table.txt")} — core-validated + atomic; orchestrate/evolve pick it up on the next run`,
+  const intro = kCard([
+    kRow(icon("list"), "Dynamic-LoRA", "Sinabro emits (port, model_id) per sub-task; the multi-LoRA server hot-swaps the adapter.", ""),
+    kRow(icon("refresh"), "Modes", "A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (a merged model_id).", ""),
+    kRow(icon("shield"), "Default", "The totality anchor — served when a kind is unmapped.", kPill("required", "")),
+    kFact("Config", esc(view.path || "routing_table.txt")),
   ]);
+  // Binding rows keep the routing-row primitive (data-routing-* inputs); the card wraps them.
   const rows = (view.entries || []).map((e) => routingRowHTML(e.kind, e.port, e.model_id)).join("");
-  const bindings = `<div id="routing-rows">${rows}</div>
-    <div class="panel-row"><button class="suggest" data-routing-add><span class="sg-glyph">›</span>Add binding</button></div>`;
+  const bindings = `<div class="set-card"><div id="routing-rows">${rows}</div></div>`
+    + kCard(kRow(icon("plus"), "Add a binding", "Transient until Save — the core is the validator.", kBtn("Add binding", "data-routing-add")));
   const d = view.default || { port: "", model_id: "" };
-  const dflt = `<div class="routing-row routing-default" data-routing-default>
+  const dflt = `<div class="set-card"><div class="routing-row routing-default" data-routing-default>
       <span class="rt-deflabel">default</span>
       <input class="panel-input rt-port" data-routing-default-port value="${esc(String(d.port))}" placeholder="port" inputmode="numeric" autocomplete="off" spellcheck="false" />
       <input class="panel-input rt-model" data-routing-default-model value="${esc(d.model_id)}" placeholder="default model_id" autocomplete="off" spellcheck="false" />
-    </div>`;
-  const save = `<div class="panel-row">
-      <button class="suggest rt-save" data-routing-save><span class="sg-glyph">›</span>Save routing table</button>
-      <span class="lockchip">core-validated + atomic · fail-closed (an invalid kind / empty model is refused)</span>
-    </div>`;
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ port = a loopback worker port · model_id = the request-body adapter — no funds / wallet / chain (PD-6)</span></div>`;
+    </div></div>`;
+  const save = kCard([
+    kRow(icon("refresh"), "Save routing table", "Core-validated + atomic · fail-closed (an invalid kind / empty model is refused). orchestrate/evolve pick it up on the next run.", `<button class="set-btn rt-save" data-routing-save>Save</button>`),
+    kRow(icon("shield"), "Safety", "port = a loopback worker port · model_id = the request-body adapter — no funds / wallet / chain (PD-6).", kPill("hard-locked", "lock")),
+  ]);
   // P2-S4f: ONE-CLICK "Connect an adapter" — pick a PEFT/LoRA folder, auto-read adapter_config.json,
   // check the expert kinds, Connect → builds the rows + SAVES through the SAME core write_routing_table.
   const adapterKinds = [
@@ -2148,25 +2241,26 @@ async function routingPanelHTML() {
   ].map(([k, on]) =>
     `<label class="adapter-kind" style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input type="checkbox" data-adapter-kind value="${k}"${on ? " checked" : ""}/> ${esc(k)}</label>`
   ).join("");
-  const connectCard =
-    `<div class="panel-row" id="adapter-status"><span class="lockchip">pick a PEFT/LoRA adapter folder (the one with adapter_config.json) — its base model is auto-detected; the served model id is suggested + editable</span></div>
-     <div class="panel-row"><button class="suggest" data-adapter-pick><span class="sg-glyph">›</span>Choose adapter folder…</button></div>
-     <div class="panel-row">
-       <input class="panel-input rt-model" data-adapter-model placeholder="served model id (must match your local server, e.g. naite-foundations)" autocomplete="off" spellcheck="false" />
-       <input class="panel-input rt-port" data-adapter-port value="11434" placeholder="port" inputmode="numeric" autocomplete="off" spellcheck="false" />
-     </div>
-     <div class="panel-row" style="flex-wrap:wrap">${adapterKinds}<label class="adapter-kind" style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" data-adapter-default/> also set as default</label></div>
-     <div class="panel-row">
-       <button class="suggest" data-adapter-connect><span class="sg-glyph">›</span>Connect adapter</button>
-       <span class="lockchip">writes the routing config only (core-validated + atomic) — then run a local server (ollama/mlx/vLLM) on that port serving the model id. sinabro never fakes a missing adapter.</span>
-     </div>`;
-  return [
-    sectionHTML("Connect an adapter (one-click)", connectCard),
-    sectionHTML("Dynamic-LoRA routing", intro),
-    sectionHTML("Kind → (port · model_id) bindings", bindings),
-    sectionHTML("Default target (required)", dflt),
-    sectionHTML("Save", save + lock),
-  ].join("");
+  const connectCard = kCard([
+    kRow(icon("folder"), "Choose an adapter folder", "Pick a PEFT/LoRA folder (the one with adapter_config.json) — its base model is auto-detected; the served model id is suggested + editable.", kBtn("Choose folder…", "data-adapter-pick")),
+    `<div class="set-row" id="adapter-status"><div class="set-main"><div class="set-desc">no adapter picked yet</div></div></div>`,
+    kRow(icon("code"), "Served model + port", "Must match your local server.",
+      `<input class="panel-input rt-model" data-adapter-model placeholder="served model id (e.g. naite-foundations)" autocomplete="off" spellcheck="false" /><input class="panel-input rt-port" data-adapter-port value="11434" placeholder="port" inputmode="numeric" autocomplete="off" spellcheck="false" />`),
+    kRow(icon("list"), "Route these kinds", "Check the expert kinds to route to this adapter.",
+      `<div style="display:flex;flex-wrap:wrap;gap:4px">${adapterKinds}<label class="adapter-kind" style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" data-adapter-default/> also set as default</label></div>`),
+    kRow(icon("refresh"), "Connect adapter", "Writes the routing config only (core-validated + atomic) — then run a local server (ollama/mlx/vLLM) on that port serving the model id. sinabro never fakes a missing adapter.", kBtn("Connect adapter", "data-adapter-connect")),
+  ]);
+  return `${title}
+    ${kGroup("Connect an adapter (one-click)")}
+    ${connectCard}
+    ${kGroup("Dynamic-LoRA routing")}
+    ${intro}
+    ${kGroup("Kind → (port · model_id) bindings")}
+    ${bindings}
+    ${kGroup("Default target (required)")}
+    ${dflt}
+    ${kGroup("Save")}
+    ${save}`;
 }
 // Append a blank editable binding row (transient until Save; the core is the validator).
 function addRoutingRow() {
@@ -2277,24 +2371,28 @@ async function connectAdapter() {
    the S2 machinery. The model has no self-eval path. custody/funds untouched (PD-6). */
 async function skillsPanelHTML() {
   const reg = await runCardHTML("registry");
-  const intro = infoCardHTML([
-    "skills=reproducible command bundles; sandbox + approval bound (no-commerce; PROPOSE-only)",
-    "eval=runs a skill's commands in the OS sandbox — Admin · typed-phrase · argv-only (no shell)",
-    "sandbox=tier LocalWrite: read+write local, NETWORK kernel-DENIED (no egress) · env-scrubbed (PATH/HOME/LANG/TERM only) · 10s timeout · output redacted",
-    "bind=the eval score binds to the REALLY-run commands (no string-hash forgery); a candidate is never auto-promoted",
+  const intro = kCard([
+    kRow(icon("help"), "Skills", "Reproducible command bundles; sandbox + approval bound (no-commerce; PROPOSE-only).", ""),
+    kRow(icon("command"), "Eval", "Runs a skill's commands in the OS sandbox — Admin · typed-phrase · argv-only (no shell).", ""),
+    kRow(icon("shield"), "Sandbox", "Tier LocalWrite: read+write local, NETWORK kernel-DENIED · env-scrubbed (PATH/HOME/LANG/TERM only) · 10s timeout · output redacted.", kPill("network denied", "ok")),
+    kRow(icon("shield"), "Bind", "The eval score binds to the REALLY-run commands (no string-hash forgery); a candidate is never auto-promoted.", ""),
   ]);
-  const evalRow = `<div class="panel-row">
-      <input class="panel-input" data-skill-eval-input placeholder="a reproducible command, e.g.  /bin/echo ok   ·   cargo test" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-skill-eval><span class="sg-glyph">›</span>Eval</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">runs as the gated <span class="mono">skill eval</span> ceremony — the preview + Continue appear in the agent pane (left); Continue injects the phrase and runs the command in the sandbox</span></div>`;
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ NETWORK kernel-DENIED · no funds / wallet / chain (PD-6) · the model cannot self-eval</span></div>`;
-  return [
-    sectionHTML("Skills · registry (read-only)", reg),
-    sectionHTML("What eval does", intro),
-    sectionHTML("Eval a command (sandboxed, owner-gated)", evalRow),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const evalRow = kCard([
+    kRow(icon("command"), "Eval a command", "Runs as the gated skill eval ceremony — the preview + Continue appear in the agent pane; Continue injects the phrase and runs the command in the sandbox.",
+      `<input class="panel-input" data-skill-eval-input placeholder="/bin/echo ok  ·  cargo test" autocomplete="off" spellcheck="false" />` + kBtn("Eval", "data-skill-eval")),
+  ]);
+  const lock = kCard(kRow(icon("shield"), "Safety", "NETWORK kernel-DENIED · no funds / wallet / chain (PD-6) · the model cannot self-eval.", kPill("hard-locked", "lock")));
+  return `
+    <div class="set-title">Skills</div>
+    <div class="set-lede">Reproducible command bundles — evaluated in a network-denied OS sandbox, owner-gated.</div>
+    ${kGroup("Registry (read-only)")}
+    ${`<div class="set-card">${reg}</div>`}
+    ${kGroup("What eval does")}
+    ${intro}
+    ${kGroup("Eval a command (sandboxed, owner-gated)")}
+    ${evalRow}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 /* ── P2-S4c: the DGM-H PERF-LEDGER view (Settings → Evolution, read-only) ───────────────
    Surfaces the autonomy evolve loop's performance ledger — <data_dir>/evolution_ledger.txt
@@ -2310,19 +2408,20 @@ async function perfLedgerPanelHTML() {
   let view;
   try { view = await invoke("read_perf_ledger"); }
   catch (e) { view = { error: String(e && e.message ? e.message : e) }; }
+  const title = `<div class="set-title">Evolution · perf</div><div class="set-lede">Each autonomously-evolved pattern carries a perf score — confirmed only after independent verification.</div>`;
   if (!view || view.error) {
-    return sectionHTML("Evolution · perf-ledger", infoCardHTML([`perf-ledger unavailable=${esc((view && view.error) || "no response")}`]));
+    return `${title}${kGroup("Perf-ledger")}${kCard(kRow(icon("undo"), "Perf-ledger unavailable", esc((view && view.error) || "no response"), kPill("error", "")))}`;
   }
-  const intro = infoCardHTML([
-    "DGM-H=each autonomously-evolved pattern carries a perf score: reinforced (verified-good downstream) vs demoted (failed downstream)",
-    "confirm=a pattern is 'confirmed' only after ≥1 independent verified-good AND never demoted — the model can never confirm itself (P-HALL)",
-    `ledger=${esc(view.path || "evolution_ledger.txt")} (read-only; written by the evolve loop — Settings → Agent flows → Evolve)`,
-    "patterns=the pattern CONTENT persists as encrypted #sinabro-pattern memories (see ⛁ Walrus memory)",
+  const intro = kCard([
+    kRow(icon("undo"), "DGM-H", "Each evolved pattern carries a perf score: reinforced (verified-good downstream) vs demoted (failed downstream).", ""),
+    kRow(icon("shield"), "Confirm", "A pattern is 'confirmed' only after ≥1 independent verified-good AND never demoted — the model can never confirm itself (P-HALL).", kPill("oracle-gated", "ok")),
+    kFact("Ledger", esc(view.path || "evolution_ledger.txt")),
+    kRow(icon("database"), "Patterns", "The pattern CONTENT persists as encrypted #sinabro-pattern memories (see Memory · Walrus).", ""),
   ]);
   const entries = view.entries || [];
   let table;
   if (!entries.length) {
-    table = `<div class="panel-row"><span class="lockchip">no patterns evolved yet — run an Evolve goal (Agent flows) and verified patterns land here</span></div>`;
+    table = kCard(kRow(icon("undo"), "No patterns evolved yet", "Run an Evolve goal (Agent · autonomy) and verified patterns land here.", kPill("empty", "")));
   } else {
     const rows = entries.map((e) => {
       const r = e.reinforced || 0, d = e.demoted || 0, net = r - d;
@@ -2333,14 +2432,16 @@ async function perfLedgerPanelHTML() {
           <span class="perf-stat">↑${esc(String(r))} ↓${esc(String(d))} · net ${esc(String(net))}</span>
         </div>`;
     }).join("");
-    table = `<div class="perf-feed">${rows}</div><div class="panel-row"><span class="lockchip">${entries.length} pattern(s) tracked</span></div>`;
+    table = `<div class="set-card"><div class="perf-feed">${rows}</div></div>${kCard(kFact("Tracked", `${esc(String(entries.length))} pattern(s)`))}`;
   }
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ read-only · no funds / wallet / chain (PD-6) · only oracle-verified + cross-memory-consistent patterns ever persist</span></div>`;
-  return [
-    sectionHTML("Evolution · perf-ledger (DGM-H)", intro),
-    sectionHTML("Tracked patterns", table),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const lock = kCard(kRow(icon("shield"), "Safety", "Read-only · no funds / wallet / chain (PD-6) · only oracle-verified + cross-memory-consistent patterns ever persist.", kPill("hard-locked", "lock")));
+  return `${title}
+    ${kGroup("How it works")}
+    ${intro}
+    ${kGroup("Tracked patterns")}
+    ${table}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 /* ── P2-S4d: the AUDIT-DETECT runner (Settings → Evidence) ──────────────────────────────
    Surfaces the LIVE `audit detect <path>` verb (E11-2 ⑮). RECONCILED on the real binary:
@@ -2351,28 +2452,30 @@ async function perfLedgerPanelHTML() {
    through the owner-gated, kernel-sandboxed repro chokepoint, never the GUI, never auto. The
    model reaches detect only as a gated READ tool. custody/funds untouched (PD-6). */
 async function evidencePanelHTML() {
-  const intro = infoCardHTML([
-    "audit detect=scan a local source tree for impact-ranked CANDIDATE leads (the audit game-tree engine, E11-2)",
-    "candidate ≠ finding=every item is a LEAD, never a confirmed finding; promotion needs an owner-gated, kernel-sandboxed reproduced LOCAL receipt — never here, never auto",
-    "read-only=pure local analysis; no egress · no exec · hashed anchors (no raw source byte leaves)",
-    "the model reaches detect only as a gated READ tool; it cannot promote a candidate or run a repro",
+  const intro = kCard([
+    kRow(icon("folder"), "Audit detect", "Scan a local source tree for impact-ranked CANDIDATE leads (the audit game-tree engine, E11-2).", ""),
+    kRow(icon("shield"), "Candidate ≠ finding", "Every item is a LEAD, never a confirmed finding; promotion needs an owner-gated, kernel-sandboxed reproduced LOCAL receipt — never here, never auto.", kPill("leads only", "ok")),
+    kRow(icon("shield"), "Read-only", "Pure local analysis; no egress · no exec · hashed anchors (no raw source byte leaves).", ""),
+    kRow(icon("zap"), "The model", "Reaches detect only as a gated READ tool; it cannot promote a candidate or run a repro.", ""),
   ]);
-  const runner = `<div class="panel-row">
-      <input class="panel-input" data-audit-detect-input placeholder="a local path to scan (e.g. crates/  ·  src  ·  .  for cwd)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-audit-detect><span class="sg-glyph">›</span>Detect</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">runs <span class="mono">audit detect &lt;path&gt;</span> (read-only) — the ranked candidate report appears in the agent pane (left)</span></div>`;
-  const chain = infoCardHTML([
-    "evidence chain=the audit trail itself is hash-linked, append-only, tamper-evident (~/.mnemos/audit) — a broken link / fork / byte-edit renders RED",
-    "inspect=run the `audit` command (GREEN/RED chain status) or `evidence pack` from the palette (⌘K) / chat",
+  const runner = kCard(kRow(icon("folder"), "Scan a path", "Runs audit detect &lt;path&gt; (read-only) — the ranked candidate report appears in the agent pane.",
+    `<input class="panel-input" data-audit-detect-input placeholder="crates/  ·  src  ·  .  for cwd" autocomplete="off" spellcheck="false" />` + kBtn("Detect", "data-audit-detect")));
+  const chain = kCard([
+    kRow(icon("shield"), "Evidence chain", "The audit trail itself is hash-linked, append-only, tamper-evident (~/.mnemos/audit) — a broken link / fork / byte-edit renders RED.", kPill("tamper-evident", "ok")),
+    kRow(icon("list"), "Inspect", "Run the audit command (GREEN/RED chain status) or evidence pack from the palette (⌘K) / chat.", ""),
   ]);
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ read-only · no funds / wallet / chain (PD-6) · candidate promotion stays owner-gated (sandboxed repro)</span></div>`;
-  return [
-    sectionHTML("Audit detect (candidate leads)", intro),
-    sectionHTML("Scan a path", runner),
-    sectionHTML("Evidence chain (E5)", chain),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const lock = kCard(kRow(icon("shield"), "Safety", "Read-only · no funds / wallet / chain (PD-6) · candidate promotion stays owner-gated (sandboxed repro).", kPill("hard-locked", "lock")));
+  return `
+    <div class="set-title">Evidence</div>
+    <div class="set-lede">Scan for candidate leads and inspect the tamper-evident audit chain — promotion stays owner-gated.</div>
+    ${kGroup("Audit detect (candidate leads)")}
+    ${intro}
+    ${kGroup("Scan a path")}
+    ${runner}
+    ${kGroup("Evidence chain (E5)")}
+    ${chain}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 /* ── P2-S4e: the WEB / ENV-SETUP guided chain (Settings → Web / Setup; owner Q2=A) ───────
    A guided, PER-STEP-APPROVED chain over LIVE verbs (RECONCILED on the real desktop-feature
@@ -2385,38 +2488,32 @@ async function evidencePanelHTML() {
    download click is the owner ARM gesture (like the flows phrases); downloaded bytes are NEVER
    executed — only an explicit, gated install step runs. custody/funds HARD-LOCKED (PD-6). */
 function webSetupPanelHTML() {
-  const intro = infoCardHTML([
-    "guided chain=search the web → fetch a page → (owner-armed) download to /tmp → propose an install command — each step is a SEPARATE owner-approved action, never an autonomous run",
-    "cost=search/fetch = a network GET (read-only, source-linked advisory) · download = a bounded armed GET to a temp file (SSRF-walled, host-allowlisted, bytes never executed) · install = a gated local exec",
-    "honest-degrade=a step shows its real state — e.g. download needs the download-egress build; nothing is ever faked as 'done'",
+  const intro = kCard([
+    kRow(icon("plus"), "Guided chain", "Search the web → fetch a page → (owner-armed) download to /tmp → propose an install command — each step is a SEPARATE owner-approved action, never an autonomous run.", ""),
+    kRow(icon("zap"), "Cost", "search/fetch = a read-only network GET (source-linked advisory) · download = a bounded armed GET to a temp file (SSRF-walled, host-allowlisted) · install = a gated local exec.", ""),
+    kRow(icon("shield"), "Honest-degrade", "A step shows its real state — e.g. download needs the download-egress build; nothing is ever faked as 'done'.", kPill("no fakes", "ok")),
   ]);
-  const search = `<div class="panel-row">
-      <input class="panel-input" data-web-search-input placeholder="search the web (e.g. install ripgrep macos)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-web-search><span class="sg-glyph">›</span>Search</button>
-    </div>`;
-  const fetchRow = `<div class="panel-row">
-      <input class="panel-input" data-web-fetch-input placeholder="fetch a page (https://… — read-only, source-linked)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-web-fetch><span class="sg-glyph">›</span>Fetch</button>
-    </div>`;
-  const download = `<div class="panel-row">
-      <input class="panel-input" data-download-input placeholder="download (https://allowlisted-host/… → /tmp)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-download><span class="sg-glyph">›</span>Download</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">owner-armed single-shot bounded GET · 8-host allowlist · honest-degrades to "transport not compiled" unless built with download-egress</span></div>`;
-  const install = `<div class="panel-row">
-      <input class="panel-input" data-toolrun-input placeholder="propose an install command (e.g. brew install ripgrep)" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-toolrun><span class="sg-glyph">›</span>Propose</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">runs as the gated <span class="mono">tool run</span> ceremony — the preview + Continue appear in the agent pane (left); Continue runs it bounded + env-scrubbed (no shell)</span></div>`;
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ each step owner-approved · no funds / wallet / chain (PD-6) · downloaded bytes are NEVER executed (only an explicit install step runs, gated)</span></div>`;
-  return [
-    sectionHTML("Web → env-setup (guided, per-step approved)", intro),
-    sectionHTML("1 · Search the web", search),
-    sectionHTML("2 · Fetch a page (read-only)", fetchRow),
-    sectionHTML("3 · Download (owner-armed, bounded)", download),
-    sectionHTML("4 · Install step (gated propose)", install),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const search = kCard(kRow(icon("plus"), "1 · Search the web", "Read-only, source-linked advisory.",
+    `<input class="panel-input" data-web-search-input placeholder="install ripgrep macos" autocomplete="off" spellcheck="false" />` + kBtn("Search", "data-web-search")));
+  const fetchRow = kCard(kRow(icon("folder"), "2 · Fetch a page", "https://… — read-only, source-linked.",
+    `<input class="panel-input" data-web-fetch-input placeholder="https://…" autocomplete="off" spellcheck="false" />` + kBtn("Fetch", "data-web-fetch")));
+  const download = kCard(kRow(icon("database"), "3 · Download to /tmp", "Owner-armed single-shot bounded GET · 8-host allowlist · honest-degrades to 'transport not compiled' unless built with download-egress.",
+    `<input class="panel-input" data-download-input placeholder="https://allowlisted-host/… → /tmp" autocomplete="off" spellcheck="false" />` + kBtn("Download", "data-download")));
+  const install = kCard(kRow(icon("command"), "4 · Install step", "Runs as the gated tool run ceremony — the preview + Continue appear in the agent pane; Continue runs it bounded + env-scrubbed (no shell).",
+    `<input class="panel-input" data-toolrun-input placeholder="brew install ripgrep" autocomplete="off" spellcheck="false" />` + kBtn("Propose", "data-toolrun")));
+  const lock = kCard(kRow(icon("shield"), "Safety", "Each step owner-approved · no funds / wallet / chain (PD-6) · downloaded bytes are NEVER executed (only an explicit install step runs, gated).", kPill("hard-locked", "lock")));
+  return `
+    <div class="set-title">Web / setup</div>
+    <div class="set-lede">A guided, per-step-approved chain — search, fetch, download, install — never an autonomous run.</div>
+    ${kGroup("How it works")}
+    ${intro}
+    ${kGroup("Guided steps")}
+    ${search}
+    ${fetchRow}
+    ${download}
+    ${install}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 /* ── P4: Host / Remote (SSH) — the VM-lane picker (Cursor / VS Code / Zed Remote-SSH analog) ──
    sinabro runs its core LOCALLY or on a REMOTE SSH host (the VM lane): host=vm + an ssh_target ⇒
@@ -2433,46 +2530,127 @@ async function hostPanelHTML() {
   let cfg;
   try { cfg = await invoke("get_host"); }
   catch (e) { cfg = { error: String(e && e.message ? e.message : e) }; }
+  const title = `<div class="set-title">Host / remote</div><div class="set-lede">Run sinabro on THIS machine or forward to a remote SSH box — the GUI drives, the agent lives on the host.</div>`;
   if (!cfg || cfg.error) {
-    return sectionHTML("Host / Remote", infoCardHTML([`host config unavailable=${esc((cfg && cfg.error) || "no response")}`]));
+    return `${title}${kGroup("Host")}${kCard(kRow(icon("refresh"), "Host config unavailable", esc((cfg && cfg.error) || "no response"), kPill("error", "")))}`;
   }
   const isVm = cfg.mode === "vm";
   const target = cfg.ssh_target || "";
-  const intro = infoCardHTML([
-    `mode=${esc(cfg.mode || "local")}${isVm && target ? " → " + esc(target) : ""}`,
-    "local=sinabro runs on THIS machine (loopback model/LoRA; no SSH)",
-    "remote (SSH)=the SAME dispatched argv runs on `sinabro` on the remote box (Cursor/VS Code Remote-SSH style) — the agent + its loopback model/LoRA server live on the remote; the GUI just drives",
-    "the remote box must have `sinabro` INSTALLED (no auto-uploaded server); the model/LoRA stays on the remote's loopback (no off-box model egress)",
+  const intro = kCard([
+    kFact("Mode", `${esc(cfg.mode || "local")}${isVm && target ? " → " + esc(target) : ""}`),
+    kRow(icon("command"), "Local", "sinabro runs on THIS machine (loopback model/LoRA; no SSH).", ""),
+    kRow(icon("refresh"), "Remote (SSH)", "The SAME dispatched argv runs on sinabro on the remote box (Cursor / VS Code Remote-SSH style) — the agent + its loopback model/LoRA live on the remote; the GUI just drives.", ""),
+    kRow(icon("database"), "Pre-installed", "The remote box must have sinabro INSTALLED (no auto-uploaded server); the model/LoRA stays on the remote's loopback (no off-box model egress).", ""),
   ]);
-  const modeRow = `<div class="panel-row">
-      <span class="lockchip">${isVm ? "● remote (SSH)" : "● local (this machine)"}</span>
-      ${isVm ? `<button class="suggest" data-host-local><span class="sg-glyph">›</span>Switch to Local</button>` : ""}
-    </div>`;
-  const remoteRow = `<div class="panel-row">
-      <input class="panel-input" data-host-target placeholder="user@host[:port]  (e.g. me@gpu-box:22)" value="${esc(target)}" autocomplete="off" spellcheck="false" />
-      <button class="suggest" data-host-save-vm><span class="sg-glyph">›</span>Connect (SSH)</button>
-      <button class="suggest" data-host-test><span class="sg-glyph">›</span>Test</button>
-    </div>
-    <div class="panel-row"><span class="lockchip">Connect saves host=vm; Test runs <span class="mono">status</span> on the remote — a typed error (NEVER a silent local fallback) if unreachable or sinabro is absent</span></div>`;
-  const sec = infoCardHTML([
-    "auth=BatchMode (keys / ssh-agent only; no interactive password)",
-    "host keys=TOFU-pinned to an app-owned known_hosts, then fail-closed",
-    "argv=closed charset gate + POSIX single-quoted (no shell-metachar / option injection)",
-    "no silent fallback=an unreachable / misconfigured remote is a typed error, never quietly local",
+  const modeRow = kCard(kRow(icon("zap"), "Current mode", isVm ? "Remote (SSH)." : "Local (this machine).",
+    kPill(isVm ? "remote" : "local", "ok") + (isVm ? kBtn("Switch to Local", "data-host-local", true) : "")));
+  const remoteRow = kCard(kRow(icon("refresh"), "Remote SSH target", "Connect saves host=vm; Test runs status on the remote — a typed error (NEVER a silent local fallback) if unreachable or sinabro is absent.",
+    `<input class="panel-input" data-host-target placeholder="user@host[:port] (e.g. me@gpu-box:22)" value="${esc(target)}" autocomplete="off" spellcheck="false" />` + kBtn("Connect (SSH)", "data-host-save-vm") + kBtn("Test", "data-host-test", true)));
+  const sec = kCard([
+    kRow(icon("shield"), "Auth", "BatchMode (keys / ssh-agent only; no interactive password).", kPill("keys only", "ok")),
+    kRow(icon("shield"), "Host keys", "TOFU-pinned to an app-owned known_hosts, then fail-closed.", ""),
+    kRow(icon("shield"), "Argv", "Closed charset gate + POSIX single-quoted (no shell-metachar / option injection).", ""),
+    kRow(icon("shield"), "No silent fallback", "An unreachable / misconfigured remote is a typed error, never quietly local.", kPill("fail-closed", "ok")),
   ]);
-  const lock = `<div class="panel-row"><span class="lockchip">⬤ custody / funds / wallet / chain-write — HARD-LOCKED on ANY host (local or remote); the model/LoRA never leaves the running host's loopback</span></div>`;
-  return [
-    sectionHTML("Where sinabro runs", intro),
-    sectionHTML("Mode", modeRow),
-    sectionHTML("Remote SSH target", remoteRow),
-    sectionHTML("Connection security", sec),
-    sectionHTML("Safety", lock),
-  ].join("");
+  const lock = kCard(kRow(icon("shield"), "Safety", "custody / funds / wallet / chain-write — HARD-LOCKED on ANY host (local or remote); the model/LoRA never leaves the running host's loopback.", kPill("hard-locked", "lock")));
+  return `${title}
+    ${kGroup("Where sinabro runs")}
+    ${intro}
+    ${kGroup("Mode")}
+    ${modeRow}
+    ${kGroup("Remote SSH target")}
+    ${remoteRow}
+    ${kGroup("Connection security")}
+    ${sec}
+    ${kGroup("Safety")}
+    ${lock}`;
 }
 // Build ONE rail section's body. The first 7 REUSE the live builders (single truth
 // source); editor is GUI-owned; the last ones are honest S4 placeholders.
+// FACELIFT C — settings KIT helpers: build the visual cards/rows/controls concisely so
+// EVERY section is a control panel, not a text dump. (label/desc/ctl are raw HTML so callers
+// can pass pills/icons; callers esc() any user/text content.)
+function kGroup(l) { return `<div class="set-group">${esc(l)}</div>`; }
+function kCard(rows) { return `<div class="set-card">${(Array.isArray(rows) ? rows : [rows]).join("")}</div>`; }
+function kRow(ico, label, desc, ctl) { return `<div class="set-row"><span class="set-ico">${ico || ""}</span><div class="set-main"><div class="set-label">${label}</div>${desc ? `<div class="set-desc">${desc}</div>` : ""}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ""}</div>`; }
+function kFact(label, value) { return `<div class="set-row set-fact"><div class="set-main"><div class="set-label">${label}</div></div>${value ? `<div class="set-ctl"><span class="set-val mono">${value}</span></div>` : ""}</div>`; }
+function kSeg(cur, opts, attr) { return `<div class="seg">${opts.map(([v, l]) => `<button class="${v === cur ? "on" : ""}" ${attr}="${esc(v)}">${esc(l)}</button>`).join("")}</div>`; }
+function kBtn(label, attr, ghost) { return `<button class="set-btn${ghost ? " ghost" : ""}" ${attr}>${esc(label)}</button>`; }
+function kToggle(on, attr) { return `<div class="sw${on ? " on" : ""}" ${attr || ""}></div>`; }
+function kPill(text, cls) { return `<span class="spill ${cls || ""}">${esc(text)}</span>`; }
+// Split a "key=value · rest" core/info line into a readable fact row (label + mono value).
+function kFactLine(line) {
+  const s = String(line);
+  const eq = s.indexOf("=");
+  if (eq > 0 && eq < 28) return kFact(esc(s.slice(0, eq)), esc(s.slice(eq + 1)));
+  return `<div class="set-row set-fact"><div class="set-main"><div class="set-desc">${esc(s)}</div></div></div>`;
+}
+
+// FACELIFT C — the Overview hub: a visual control panel (logo cards · toggles ·
+// segmented controls · one-touch buttons) reflecting real state, wired to the core /
+// prefs / rail navigation. Replaces the text-dump first impression.
+function overviewSettingsHTML() {
+  const theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  const mode = currentMode();
+  const keyOk = keyPresent === true;
+  const provDot = keyOk ? '<span class="sdot ok"></span>' : '<span class="sdot off"></span>';
+  const provDesc = keyOk ? "OpenRouter key set · egress-gated" : "No key yet — set one to consult the frontier";
+  const seg = (cur, opts, attr) => `<div class="seg">${opts.map(([v, l]) => `<button class="${v === cur ? "on" : ""}" ${attr}="${esc(v)}">${esc(l)}</button>`).join("")}</div>`;
+  const L = CONNECTOR_LOGOS;
+  return `
+    <div class="set-title">Overview</div>
+    <div class="set-lede">Everything sinabro can do — at a glance, one touch to change.</div>
+    <div class="set-group">Brains</div>
+    <div class="set-card">
+      <div class="set-row">
+        <span class="set-ico plain">${L.provider}</span>
+        <div class="set-main"><div class="set-label">Frontier provider ${provDot}</div><div class="set-desc">${provDesc}</div></div>
+        <div class="set-ctl"><button class="set-btn ghost" data-ov-nav="models">${keyOk ? "Change key" : "Set key"}</button></div>
+      </div>
+      <div class="set-row">
+        <span class="set-ico">${icon("zap")}</span>
+        <div class="set-main"><div class="set-label">Autonomy</div><div class="set-desc">How far it acts before asking. Funds &amp; keys stay locked in every mode.</div></div>
+        <div class="set-ctl">${seg(mode, [["Ask-first", "Ask-first"], ["Auto-read", "Auto-read"], ["Bold", "Bold"]], "data-ov-mode")}</div>
+      </div>
+    </div>
+    <div class="set-group">Memory</div>
+    <div class="set-card">
+      <div class="set-row">
+        <span class="set-ico plain">${L.walrus}</span>
+        <div class="set-main"><div class="set-label">Walrus memory <span class="spill ok">testnet</span></div><div class="set-desc">Encrypted two-tier memory — yours, on decentralized storage.</div></div>
+        <div class="set-ctl"><button class="set-btn" data-ov-nav="walrus">Open</button></div>
+      </div>
+      <div class="set-row">
+        <span class="set-ico">${icon("database")}</span>
+        <div class="set-main"><div class="set-label">Encrypt every memory</div><div class="set-desc">Ciphertext leaves the machine; topics stay opaque on the network.</div></div>
+        <div class="set-ctl"><div class="sw on" title="always on — secret-zero"></div></div>
+      </div>
+    </div>
+    <div class="set-group">Connect</div>
+    <div class="set-card">
+      <div class="set-row">
+        <span class="set-ico plain">${L.telegram}</span>
+        <div class="set-main"><div class="set-label">Telegram</div><div class="set-desc">Approve &amp; drive the agent from your phone, redaction-walled.</div></div>
+        <div class="set-ctl"><button class="set-btn ghost" data-ov-nav="general">Connect</button></div>
+      </div>
+    </div>
+    <div class="set-group">Appearance &amp; safety</div>
+    <div class="set-card">
+      <div class="set-row">
+        <span class="set-ico">${icon("theme")}</span>
+        <div class="set-main"><div class="set-label">Theme</div></div>
+        <div class="set-ctl">${seg(theme, [["dark", "Dark"], ["light", "Light"]], "data-theme-set")}</div>
+      </div>
+      <div class="set-row">
+        <span class="set-ico">${icon("shield")}</span>
+        <div class="set-main"><div class="set-label">Funds &amp; keys <span class="spill lock">hard-locked</span></div><div class="set-desc">Wallet · signing · chain-write are unrepresentable — not a toggle.</div></div>
+        <div class="set-ctl"><div class="sw" style="opacity:.4;pointer-events:none"></div></div>
+      </div>
+    </div>`;
+}
 async function settingsSectionHTMLFor(section) {
   switch (section) {
+    case "overview": return overviewSettingsHTML();
     case "general": return await settingsPanelHTML();
     case "editor": return editorSettingsHTML();
     case "host": return await hostPanelHTML();
@@ -2487,14 +2665,14 @@ async function settingsSectionHTMLFor(section) {
     case "evolution": return await perfLedgerPanelHTML();
     case "evidence": return await evidencePanelHTML();
     case "websetup": return webSetupPanelHTML();
-    default: return await settingsPanelHTML();
+    default: return overviewSettingsHTML();
   }
 }
 // The center Settings shell: a LEFT rail + a RIGHT content column (filled async).
 function settingsCenterHTML() {
   const rail = SETTINGS_SECTIONS
     .map(([key, label, glyph]) => `<button class="settings-rail-item${key === settingsSection ? " on" : ""}" data-settings-section="${esc(key)}">
-        <span class="sri-glyph">${esc(glyph)}</span><span class="sri-label">${esc(label)}</span>
+        <span class="sri-glyph">${icon(glyph)}</span><span class="sri-label">${esc(label)}</span>
       </button>`)
     .join("");
   return `<div class="settings-center">
@@ -2534,6 +2712,9 @@ function setSettingsSection(key) {
 function openCenterPanel(kind, name, glyph) {
   if (!editor.panels.some((p) => p.panel === kind)) editor.panels.push({ panel: kind, name, glyph });
   editor.activePanel = kind;
+  // FIX: a center panel (Settings) renders inside the CODE pane, which hero-mode hides on the
+  // empty welcome screen ⇒ the panel would open invisibly. Leave hero-mode for the 3-pane.
+  const b = $("#body"); if (b) b.classList.remove("hero-mode");
   renderEditor();
 }
 // Close a CENTER tab; if it was active, fall back to a file / diff / placeholder.
@@ -2541,6 +2722,10 @@ function closeCenterPanel(kind) {
   const i = editor.panels.findIndex((p) => p.panel === kind);
   if (i >= 0) editor.panels.splice(i, 1);
   if (editor.activePanel === kind) editor.activePanel = null;
+  const s = currentSession();
+  if ((!s || s.messages.length === 0) && !editor.activePanel && !editor.active && !editor.diffId) {
+    const b = $("#body"); if (b) b.classList.add("hero-mode"); // nothing open + empty session ⇒ welcome hero again
+  }
   renderEditor(); renderFiles();
 }
 // After a memory-only change (secret / telemetry) made FROM a settings surface, re-render it
@@ -2555,7 +2740,14 @@ function settingsSurfaceRefresh(section) {
 
 function bindPanelActions(root) {
   $$("[data-theme-set]", root).forEach((b) =>
-    b.addEventListener("click", () => setTheme(b.dataset.themeSet))
+    b.addEventListener("click", () => { setTheme(b.dataset.themeSet); if (editor.activePanel === "settings") fillCenterPanel(); })
+  );
+  // FACELIFT C — Overview hub controls: one-touch nav to a rail section · set autonomy mode.
+  $$("[data-ov-nav]", root).forEach((b) =>
+    b.addEventListener("click", () => setSettingsSection(b.dataset.ovNav))
+  );
+  $$("[data-ov-mode]", root).forEach((b) =>
+    b.addEventListener("click", () => { setAutonomyMode(b.dataset.ovMode); if (editor.activePanel === "settings") fillCenterPanel(); })
   );
   // P2-S3: Editor section (GUI-owned prefs; localStorage only). UI / code font apply
   // immediately + re-fill the section so the active choice reflects; layout reset clears the
@@ -4326,11 +4518,10 @@ function onCodeBodyClick(e) {
    BEFORE opening so it is idempotent (a reload never re-pops it). Pure static panel
    ⇒ works in any build (no invoke / no Tauri dependency). */
 function maybeFirstRunDisclosure() {
-  let shown = null;
-  try { shown = localStorage.getItem("sinabro.disclosed"); } catch (_) {}
-  if (shown) return;
-  try { localStorage.setItem("sinabro.disclosed", "1"); } catch (_) {}
-  openPanel("disclosure");
+  // FACELIFT (2026-06-22): the full-window welcome HERO is the first-run onboarding now;
+  // the capability disclosure is on-demand via the topbar "?" (data-action="disclosure"),
+  // never an auto-modal covering the hero. (D-2 honored: never forced, always recallable.)
+  return;
 }
 
 /* ── init ────────────────────────────────────────────────────────────────── */
@@ -4404,6 +4595,7 @@ async function init() {
   loadProposals();
   startInboundTelegramPoll();   // E13-2: surface inbound owner Telegram messages as cards (read-only poll)
   maybeFirstRunDisclosure();   // R10: first-run capability disclosure (1x, then remembered)
+  fillIcons();   // FACELIFT: fill the static [data-icon] SVGs (topbar · agent rail · files)
   if (!hasTauri()) toast("Tauri bridge not detected — run with `cargo tauri dev` to dispatch commands into the core.");
 }
 // blind-debug: surface any uncaught runtime error as a toast (agent can't see console)
