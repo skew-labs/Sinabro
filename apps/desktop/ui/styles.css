@@ -499,13 +499,13 @@ input, textarea { font-family: inherit; }
 /* ═══════════════ H — code WORK AREA facelift (prompt composer already glass) ═══════════════
    Glass chrome (tabs · viewer-meta · diff-head), a readable code surface (the grid canvas
    stays only for the empty "Your code, live" hero), refined gutter + a glowing placeholder. */
-.code-tabs { background: rgba(14,17,22,0.32); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.code-tabs { background: var(--glass-head); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 .tab.active { background: rgba(255,255,255,0.04); }
 .code-body { background: transparent; }
 .viewer, .cm6-host, .diff-body, .viewer-edit-area { background: var(--bg); }
 .cm6-host .cm-editor, .cm6-host .cm-gutters { background: var(--bg); }
 .viewer-gutter { background: rgba(255,255,255,0.014); border-right: 1px solid var(--border); }
-.viewer-meta, .diff-head { background: rgba(19,23,29,0.62); -webkit-backdrop-filter: blur(16px) saturate(180%); backdrop-filter: blur(16px) saturate(180%); }
+.viewer-meta, .diff-head { background: var(--glass-meta); -webkit-backdrop-filter: blur(16px) saturate(180%); backdrop-filter: blur(16px) saturate(180%); }
 .editor-placeholder { gap: 13px; }
 .ph-mark { color: var(--accent); opacity: 0.92; filter: drop-shadow(0 0 16px rgba(141,162,255,0.35)); }
 .ph-mark .ic { width: 40px; height: 40px; }
@@ -789,37 +789,48 @@ input, textarea { font-family: inherit; }
   --text: #f3f5f9; --text-2: #b4bbc7; --muted: #737b88; --faint: #515861;
   --accent: #8da2ff; --accent-2: #6f7ef0; --accent-soft: rgba(141,162,255,0.16);
   --select: rgba(141,162,255,0.28);
+  /* glass surfaces + canvas — TOKENIZED so light mode mirrors with white glass */
+  --glass-chrome: rgba(13,16,21,0.55); --glass-status: rgba(9,11,15,0.55);
+  --glass-pane: rgba(10,12,16,0.40); --glass-head: rgba(14,17,22,0.30);
+  --glass-meta: rgba(19,23,29,0.62); --glass-pop: rgba(19,23,29,0.84); --glass-panel: rgba(19,23,29,0.50);
+  --grid-line: rgba(255,255,255,0.026); --glow-1: rgba(116,186,255,0.13); --glow-2: rgba(141,162,255,0.08);
+}
+[data-theme="light"] {
+  /* FACELIFT v2 light — frosted WHITE glass on the light canvas (mirror of dark tokens) */
+  --glass-chrome: rgba(255,255,255,0.66); --glass-status: rgba(247,249,252,0.70);
+  --glass-pane: rgba(255,255,255,0.52); --glass-head: rgba(255,255,255,0.50);
+  --glass-meta: rgba(248,250,253,0.72); --glass-pop: rgba(255,255,255,0.88); --glass-panel: rgba(255,255,255,0.72);
+  --grid-line: rgba(20,24,32,0.045); --glow-1: rgba(96,150,230,0.12); --glow-2: rgba(120,140,225,0.07);
 }
 /* SIGNATURE canvas — soft top glow (brand cyan → indigo) over a faint coordinate
    dot-grid (the "instrument" cue + depth). Painted on body so glass chrome blurs it. */
 body {
   background-color: var(--bg);
   background-image:
-    radial-gradient(135% 92% at 50% -10%, rgba(116,186,255,0.13), transparent 55%),
-    radial-gradient(80% 60% at 100% -2%, rgba(141,162,255,0.08), transparent 50%),
-    linear-gradient(rgba(255,255,255,0.026) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.026) 1px, transparent 1px);
+    radial-gradient(135% 92% at 50% -10%, var(--glow-1), transparent 55%),
+    radial-gradient(80% 60% at 100% -2%, var(--glow-2), transparent 50%),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
   background-size: 100% 100%, 100% 100%, 30px 30px, 30px 30px;
   background-attachment: fixed;
 }
-/* GLASS chrome — translucent + blur (WKWebView: -webkit FIRST, LITERAL values;
-   saturate restores the chroma the blur washes out). */
+/* GLASS chrome — translucent + blur (WKWebView: -webkit FIRST; theme-aware tokens) */
 .topbar {
-  background: rgba(13,16,21,0.55);
+  background: var(--glass-chrome);
   -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%);
 }
 .statusbar {
-  background: rgba(9,11,15,0.55);
+  background: var(--glass-status);
   -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
 }
-.pane-agent, .pane-files { background: rgba(10,12,16,0.40); }
+.pane-agent, .pane-files { background: var(--glass-pane); }
 .pane-code { background: transparent; }
 .pane-head, .term-dock {
-  background: rgba(14,17,22,0.30);
+  background: var(--glass-head);
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
 }
 .ss-popover, .overlay-card, .ac, #panel .overlay-card {
-  background: rgba(19,23,29,0.84);
+  background: var(--glass-pop);
   -webkit-backdrop-filter: blur(28px) saturate(180%); backdrop-filter: blur(28px) saturate(180%);
 }
 .overlay { background: rgba(0,0,0,0.46); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
@@ -854,6 +865,7 @@ body {
 /* glowing brand logo on the welcome hero — mix-blend drops the dark plate so the cyan
    vortex floats + glows on the canvas */
 .empty-logo { width: 76px; height: 76px; border-radius: 19px; display: block; mix-blend-mode: screen; filter: drop-shadow(0 0 28px rgba(116,186,255,0.5)); }
+[data-theme="light"] .empty-logo { mix-blend-mode: normal; filter: drop-shadow(0 0 18px rgba(96,150,230,0.40)); }
 
 /* icon system — stroke SVGs sized by 1em so each scales with its button's font-size */
 .ic { width: 1em; height: 1em; display: inline-block; vertical-align: -0.14em; flex: none; }
@@ -872,7 +884,7 @@ body {
 /* ═══════════════ FACELIFT C — settings as a VISUAL control panel ═══════════════
    Toggle switches · segmented controls · one-touch action buttons · logo cards ·
    status pills. Replaces the text-dump rows. Same design language (glass · indigo). */
-.settings-center { background: rgba(19,23,29,0.5); -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%); }
+.settings-center { background: var(--glass-panel); -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%); }
 .settings-rail-item { gap: 10px; padding: 8px 11px; border-radius: 9px; }
 .settings-rail-item .sri-glyph { width: 16px; height: 16px; display: inline-flex; align-items: center; }
 .settings-rail-item .sri-glyph .ic { width: 16px; height: 16px; }

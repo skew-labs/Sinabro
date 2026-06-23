@@ -1701,10 +1701,7 @@ async function modelPanelHTML() {
       kRow(icon("shield"), "Egress", "One-shot, bounded, phrase auto-injected; no silent fallback (core-enforced).", kPill("gated", "ok")),
     ])}
     ${kGroup("Live consult")}
-    ${kCard([
-      kRow(icon("edit"), "Chat = one live call", "Type a question → ONE OpenRouter call. A line starting with a command word runs as that command instead.", ""),
-      kRow(icon("list"), "Provider status", "Routing, configured providers, posture.", kBtn("Run", 'data-panel-run="provider status"', true)),
-    ])}`;
+    ${kCard(kRow(icon("list"), "Provider status", "", kBtn("Run", 'data-panel-run="provider status"', true)))}`;
 }
 /* ── R7b: privacy · safety panel (all REAL backing; no fake claim) ─────────────
    Privacy is a product selling point (research D-4: no-account · opt-in telemetry ·
@@ -1723,8 +1720,8 @@ async function privacyPanelHTML() {
     ${kCard(kRow(icon("shield"), "Account", "None · no login · no cloud sync. sinabro never asks who you are.", kPill("local", "ok")))}
     ${kGroup("What leaves the machine")}
     ${kCard([
-      kRow(icon("zap"), "Egress channels", "provider · telegram · walrus — all gated, off by default. 0 live calls until you approve one.", ""),
-      kRow(icon("shield"), "Redaction wall", "Every outbound fragment is scanned; secret-shaped ⇒ denied, never sent.", kPill("on", "ok")),
+      kRow(icon("zap"), "Egress", "", kPill("provider · telegram · walrus", "") + " " + kPill("gated · off by default", "ok")),
+      kRow(icon("shield"), "Redaction wall", "", kPill("on", "ok")),
       kRow(icon("clock"), "Telemetry", tele ? "On — one local OTLP span per consult in ~/.mnemos/otel; not pushed off-box." : "Off — no spans written. (Opt-in.)", kToggle(tele, `data-telemetry-set="${tele ? "off" : "on"}"`)),
     ])}
     ${kGroup("On-device — file-over-app")}
@@ -1781,11 +1778,6 @@ async function auditPanelHTML() {
     ? `<div class="set-card"><div class="audit-feed">${recs.slice(0, 250).map(auditRowHTML).join("")}</div></div>${total > 250 ? kCard(kFact("Showing", `the 250 most recent of ${esc(String(total))}`)) : ""}`
     : kCard(kRow(icon("clock"), "No actions yet", "Run a command and it lands here.", ""));
   const otel = kCard(kRow(icon("clock"), "Telemetry trail", "Richer per-consult spans (loop · cost · guard) record to ~/.mnemos/otel when ON (enable in Privacy).", kPill(tele ? "on" : "off", tele ? "ok" : "")));
-  const undo = kCard([
-    kRow(icon("refresh"), "Undo — pending", "Decline before commit — close the diff to drop a proposed edit.", ""),
-    kRow(icon("refresh"), "Undo — applied", "Atomic + mode-preserved, but NO journal/undo-blob in v1 — review the diff before Approve.", ""),
-    kRow(icon("shield"), "Staleness", "An edit proposed against a since-changed file is refused (no blind re-apply).", kPill("fail-closed", "ok")),
-  ]);
   return `
     <div class="set-title">Activity &amp; audit</div>
     <div class="set-lede">Every dispatched action, newest first — the core's own verdict, redacted on this machine.</div>
@@ -1795,8 +1787,7 @@ async function auditPanelHTML() {
     ${feed}
     ${kGroup("Telemetry")}
     ${otel}
-    ${kGroup("Undo — honest scope")}
-    ${undo}`;
+    ${kCard(kRow(icon("shield"), "Edits reversible before commit · staleness refused", "", kPill("fail-closed", "ok")))}`;
 }
 /* ── E14-W2: the two-tier Walrus long-term memory panel ───────────────────────
    The agent's "메인 저장소" (MAIN INDEX) + per-memory "서브 저장소" (detail), surfaced
@@ -1831,18 +1822,13 @@ async function walrusPanelHTML() {
   try { wstat = await invoke("walrus_status"); } catch (_) { wstat = {}; }
   const L = CONNECTOR_LOGOS;
   const title = `<div class="set-title">Memory · Walrus</div><div class="set-lede">Encrypted two-tier memory the agent roams on its own — ciphertext on the wire, decrypted only here.</div>`;
-  const intro = kCard([
-    kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Two-tier store", "MAIN INDEX (id · topic · sub-blob) → per-memory SUB-STORE detail.", ""),
-    kRow(icon("database"), "Wire", "AES-256-GCM-SIV ciphertext on Walrus testnet; decrypted only on this machine.", kPill("encrypted", "ok")),
-    kRow(icon("zap"), "Autonomous", "The agent roams this same index mid-loop (memory walrus-index / walrus-fetch).", ""),
-    kRow(icon("shield"), "Locked", "No funds · custody / wallet / mainnet structurally unreachable (PD-6).", kPill("hard-locked", "lock")),
-  ]);
+  const intro = kCard(kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Encrypted · decrypted only here", "", kPill("encrypted", "ok") + " " + kPill("hard-locked", "lock")));
   const detailSlot = `<div id="walrus-detail">${kCard(kRow(icon("folder"), "Sub-store detail", "Select a memory above to fetch + decrypt its detail.", ""))}</div>`;
   if (!view || view.kind !== "index") {
     const reason = (view && view.reason) || "no main index";
     const empty = kCard([
       kRow(icon("database"), "No main index", esc(reason), kPill("empty", "")),
-      kRow(icon("refresh"), "Publish it", "Run memory backup-walrus &lt;phrase&gt; to publish the encrypted index.", ""),
+      kRow(icon("refresh"), "Publish the encrypted index", "", kBtn("backup-walrus", 'data-panel-run="memory backup-walrus"')),
     ]);
     return `${title}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${empty}`;
   }
@@ -1944,62 +1930,39 @@ function disclosurePanelHTML() {
    owner's approval, like the chat consult); the CORE stays the sole verifier (redaction,
    bounds, the class-typed ORACLE gate). custody/funds HARD-LOCKED throughout. */
 function flowsPanelHTML() {
-  const intro = kCard([
-    kRow(icon("zap"), "Orchestrate", "Frontier PLANS → Sinabro decomposes into typed sub-tasks → a task-routed local LoRA IMPLEMENTS → frontier SYNTHESIZES.", ""),
-    kRow(icon("shield"), "Verify", "Each result is checked by a class-typed ORACLE (a real sui move build in a network-DENIED sandbox); ONLY an oracle-verified result admits a write — never the model's say-so.", kPill("oracle-gated", "ok")),
-    kRow(icon("refresh"), "Evolve", "The autonomous Read-Execute-Write loop: ONLY verified + cross-memory-consistent patterns persist to your encrypted Walrus memory (DGM-H perf).", ""),
-    kRow(icon("database"), "Needs", "A local model server (ollama / vLLM / MLX) on the loopback for the EXECUTE brain; without one the run honest-degrades (never a faked result).", ""),
-  ]);
-  const orchestrate = kCard(kRow(icon("zap"), "Orchestrate a task", "Two-model loop — e.g. build a Sui counter module.",
-    `<input class="panel-input" data-flow-input="orchestrate" placeholder="task to orchestrate" autocomplete="off" spellcheck="false" />` + kBtn("Run", 'data-flow-run="orchestrate"')));
-  // B⑬ Plan Mode: PLAN first → review the sub-tasks (uncheck any to skip) → Approve & Run the
-  // approved subset. The implement+synthesize phases are INERT until the owner approves.
-  const planmode = kCard(kRow(icon("list"), "Plan Mode", "Review the sub-tasks before running — the plan is inert until you approve.",
+  const orchestrate = kCard(kRow(icon("zap"), "Orchestrate a task", "frontier plans · local executes · oracle-verified",
+    `<input class="panel-input" data-flow-input="orchestrate" placeholder="e.g. build a Sui counter module" autocomplete="off" spellcheck="false" />` + kBtn("Run", 'data-flow-run="orchestrate"')));
+  const planmode = kCard(kRow(icon("list"), "Plan Mode", "review sub-tasks before running",
     `<input class="panel-input" data-flow-input="planmode" placeholder="task to PLAN" autocomplete="off" spellcheck="false" />` + kBtn("Plan", "data-planmode-plan")))
     + `<div id="planmode-result" class="planmode-result"></div>`;
-  const evolve = kCard(kRow(icon("refresh"), "Evolve a goal", "Verified patterns persist to your encrypted Walrus memory.",
+  const evolve = kCard(kRow(icon("refresh"), "Evolve a goal", "verified patterns persist to Walrus",
     `<input class="panel-input" data-flow-input="evolve" placeholder="goal to autonomously evolve" autocomplete="off" spellcheck="false" />` + kBtn("Run", 'data-flow-run="evolve"')));
-  // TIER-2 (B#1/#2): the armed-ceremony buttons — each auto-injects its VERIFIED arm phrase
-  // (the GUI run IS the owner's approval, the proven flows/mega pattern); the CORE stays the
-  // sole verifier (arm ceremony + bounds + redaction; bold/mutate are bounded + revocable).
-  // The arg-needing ceremonies (serve-chat=session, run-frontier=task) show the locked
-  // preview (it teaches the exact ceremony) instead of a half-formed command. custody 🔒.
-  // The daemon surfaces — read-only status + owner-armed ceremonies. Each button keeps its
-  // exact data-panel-run line (the run IS the owner's approval); custody/funds stay 🔒.
   const daemon = kCard([
-    kRow(icon("zap"), "Status & surfaces", "Live runner state + the autonomy surfaces (read-only).",
+    kRow(icon("zap"), "Status & surfaces", "",
       kBtn("daemon status", 'data-panel-run="daemon status"', true) + kBtn("daemon serve", 'data-panel-run="daemon serve"', true) + kBtn("autonomy surfaces", 'data-panel-run="daemon"', true)),
-    kRow(icon("edit"), "Armed sessions", "Auto-inject the verified ceremony phrase — bounded · revocable.",
+    kRow(icon("edit"), "Armed sessions", "bounded · revocable",
       kBtn("Bold session (edit+run)", 'data-panel-run="daemon bold arm-bold-session-edit-run-bounded-revocable"') + kBtn("Run-mutate (local)", 'data-panel-run="daemon run-mutate arm-mutate-local-autonomy-bounded-revocable"') + kBtn("Apply exec proposal", 'data-panel-run="tool exec-apply exec-apply-owner-live"')),
-    kRow(icon("command"), "Ceremonies needing an arg", "These show the locked preview (it teaches the exact ceremony).",
+    kRow(icon("command"), "Needs an arg", "",
       kBtn("Serve-chat (needs session)", 'data-panel-run="daemon serve-chat"', true) + kBtn("Run-frontier (needs task)", 'data-panel-run="daemon run-frontier"', true)),
-    kRow(icon("shield"), "Safety", "Armed buttons auto-inject the verified ceremony phrase — the run IS your approval.", kPill("custody hard-locked", "lock")),
   ]);
   const routing = kCard([
-    kRow(icon("list"), "Dynamic-LoRA", "Sinabro emits (port, model_id) per sub-task; an external multi-LoRA server (vLLM Multi-LoRA / LoRAX) hot-swaps the adapter — never a faked missing adapter.", ""),
-    kFact("Config", "~/.mnemos/routing_table.txt"),
-    kRow(icon("zap"), "Seed table", "sui_move→naite_sui_move · solana_anchor→naite_solana_anchor · web3_frontend→web3_frontend_coder · audit→naite_audit · nl_bridge→nl_bridge.", ""),
-    kRow(icon("refresh"), "Modes", "A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (opt-in).", ""),
-    kRow(icon("database"), "Fully local", "Run ollama / vLLM / MLX on a loopback port + set SINABRO_LOCAL_PORT and the routing config — the SAME dynamic switching, on this machine.", ""),
+    kFact("Routing config", "~/.mnemos/routing_table.txt"),
+    kRow(icon("list"), "Edit adapter map", "", kBtn("Open LoRA / routing", 'data-ov-nav="routing"')),
   ]);
-  const lock = kCard(kRow(icon("shield"), "Funds &amp; keys", "Wallet · mainnet · chain-write — HARD-LOCKED; the oracle verifies, only verified patterns persist.", kPill("hard-locked", "lock")));
   return `
     <div class="set-title">Agent · autonomy</div>
     <div class="set-lede">A frontier model plans, a local model executes — every result oracle-verified before it persists.</div>
     ${kGroup("Orchestrate — two-model loop")}
     ${orchestrate}
-    ${kGroup("Plan Mode — review, approve, then run")}
+    ${kGroup("Plan Mode — review, approve, run")}
     ${planmode}
     ${kGroup("Evolve — autonomous Read-Execute-Write")}
     ${evolve}
-    ${kGroup("How it works")}
-    ${intro}
     ${kGroup("Autonomy (daemon)")}
     ${daemon}
     ${kGroup("Dynamic-LoRA routing")}
     ${routing}
-    ${kGroup("Safety")}
-    ${lock}`;
+    ${kCard(kRow(icon("shield"), "Wallet · mainnet · chain-write", "", kPill("hard-locked", "lock")))}`;
 }
 
 // ── MEGA "BUILD FOR REAL" capabilities panel (web3 read · settings-sync · codebase ·
@@ -2213,16 +2176,11 @@ async function routingPanelHTML() {
   if (!view || view.error) {
     return `${title}${kGroup("Dynamic-LoRA routing")}${kCard(kRow(icon("list"), "Routing unavailable", esc((view && view.error) || "no response"), kPill("error", "")))}`;
   }
-  const intro = kCard([
-    kRow(icon("list"), "Dynamic-LoRA", "Sinabro emits (port, model_id) per sub-task; the multi-LoRA server hot-swaps the adapter.", ""),
-    kRow(icon("refresh"), "Modes", "A sequential (default) · Macro per-chain worker (a different port) · B weighted-merge (a merged model_id).", ""),
-    kRow(icon("shield"), "Default", "The totality anchor — served when a kind is unmapped.", kPill("required", "")),
-    kFact("Config", esc(view.path || "routing_table.txt")),
-  ]);
+  const intro = kCard(kFact("Config", esc(view.path || "routing_table.txt")));
   // Binding rows keep the routing-row primitive (data-routing-* inputs); the card wraps them.
   const rows = (view.entries || []).map((e) => routingRowHTML(e.kind, e.port, e.model_id)).join("");
   const bindings = `<div class="set-card"><div id="routing-rows">${rows}</div></div>`
-    + kCard(kRow(icon("plus"), "Add a binding", "Transient until Save — the core is the validator.", kBtn("Add binding", "data-routing-add")));
+    + kCard(kRow(icon("plus"), "Add a binding", "", kBtn("Add binding", "data-routing-add")));
   const d = view.default || { port: "", model_id: "" };
   const dflt = `<div class="set-card"><div class="routing-row routing-default" data-routing-default>
       <span class="rt-deflabel">default</span>
@@ -2230,8 +2188,8 @@ async function routingPanelHTML() {
       <input class="panel-input rt-model" data-routing-default-model value="${esc(d.model_id)}" placeholder="default model_id" autocomplete="off" spellcheck="false" />
     </div></div>`;
   const save = kCard([
-    kRow(icon("refresh"), "Save routing table", "Core-validated + atomic · fail-closed (an invalid kind / empty model is refused). orchestrate/evolve pick it up on the next run.", `<button class="set-btn rt-save" data-routing-save>Save</button>`),
-    kRow(icon("shield"), "Safety", "port = a loopback worker port · model_id = the request-body adapter — no funds / wallet / chain (PD-6).", kPill("hard-locked", "lock")),
+    kRow(icon("refresh"), "Save routing table", "core-validated · atomic", `<button class="set-btn rt-save" data-routing-save>Save</button>`),
+    kRow(icon("shield"), "port = worker · model_id = adapter", "", kPill("hard-locked", "lock")),
   ]);
   // P2-S4f: ONE-CLICK "Connect an adapter" — pick a PEFT/LoRA folder, auto-read adapter_config.json,
   // check the expert kinds, Connect → builds the rows + SAVES through the SAME core write_routing_table.
@@ -2242,13 +2200,13 @@ async function routingPanelHTML() {
     `<label class="adapter-kind" style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input type="checkbox" data-adapter-kind value="${k}"${on ? " checked" : ""}/> ${esc(k)}</label>`
   ).join("");
   const connectCard = kCard([
-    kRow(icon("folder"), "Choose an adapter folder", "Pick a PEFT/LoRA folder (the one with adapter_config.json) — its base model is auto-detected; the served model id is suggested + editable.", kBtn("Choose folder…", "data-adapter-pick")),
+    kRow(icon("folder"), "Choose an adapter folder", "PEFT/LoRA folder · base auto-detected", kBtn("Choose folder…", "data-adapter-pick")),
     `<div class="set-row" id="adapter-status"><div class="set-main"><div class="set-desc">no adapter picked yet</div></div></div>`,
-    kRow(icon("code"), "Served model + port", "Must match your local server.",
+    kRow(icon("code"), "Served model + port", "",
       `<input class="panel-input rt-model" data-adapter-model placeholder="served model id (e.g. naite-foundations)" autocomplete="off" spellcheck="false" /><input class="panel-input rt-port" data-adapter-port value="11434" placeholder="port" inputmode="numeric" autocomplete="off" spellcheck="false" />`),
-    kRow(icon("list"), "Route these kinds", "Check the expert kinds to route to this adapter.",
+    kRow(icon("list"), "Route these kinds", "",
       `<div style="display:flex;flex-wrap:wrap;gap:4px">${adapterKinds}<label class="adapter-kind" style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" data-adapter-default/> also set as default</label></div>`),
-    kRow(icon("refresh"), "Connect adapter", "Writes the routing config only (core-validated + atomic) — then run a local server (ollama/mlx/vLLM) on that port serving the model id. sinabro never fakes a missing adapter.", kBtn("Connect adapter", "data-adapter-connect")),
+    kRow(icon("refresh"), "Connect adapter", "writes config · then serve it locally", kBtn("Connect adapter", "data-adapter-connect")),
   ]);
   return `${title}
     ${kGroup("Connect an adapter (one-click)")}
@@ -2371,28 +2329,15 @@ async function connectAdapter() {
    the S2 machinery. The model has no self-eval path. custody/funds untouched (PD-6). */
 async function skillsPanelHTML() {
   const reg = await runCardHTML("registry");
-  const intro = kCard([
-    kRow(icon("help"), "Skills", "Reproducible command bundles; sandbox + approval bound (no-commerce; PROPOSE-only).", ""),
-    kRow(icon("command"), "Eval", "Runs a skill's commands in the OS sandbox — Admin · typed-phrase · argv-only (no shell).", ""),
-    kRow(icon("shield"), "Sandbox", "Tier LocalWrite: read+write local, NETWORK kernel-DENIED · env-scrubbed (PATH/HOME/LANG/TERM only) · 10s timeout · output redacted.", kPill("network denied", "ok")),
-    kRow(icon("shield"), "Bind", "The eval score binds to the REALLY-run commands (no string-hash forgery); a candidate is never auto-promoted.", ""),
-  ]);
-  const evalRow = kCard([
-    kRow(icon("command"), "Eval a command", "Runs as the gated skill eval ceremony — the preview + Continue appear in the agent pane; Continue injects the phrase and runs the command in the sandbox.",
-      `<input class="panel-input" data-skill-eval-input placeholder="/bin/echo ok  ·  cargo test" autocomplete="off" spellcheck="false" />` + kBtn("Eval", "data-skill-eval")),
-  ]);
-  const lock = kCard(kRow(icon("shield"), "Safety", "NETWORK kernel-DENIED · no funds / wallet / chain (PD-6) · the model cannot self-eval.", kPill("hard-locked", "lock")));
   return `
     <div class="set-title">Skills</div>
-    <div class="set-lede">Reproducible command bundles — evaluated in a network-denied OS sandbox, owner-gated.</div>
-    ${kGroup("Registry (read-only)")}
+    <div class="set-lede">Reproducible command bundles — run in a network-denied sandbox, owner-gated.</div>
+    ${kGroup("Eval a command")}
+    ${kCard(kRow(icon("command"), "Run in sandbox", "",
+      `<input class="panel-input" data-skill-eval-input placeholder="/bin/echo ok  ·  cargo test" autocomplete="off" spellcheck="false" />` + kBtn("Eval", "data-skill-eval")))}
+    ${kGroup("Registry")}
     ${`<div class="set-card">${reg}</div>`}
-    ${kGroup("What eval does")}
-    ${intro}
-    ${kGroup("Eval a command (sandboxed, owner-gated)")}
-    ${evalRow}
-    ${kGroup("Safety")}
-    ${lock}`;
+    ${kCard(kRow(icon("shield"), "Sandbox", "", kPill("network denied", "ok") + " " + kPill("hard-locked", "lock")))}`;
 }
 /* ── P2-S4c: the DGM-H PERF-LEDGER view (Settings → Evolution, read-only) ───────────────
    Surfaces the autonomy evolve loop's performance ledger — <data_dir>/evolution_ledger.txt
@@ -2412,16 +2357,10 @@ async function perfLedgerPanelHTML() {
   if (!view || view.error) {
     return `${title}${kGroup("Perf-ledger")}${kCard(kRow(icon("undo"), "Perf-ledger unavailable", esc((view && view.error) || "no response"), kPill("error", "")))}`;
   }
-  const intro = kCard([
-    kRow(icon("undo"), "DGM-H", "Each evolved pattern carries a perf score: reinforced (verified-good downstream) vs demoted (failed downstream).", ""),
-    kRow(icon("shield"), "Confirm", "A pattern is 'confirmed' only after ≥1 independent verified-good AND never demoted — the model can never confirm itself (P-HALL).", kPill("oracle-gated", "ok")),
-    kFact("Ledger", esc(view.path || "evolution_ledger.txt")),
-    kRow(icon("database"), "Patterns", "The pattern CONTENT persists as encrypted #sinabro-pattern memories (see Memory · Walrus).", ""),
-  ]);
   const entries = view.entries || [];
   let table;
   if (!entries.length) {
-    table = kCard(kRow(icon("undo"), "No patterns evolved yet", "Run an Evolve goal (Agent · autonomy) and verified patterns land here.", kPill("empty", "")));
+    table = kCard(kRow(icon("undo"), "No patterns evolved yet", "Run an Evolve goal in Agent · autonomy.", kPill("empty", "")));
   } else {
     const rows = entries.map((e) => {
       const r = e.reinforced || 0, d = e.demoted || 0, net = r - d;
@@ -2432,16 +2371,12 @@ async function perfLedgerPanelHTML() {
           <span class="perf-stat">↑${esc(String(r))} ↓${esc(String(d))} · net ${esc(String(net))}</span>
         </div>`;
     }).join("");
-    table = `<div class="set-card"><div class="perf-feed">${rows}</div></div>${kCard(kFact("Tracked", `${esc(String(entries.length))} pattern(s)`))}`;
+    table = `<div class="set-card"><div class="perf-feed">${rows}</div></div>`;
   }
-  const lock = kCard(kRow(icon("shield"), "Safety", "Read-only · no funds / wallet / chain (PD-6) · only oracle-verified + cross-memory-consistent patterns ever persist.", kPill("hard-locked", "lock")));
   return `${title}
-    ${kGroup("How it works")}
-    ${intro}
-    ${kGroup("Tracked patterns")}
+    ${kGroup(`Tracked patterns${entries.length ? ` · ${entries.length}` : ""}`)}
     ${table}
-    ${kGroup("Safety")}
-    ${lock}`;
+    ${kCard(kRow(icon("shield"), "Oracle-gated · read-only", "", kPill("hard-locked", "lock")))}`;
 }
 /* ── P2-S4d: the AUDIT-DETECT runner (Settings → Evidence) ──────────────────────────────
    Surfaces the LIVE `audit detect <path>` verb (E11-2 ⑮). RECONCILED on the real binary:
@@ -2452,30 +2387,16 @@ async function perfLedgerPanelHTML() {
    through the owner-gated, kernel-sandboxed repro chokepoint, never the GUI, never auto. The
    model reaches detect only as a gated READ tool. custody/funds untouched (PD-6). */
 async function evidencePanelHTML() {
-  const intro = kCard([
-    kRow(icon("folder"), "Audit detect", "Scan a local source tree for impact-ranked CANDIDATE leads (the audit game-tree engine, E11-2).", ""),
-    kRow(icon("shield"), "Candidate ≠ finding", "Every item is a LEAD, never a confirmed finding; promotion needs an owner-gated, kernel-sandboxed reproduced LOCAL receipt — never here, never auto.", kPill("leads only", "ok")),
-    kRow(icon("shield"), "Read-only", "Pure local analysis; no egress · no exec · hashed anchors (no raw source byte leaves).", ""),
-    kRow(icon("zap"), "The model", "Reaches detect only as a gated READ tool; it cannot promote a candidate or run a repro.", ""),
-  ]);
-  const runner = kCard(kRow(icon("folder"), "Scan a path", "Runs audit detect &lt;path&gt; (read-only) — the ranked candidate report appears in the agent pane.",
-    `<input class="panel-input" data-audit-detect-input placeholder="crates/  ·  src  ·  .  for cwd" autocomplete="off" spellcheck="false" />` + kBtn("Detect", "data-audit-detect")));
-  const chain = kCard([
-    kRow(icon("shield"), "Evidence chain", "The audit trail itself is hash-linked, append-only, tamper-evident (~/.mnemos/audit) — a broken link / fork / byte-edit renders RED.", kPill("tamper-evident", "ok")),
-    kRow(icon("list"), "Inspect", "Run the audit command (GREEN/RED chain status) or evidence pack from the palette (⌘K) / chat.", ""),
-  ]);
-  const lock = kCard(kRow(icon("shield"), "Safety", "Read-only · no funds / wallet / chain (PD-6) · candidate promotion stays owner-gated (sandboxed repro).", kPill("hard-locked", "lock")));
   return `
     <div class="set-title">Evidence</div>
-    <div class="set-lede">Scan for candidate leads and inspect the tamper-evident audit chain — promotion stays owner-gated.</div>
-    ${kGroup("Audit detect (candidate leads)")}
-    ${intro}
-    ${kGroup("Scan a path")}
-    ${runner}
-    ${kGroup("Evidence chain (E5)")}
-    ${chain}
-    ${kGroup("Safety")}
-    ${lock}`;
+    <div class="set-lede">Scan a local tree for candidate leads — promotion stays owner-gated.</div>
+    ${kGroup("Audit detect")}
+    ${kCard(kRow(icon("folder"), "Scan a path", "",
+      `<input class="panel-input" data-audit-detect-input placeholder="crates/  ·  src  ·  .  for cwd" autocomplete="off" spellcheck="false" />` + kBtn("Detect", "data-audit-detect")))}
+    ${kGroup("Audit chain")}
+    ${kCard(kRow(icon("shield"), "Inspect tamper-evident chain", "",
+      kBtn("audit", 'data-panel-run="audit"') + " " + kBtn("evidence pack", 'data-panel-run="evidence pack"')))}
+    ${kCard(kRow(icon("shield"), "Candidate ≠ finding", "", kPill("leads only", "ok") + " " + kPill("hard-locked", "lock")))}`;
 }
 /* ── P2-S4e: the WEB / ENV-SETUP guided chain (Settings → Web / Setup; owner Q2=A) ───────
    A guided, PER-STEP-APPROVED chain over LIVE verbs (RECONCILED on the real desktop-feature
@@ -2488,32 +2409,24 @@ async function evidencePanelHTML() {
    download click is the owner ARM gesture (like the flows phrases); downloaded bytes are NEVER
    executed — only an explicit, gated install step runs. custody/funds HARD-LOCKED (PD-6). */
 function webSetupPanelHTML() {
-  const intro = kCard([
-    kRow(icon("plus"), "Guided chain", "Search the web → fetch a page → (owner-armed) download to /tmp → propose an install command — each step is a SEPARATE owner-approved action, never an autonomous run.", ""),
-    kRow(icon("zap"), "Cost", "search/fetch = a read-only network GET (source-linked advisory) · download = a bounded armed GET to a temp file (SSRF-walled, host-allowlisted) · install = a gated local exec.", ""),
-    kRow(icon("shield"), "Honest-degrade", "A step shows its real state — e.g. download needs the download-egress build; nothing is ever faked as 'done'.", kPill("no fakes", "ok")),
-  ]);
-  const search = kCard(kRow(icon("plus"), "1 · Search the web", "Read-only, source-linked advisory.",
-    `<input class="panel-input" data-web-search-input placeholder="install ripgrep macos" autocomplete="off" spellcheck="false" />` + kBtn("Search", "data-web-search")));
-  const fetchRow = kCard(kRow(icon("folder"), "2 · Fetch a page", "https://… — read-only, source-linked.",
-    `<input class="panel-input" data-web-fetch-input placeholder="https://…" autocomplete="off" spellcheck="false" />` + kBtn("Fetch", "data-web-fetch")));
-  const download = kCard(kRow(icon("database"), "3 · Download to /tmp", "Owner-armed single-shot bounded GET · 8-host allowlist · honest-degrades to 'transport not compiled' unless built with download-egress.",
-    `<input class="panel-input" data-download-input placeholder="https://allowlisted-host/… → /tmp" autocomplete="off" spellcheck="false" />` + kBtn("Download", "data-download")));
-  const install = kCard(kRow(icon("command"), "4 · Install step", "Runs as the gated tool run ceremony — the preview + Continue appear in the agent pane; Continue runs it bounded + env-scrubbed (no shell).",
-    `<input class="panel-input" data-toolrun-input placeholder="brew install ripgrep" autocomplete="off" spellcheck="false" />` + kBtn("Propose", "data-toolrun")));
-  const lock = kCard(kRow(icon("shield"), "Safety", "Each step owner-approved · no funds / wallet / chain (PD-6) · downloaded bytes are NEVER executed (only an explicit install step runs, gated).", kPill("hard-locked", "lock")));
   return `
     <div class="set-title">Web / setup</div>
-    <div class="set-lede">A guided, per-step-approved chain — search, fetch, download, install — never an autonomous run.</div>
-    ${kGroup("How it works")}
-    ${intro}
-    ${kGroup("Guided steps")}
-    ${search}
-    ${fetchRow}
-    ${download}
-    ${install}
-    ${kGroup("Safety")}
-    ${lock}`;
+    <div class="set-lede">Search, fetch, download, install — each step a separate one-click action.</div>
+    ${kGroup("Web — read-only")}
+    ${kCard([
+      kRow(icon("plus"), "Search the web", "",
+        `<input class="panel-input" data-web-search-input placeholder="install ripgrep macos" autocomplete="off" spellcheck="false" />` + kBtn("Search", "data-web-search")),
+      kRow(icon("folder"), "Fetch a page", "",
+        `<input class="panel-input" data-web-fetch-input placeholder="https://…" autocomplete="off" spellcheck="false" />` + kBtn("Fetch", "data-web-fetch")),
+    ])}
+    ${kGroup("Setup — owner-gated")}
+    ${kCard([
+      kRow(icon("database"), "Download to /tmp", "armed · 8-host allowlist",
+        `<input class="panel-input" data-download-input placeholder="https://allowlisted-host/…" autocomplete="off" spellcheck="false" />` + kBtn("Download", "data-download")),
+      kRow(icon("command"), "Install step", "gated local exec",
+        `<input class="panel-input" data-toolrun-input placeholder="brew install ripgrep" autocomplete="off" spellcheck="false" />` + kBtn("Propose", "data-toolrun")),
+    ])}
+    ${kCard(kRow(icon("shield"), "Downloaded bytes are never executed", "", kPill("per-step approval", "ok") + " " + kPill("hard-locked", "lock")))}`;
 }
 /* ── P4: Host / Remote (SSH) — the VM-lane picker (Cursor / VS Code / Zed Remote-SSH analog) ──
    sinabro runs its core LOCALLY or on a REMOTE SSH host (the VM lane): host=vm + an ssh_target ⇒
@@ -2536,23 +2449,13 @@ async function hostPanelHTML() {
   }
   const isVm = cfg.mode === "vm";
   const target = cfg.ssh_target || "";
-  const intro = kCard([
-    kFact("Mode", `${esc(cfg.mode || "local")}${isVm && target ? " → " + esc(target) : ""}`),
-    kRow(icon("command"), "Local", "sinabro runs on THIS machine (loopback model/LoRA; no SSH).", ""),
-    kRow(icon("refresh"), "Remote (SSH)", "The SAME dispatched argv runs on sinabro on the remote box (Cursor / VS Code Remote-SSH style) — the agent + its loopback model/LoRA live on the remote; the GUI just drives.", ""),
-    kRow(icon("database"), "Pre-installed", "The remote box must have sinabro INSTALLED (no auto-uploaded server); the model/LoRA stays on the remote's loopback (no off-box model egress).", ""),
-  ]);
-  const modeRow = kCard(kRow(icon("zap"), "Current mode", isVm ? "Remote (SSH)." : "Local (this machine).",
+  const intro = kCard(kFact("Mode", `${esc(cfg.mode || "local")}${isVm && target ? " → " + esc(target) : ""}`));
+  const modeRow = kCard(kRow(icon("zap"), "Current mode", "",
     kPill(isVm ? "remote" : "local", "ok") + (isVm ? kBtn("Switch to Local", "data-host-local", true) : "")));
-  const remoteRow = kCard(kRow(icon("refresh"), "Remote SSH target", "Connect saves host=vm; Test runs status on the remote — a typed error (NEVER a silent local fallback) if unreachable or sinabro is absent.",
+  const remoteRow = kCard(kRow(icon("refresh"), "Remote SSH target", "",
     `<input class="panel-input" data-host-target placeholder="user@host[:port] (e.g. me@gpu-box:22)" value="${esc(target)}" autocomplete="off" spellcheck="false" />` + kBtn("Connect (SSH)", "data-host-save-vm") + kBtn("Test", "data-host-test", true)));
-  const sec = kCard([
-    kRow(icon("shield"), "Auth", "BatchMode (keys / ssh-agent only; no interactive password).", kPill("keys only", "ok")),
-    kRow(icon("shield"), "Host keys", "TOFU-pinned to an app-owned known_hosts, then fail-closed.", ""),
-    kRow(icon("shield"), "Argv", "Closed charset gate + POSIX single-quoted (no shell-metachar / option injection).", ""),
-    kRow(icon("shield"), "No silent fallback", "An unreachable / misconfigured remote is a typed error, never quietly local.", kPill("fail-closed", "ok")),
-  ]);
-  const lock = kCard(kRow(icon("shield"), "Safety", "custody / funds / wallet / chain-write — HARD-LOCKED on ANY host (local or remote); the model/LoRA never leaves the running host's loopback.", kPill("hard-locked", "lock")));
+  const sec = kCard(kRow(icon("shield"), "Connection security", "", kPill("keys only", "ok") + " " + kPill("host-key pinned", "ok") + " " + kPill("no silent fallback", "ok")));
+  const lock = kCard(kRow(icon("shield"), "Custody hard-locked on any host", "", kPill("hard-locked", "lock")));
   return `${title}
     ${kGroup("Where sinabro runs")}
     ${intro}
