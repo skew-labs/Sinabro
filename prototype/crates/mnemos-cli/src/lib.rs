@@ -57,9 +57,16 @@ pub mod grammar;
 pub mod lsp;
 pub mod mcp;
 pub mod memory;
+pub mod memory_crag;
 pub mod memory_store;
 pub mod memory_walrus;
+pub mod reconcile_oracle;
 pub mod revert_blob;
+pub mod zerog_attestation;
+pub mod zerog_chain;
+pub mod zerog_finetune;
+pub mod zerog_inft;
+pub mod zerog_storage;
 // ENDGAME E10-2a (⑬ AGENT ACTS): the single gated EXECUTE chokepoint for
 // agent-proposed side effects — `execute_authorized_mutate` requires a
 // MutateCapability witness (IV-A1), so no exec/edit runs without owner authority.

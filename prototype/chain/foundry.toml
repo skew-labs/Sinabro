@@ -1,0 +1,16 @@
+# Foundry config — sinabro × 0G Buildathon W2-D PatternRegistry.
+# solc 0.8.19 + evm_version=cancun are MANDATORY per 0G docs (0.8.26 flagged risky;
+# Galileo requires cancun). A plain registry needs no 0G precompile.
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc = "0.8.19"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+# Galileo testnet RPC (read-only here; the owner supplies a key only at deploy time).
+[rpc_endpoints]
+galileo = "https://evmrpc-testnet.0g.ai"

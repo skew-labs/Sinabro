@@ -1,0 +1,27 @@
+================================================================================
+ SINABRO / NAITE Stage A PR Protocol - USE TWO SESSIONS
+================================================================================
+
+이 파일은 더 이상 Claude Code에 그대로 먹이는 단일 실행 프롬프트가 아니다.
+Stage A atom 1개는 반드시 두 개의 독립 세션으로 처리한다.
+
+1. 구현/산출 세션:
+   /Users/heoun/mnemos/prompt/MNEMOS_STAGE_A_SESSION_1_IMPLEMENT_PROMPT.txt
+
+2. 검증/전진 세션:
+   /Users/heoun/mnemos/prompt/MNEMOS_STAGE_A_SESSION_2_VERIFY_PROMPT.txt
+
+왜 분리했나:
+- GOAL 파일과 planning-complete 메타가 Claude Code를 헷갈리게 만들 수 있다.
+- 구현 세션은 code + 21-file diet sidecar를 무조건 생성한다.
+- 검증 세션은 독립적으로 sidecar completeness, tests, gates, redaction, BUILD_STATE 전진을 판단한다.
+- 한 세션에서 "구현했다"고 자기보고하는 것은 진실이 아니다.
+
+Stage A 진실원:
+- atom plan: /Users/heoun/mnemos/MNEMOS_ATOM_PLAN.md
+- build state: 작업 루트에서 MNEMOS_BUILD_STATE.md를 탐색한다.
+- GOAL 파일은 Stage A PR 실행 중 읽지 않는다.
+
+한 줄:
+구현자는 산출하고, 검증자는 의심한다. 둘 다 21-file 식단을 남겨야 한다.
+================================================================================

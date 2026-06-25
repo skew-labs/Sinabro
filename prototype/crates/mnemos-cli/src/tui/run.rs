@@ -1812,10 +1812,9 @@ pub(crate) fn dataset_live_lines() -> Vec<String> {
     // --- ingest: redaction gate (clean ok; residue denied) + content dedup ---
     let redaction_clean =
         DatasetIngestView::redaction_gate("a perfectly ordinary sentence").is_ok();
-    let residue_denied = DatasetIngestView::redaction_gate(
-        "ghp_ABCDEFGHIJKLMNOP aws_secret_access_key=AKIA",
-    )
-    .is_err();
+    let residue_denied =
+        DatasetIngestView::redaction_gate("ghp_ABCDEFGHIJKLMNOP aws_secret_access_key=AKIA")
+            .is_err();
     let files = [
         IngestFileSpec::new(1, 100, [0xAA; 32]),
         IngestFileSpec::new(2, 200, [0xAA; 32]),

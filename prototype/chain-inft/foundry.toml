@@ -1,0 +1,29 @@
+# Foundry config — sinabro × 0G Buildathon W3 ERC-7857 iNFT mint.
+# Pins the REAL 0gfoundation/0g-agent-nft contract (main @ b86e108a): an UPGRADEABLE
+# AgentNFT (OZ 5.0.2) ⇒ solc 0.8.20 (its `pragma ^0.8.20`) + evm_version=cancun
+# (Galileo requirement). Kept SEPARATE from chain/ (W2-D, solc 0.8.19) so that
+# project stays byte-untouched + GREEN. Deps vendored under lib/ (forge-std 1.16.1,
+# openzeppelin-contracts + -upgradeable v5.0.2) — mnemos is not a git repo, so libs
+# are copied (the same way chain/lib/forge-std is), not git submodules.
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc = "0.8.20"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+]
+# The cross-language byte lock reads the machine-written golden (golden/mint_calldata.hex)
+# at test time and asserts solc's own abi-encoding equals it (read-only, no write).
+fs_permissions = [{ access = "read", path = "./golden" }]
+
+# Galileo testnet RPC (read-only here; the owner supplies a key only at deploy time).
+[rpc_endpoints]
+galileo = "https://evmrpc-testnet.0g.ai"

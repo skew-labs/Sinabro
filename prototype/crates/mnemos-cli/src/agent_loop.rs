@@ -1115,11 +1115,20 @@ fn frontier_walrus_index_result(_read: ReadCapability) -> (String, bool) {
     }
 }
 
-/// `memory walrus-fetch <id>` for a FRONTIER turn (E14-W2): the agent enters the SUB-STORE
-/// for `id` (via the MAIN INDEX), fetches the encrypted detail from Walrus, and decrypts it
-/// LOCALLY. The decrypted detail is redact-belted before it enters the prompt (SI-2). A
-/// successful fetch consumes K; a deny / not-compiled never does.
-fn frontier_walrus_fetch_result(_read: ReadCapability, memory_id: u64) -> (String, bool) {
+/// `memory walrus-fetch <id>` for a FRONTIER turn (E14-W2 + W4 Slice 2 P-RAG): the agent
+/// enters the SUB-STORE for `id` via the MAIN INDEX with a RESILIENT fetch (Walrus
+/// PRIMARY → 0G FALLBACK), then a DETERMINISTIC CRAG evaluator labels the result
+/// Correct/Ambiguous/Incorrect against the task `query`. On an Incorrect (off-topic)
+/// fetch it WIDENS to the best-ranked OTHER index entries (bounded) — turning a silent
+/// wrong retrieval into a detected, recovered event; the agent prefers VERIFIED memory.
+/// The chosen detail is redact-belted (SI-2) before it enters the prompt. A successful
+/// fetch consumes K; a deny / not-compiled never does. The evaluator is 0 LLM tokens
+/// (META-LAW: the model proposes the tool call, an L0 check judges).
+fn frontier_walrus_fetch_result(
+    _read: ReadCapability,
+    memory_id: u64,
+    query: &str,
+) -> (String, bool) {
     #[cfg(feature = "put-fixture-net")]
     {
         let store = match crate::memory_store::PersistedStore::open_local() {
@@ -1131,31 +1140,74 @@ fn frontier_walrus_fetch_result(_read: ReadCapability, memory_id: u64) -> (Strin
                 );
             }
         };
-        match crate::memory_walrus::fetch_sub_content(&store, memory_id) {
-            Ok(content) => {
-                let fragments = [content.as_str()];
-                let safe = match redact(&RedactionRequest {
-                    fragments: &fragments,
-                    candidate_memory_ids: &[],
-                    deleted_ids: &[],
-                    include_private_memory: false,
-                }) {
-                    Ok(r) if r.secret_fragments_denied_u32() == 0 => {
-                        format!("walrus memory id={memory_id} (fetched + decrypted):\n{content}")
-                    }
-                    _ => format!("walrus memory id={memory_id}: withheld (secret-shaped)"),
-                };
-                (
-                    truncate_char_safe(&safe, AGENT_LOOP_TOOL_RESULT_CAP_BYTES),
-                    true,
-                )
-            }
-            Err(reason) => (format!("memory walrus-fetch {memory_id}: {reason}"), false),
-        }
+        let index = match crate::memory_walrus::load_main_index(&store) {
+            Ok(i) => i,
+            Err(reason) => return (format!("memory walrus-fetch {memory_id}: {reason}"), false),
+        };
+        // CRAG corrective retrieval (deterministic): fetch the requested id (Walrus→0G
+        // resilient), and on an Incorrect (off-topic) result WIDEN to the best-ranked
+        // other MAIN INDEX entries. The model never judges — `corrective_fetch` is pure.
+        let entries: Vec<(u64, String)> = index
+            .entries
+            .iter()
+            .map(|e| (e.memory_id, e.topic.clone()))
+            .collect();
+        let outcome = crate::memory_crag::corrective_fetch(query, memory_id, &entries, |id| {
+            index
+                .entries
+                .iter()
+                .find(|e| e.memory_id == id)
+                .and_then(|e| crate::memory_walrus::fetch_entry_resilient(&store, e))
+        });
+        let Some(content) = outcome.body else {
+            return (
+                format!(
+                    "memory walrus-fetch {memory_id}: sub-store not fetched from Walrus or 0G (propagation/boundary)"
+                ),
+                false,
+            );
+        };
+        let verdict = outcome
+            .verdict
+            .unwrap_or_else(|| crate::memory_crag::evaluate(query, &content));
+        let widen = if outcome.widen_trail.is_empty() {
+            String::new()
+        } else {
+            let trail: Vec<String> = outcome
+                .widen_trail
+                .iter()
+                .map(|(id, label)| format!("{id}:{}", label.label()))
+                .collect();
+            format!(" widen[{}]", trail.join(","))
+        };
+        let header = format!(
+            "walrus memory id={} [{} via {}{}] (fetched + decrypted):",
+            outcome.chosen_id,
+            verdict.render_tag(),
+            outcome.backend,
+            widen,
+        );
+        let fragments = [content.as_str()];
+        let safe = match redact(&RedactionRequest {
+            fragments: &fragments,
+            candidate_memory_ids: &[],
+            deleted_ids: &[],
+            include_private_memory: false,
+        }) {
+            Ok(r) if r.secret_fragments_denied_u32() == 0 => format!("{header}\n{content}"),
+            _ => format!(
+                "walrus memory id={}: withheld (secret-shaped)",
+                outcome.chosen_id
+            ),
+        };
+        (
+            truncate_char_safe(&safe, AGENT_LOOP_TOOL_RESULT_CAP_BYTES),
+            true,
+        )
     }
     #[cfg(not(feature = "put-fixture-net"))]
     {
-        let _ = (_read, memory_id);
+        let _ = (_read, memory_id, query);
         (
             "memory walrus-fetch: the Walrus transport is not compiled (build --features put-fixture-net)".to_string(),
             false,
@@ -1867,7 +1919,7 @@ pub fn run_agent_loop_streaming(
                     ));
                 } else {
                     executed_tool_keys.push(key);
-                    let (result, consumed) = frontier_walrus_fetch_result(read, id);
+                    let (result, consumed) = frontier_walrus_fetch_result(read, id, question);
                     if consumed {
                         reads_u8 = reads_u8.saturating_add(1);
                         trail.push(format!("walrus-fetch {id}"));

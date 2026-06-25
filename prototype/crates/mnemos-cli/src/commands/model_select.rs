@@ -59,6 +59,46 @@ pub const FRONTIER_DEFAULT_MODEL: &str = "deepseek/deepseek-chat";
 /// read here (the selector touches no key) — surfaced for the owner only.
 pub const FRONTIER_KEY_ENV: &str = "OPENROUTER_API_KEY";
 
+/// The env var selecting WHICH frontier provider host the consult egresses to —
+/// a closed set resolved by
+/// `provider::egress::ProviderHost::live_codec_from_token` (`openrouter`
+/// (default) | `sakana`/`fugu`). A plain selector, never a secret. Unset/blank ⇒
+/// the OpenRouter default (back-compat); an unknown token ⇒ a typed deny at the
+/// executor (no silent fallback). There is deliberately NO base-URL form — the
+/// host is a closed enum, so funds-egress stays structurally impossible.
+pub const FRONTIER_PROVIDER_ENV: &str = "SINABRO_FRONTIER_PROVIDER";
+
+/// The default frontier model id when the provider is Sakana (Fugu) and
+/// `OPENROUTER_MODEL` is unset/blank. The canonical id should be confirmed
+/// against Sakana's `/v1/models`; `fugu-ultra` is the documented Fugu Ultra id.
+pub const FRONTIER_SAKANA_DEFAULT_MODEL: &str = "fugu-ultra";
+
+/// The default model id when the provider is 0G Compute (`ZeroGCompute`) and the
+/// model env is unset/blank. Grounded from the 0G testnet Router `/v1/models`
+/// (2026-06-23): the only TEXT chatbot served is `qwen2.5-omni` (32k ctx, OpenAI
+/// format, `tee_attested:true`, TDX / dstack verifier). 0G's Router rejects an
+/// OpenRouter/DeepSeek id, so 0G carries its OWN default — never a silent
+/// cross-provider model (the same no-silent-fallback law as Sakana).
+pub const ZEROG_DEFAULT_MODEL: &str = "qwen2.5-omni";
+
+/// The env var selecting the orchestrate IMPLEMENT brain ("executor") mode:
+/// `local` (default — loopback, zero-egress, first-class) | `remote` (the gated
+/// provider egress, redaction-walled + owner-armed by the orchestrate phrase). An
+/// unknown token ⇒ a typed deny (no silent fallback). The orchestrate REASONING
+/// role stays loopback in v1; this selects only the implement leg.
+pub const EXECUTOR_MODE_ENV: &str = "SINABRO_EXECUTOR_MODE";
+
+/// The remote-executor provider host — a closed set resolved by
+/// `provider::egress::ProviderHost::live_codec_from_token` (`openrouter` (default) |
+/// `sakana`/`fugu`). Consulted only when the mode is `remote`. There is NO base-URL
+/// form — the host is a closed enum, so funds-egress stays structurally impossible.
+pub const EXECUTOR_PROVIDER_ENV: &str = "SINABRO_EXECUTOR_PROVIDER";
+
+/// The remote-executor model id (validated by `validate_model_id`; unset ⇒ the
+/// provider default — e.g. GLM-5.2 via OpenRouter is the model id `z-ai/glm-5.2`).
+/// Consulted only when the mode is `remote`.
+pub const EXECUTOR_MODEL_ENV: &str = "SINABRO_EXECUTOR_MODEL";
+
 /// The env var selecting the LOCAL loopback port (a plain selector).
 pub const LOCAL_PORT_ENV: &str = "SINABRO_LOCAL_PORT";
 

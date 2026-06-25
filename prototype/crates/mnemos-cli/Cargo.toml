@@ -335,6 +335,19 @@ put-fixture-net = ["dep:mnemos-c-walrus", "mnemos-c-walrus/net-testnet"]
 # ops/evidence/stage_g/agent_loop/WALRUS_MAINNET_SELFHOST_KICKOFF.md.
 walrus-mainnet = ["dep:reqwest", "put-fixture-net"]
 
+# W2-C (0G Storage round-trip, owner-directed 2026-06-23): gates the KEYLESS proof-verified
+# `0g-storage-client download` SUBPROCESS (the Go sidecar; 0G has no Rust SDK). NO new lockfile
+# crate (std::process only). The agent NEVER handles the signer key — the funds-bearing UPLOAD
+# is owner-run; this feature only enables the keyless download+verify. Off by default; the verb
+# is recognized + renders an honest "not compiled" surface with the feature off.
+zerog-storage = []
+
+# W2-B (0G Compute TEE attestation, owner-directed 2026-06-24): gates the build that may
+# spawn the external Node sidecar (prototype/sidecar/zerog-attestation). KEYLESS + read-only
+# — the sidecar verifies a provider's TEE quote with an ephemeral UNFUNDED wallet (no key, no
+# funds, no chain write). Off by default; the verb renders an honest "not compiled" surface.
+zerog-attestation = []
+
 # G-WP-09 (#595 · G.8.1) — MLX/ollama loopback adapter (Apple-Silicon dev target).
 # P3-3 (owner-authorized 2026-06-11) UPGRADED from an empty marker: the feature now
 # compiles `provider::local_chat::LocalChatTransport` — the REAL loopback

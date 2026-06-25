@@ -298,19 +298,30 @@ fn save_sessions(app: tauri::AppHandle, json: String) -> Result<(), String> {
 
 /// The closed allowlist of env names the GUI may set (S threat model gate 1).
 /// ONLY the OpenRouter key + model selector + the two Telegram values + the Walrus
-/// self-host publisher bearer (S2, WALRUS_MAINNET_SELFHOST) — never PATH / LD_PRELOAD
-/// / DYLD_* / arbitrary env, which would be a code-execution vector. A non-allowlisted
-/// name is a typed error, never set. (OPENROUTER_MODEL is not a secret — a plain model
-/// selector — but rides the same memory-only env-injection mechanism. WALRUS_PUBLISHER_TOKEN
-/// is the bearer the core sends ONLY as `Authorization: Bearer` to the configured
-/// self-host publisher; it is NEVER a Sui private key — our app holds no key, never
-/// signs, never pays (PD-6 custody HARD-LOCKED).)
-const ALLOWED_SECRET_ENVS: [&str; 5] = [
+/// self-host publisher bearer (S2, WALRUS_MAINNET_SELFHOST) + the BYO-model routing
+/// selectors — never PATH / LD_PRELOAD / DYLD_* / arbitrary env, which would be a
+/// code-execution vector. A non-allowlisted name is a typed error, never set.
+/// (OPENROUTER_MODEL is not a secret — a plain model selector — but rides the same
+/// memory-only env-injection mechanism. WALRUS_PUBLISHER_TOKEN is the bearer the core
+/// sends ONLY as `Authorization: Bearer` to the configured self-host publisher; it is
+/// NEVER a Sui private key — our app holds no key, never signs, never pays (PD-6 custody
+/// HARD-LOCKED). The four SINABRO_* selectors are NOT secrets — plain CLOSED-SET tokens
+/// (`local`/`remote`, `openrouter`/`sakana`) + a model id; the core resolves the provider
+/// host via a closed enum [`ProviderHost::live_codec_from_token`], so there is NO
+/// arbitrary-URL form and funds-egress stays structurally impossible.)
+const ALLOWED_SECRET_ENVS: [&str; 9] = [
     "OPENROUTER_API_KEY",
     "OPENROUTER_MODEL",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "WALRUS_PUBLISHER_TOKEN",
+    // BYO-model routing selectors (Slice 1+2): which frontier provider the consult uses,
+    // and the two-model loop's implement-brain mode/provider/model. Plain closed-set
+    // selectors (never a URL / secret / code-exec env).
+    "SINABRO_FRONTIER_PROVIDER",
+    "SINABRO_EXECUTOR_MODE",
+    "SINABRO_EXECUTOR_PROVIDER",
+    "SINABRO_EXECUTOR_MODEL",
 ];
 
 /// Presence-only view of a secret env (value NEVER returned — gate 3).

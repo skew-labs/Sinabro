@@ -21,7 +21,10 @@
 //! layer (S2-3b) that CONSUMES this core. custody/funds stay HARD-LOCKED: pure, no IO.
 
 use crate::agent_orchestrator::OrchestratedOutcome;
-use crate::verification::{PerfScore, VerificationClass, VerificationEvidence, verify};
+use crate::verification::{
+    PerfScore, VerificationClass, VerificationEvidence, VerificationReceipt, VerificationVerdict,
+    canary_intact, two_derivation_admits, verify,
+};
 
 /// A slim projection of one orchestrated sub-task — the only fields the WRITE decision
 /// needs. The adapter [`candidates_from_outcome`] builds these from the full
@@ -37,6 +40,10 @@ pub struct PatternCandidate {
     pub answer: String,
     /// Whether the Typed-Write-Admission receipt ADMITTED a write (oracle Verified).
     pub admits_write: bool,
+    /// W4 Slice 3: the CLASS of the oracle that produced the admit verdict (the
+    /// derivation's AXIS) — so the write path can prove the admit derivation is
+    /// INDEPENDENT of the cross-memory derivation (the two-derivation formalism).
+    pub admit_class: VerificationClass,
 }
 
 /// One held LTM memory the WRITE-decision checks a new pattern against (the READ
@@ -62,6 +69,11 @@ pub struct EvolutionWrite {
     pub content: String,
     /// The DGM-H performance-tracking score (reinforced on this verified-good write).
     pub perf: PerfScore,
+    /// W4 Slice 3: whether this pattern is DOUBLY VERIFIED — confirmed by TWO INDEPENDENT
+    /// derivations (its own oracle axis AND the cross-memory consistency check, different
+    /// classes). A single-axis pattern still writes (both gates passed) but is not
+    /// doubly-verified (the strongest trust; the ensemble-theory "falsifiable, not vacuous").
+    pub doubly_verified: bool,
 }
 
 /// The outcome of one evolution WRITE decision over an orchestration result.
@@ -82,6 +94,13 @@ impl EvolutionOutcome {
     pub fn written_count(&self) -> usize {
         self.written.len()
     }
+
+    /// W4 Slice 3: the number of WRITTEN patterns that are DOUBLY VERIFIED (two
+    /// independent derivations agreed) — the strongest-trust subset of `written`.
+    #[must_use]
+    pub fn doubly_verified_count(&self) -> usize {
+        self.written.iter().filter(|w| w.doubly_verified).count()
+    }
 }
 
 /// Project the full orchestration outcome to the slim candidates the WRITE decision
@@ -96,6 +115,7 @@ pub fn candidates_from_outcome(outcome: &OrchestratedOutcome) -> Vec<PatternCand
             goal: r.subtask.goal.clone(),
             answer: r.outcome.answer.clone().unwrap_or_default(),
             admits_write: r.receipt.admits_write(),
+            admit_class: r.receipt.class,
         })
         .collect()
 }
@@ -143,6 +163,17 @@ pub fn select_evolution_writes(
     prior_perf: &dyn Fn(&str) -> PerfScore,
 ) -> EvolutionOutcome {
     let mut result = EvolutionOutcome::default();
+    // P-HALL held-out CANARY (Slice 3): if the deterministic gate has COLLAPSED (a known
+    // case misclassifies), promote NOTHING — every candidate is treated as unverified
+    // (fail-closed; the gate is suspect, so no write is trustworthy). A pure gate cannot
+    // drift at runtime, so this never fires normally — it is the tripwire a future edit
+    // weakening `verify` would trip BEFORE any poisoned write.
+    if !canary_intact() {
+        for c in candidates {
+            result.unverified.push(pattern_key(&c.kind, &c.goal));
+        }
+        return result;
+    }
     for c in candidates {
         let key = pattern_key(&c.kind, &c.goal);
         // (1) the Typed-Write-Admission gate — the oracle must have Verified it.
@@ -163,6 +194,16 @@ pub fn select_evolution_writes(
             result.quarantined.push(key);
             continue;
         }
+        // (3) TWO-DERIVATION formalism (Slice 3): the admit derivation (its OWN oracle
+        // AXIS) AND the cross-memory derivation are INDEPENDENT iff their classes differ;
+        // their agreement is the doubly-verified (strongest) trust. A same-class pair
+        // (e.g. a cross-memory pattern re-checked by cross-memory) is a vacuous self-compare.
+        let admit_derivation = VerificationReceipt {
+            class: c.admit_class,
+            verdict: VerificationVerdict::Verified, // c.admits_write is true at this point
+            detail: String::new(),
+        };
+        let doubly_verified = two_derivation_admits(&admit_derivation, &cm);
         // DGM-H: this verified-good pattern reinforces its perf score.
         let perf = prior_perf(&key).reinforce();
         result.written.push(EvolutionWrite {
@@ -170,6 +211,7 @@ pub fn select_evolution_writes(
             topic,
             content: c.answer.clone(),
             perf,
+            doubly_verified,
         });
     }
     result
@@ -270,11 +312,41 @@ mod tests {
             goal: goal.to_string(),
             answer: answer.to_string(),
             admits_write: admits,
+            // the common case: a Code-class oracle admit (compile) — independent of the
+            // write-time cross-memory check (the two-derivation default).
+            admit_class: VerificationClass::Code,
         }
     }
 
     fn no_prior(_k: &str) -> PerfScore {
         PerfScore::default()
+    }
+
+    /// W4 Slice 3 TWO-DERIVATION at WRITE time: a Code-class admit (compile oracle) ⟂ the
+    /// write-time cross-memory check ⇒ doubly_verified; a CrossMemory-class admit is the
+    /// SAME axis as the cross-memory check ⇒ NOT doubly_verified (vacuous self-compare),
+    /// though it still writes (both gates passed).
+    #[test]
+    fn written_patterns_track_two_derivation_independence() {
+        let code = cand("sui_move", "build a coin", "module a::c {}", true);
+        let ev = select_evolution_writes(&[code], &[], &no_prior);
+        assert_eq!(ev.written.len(), 1);
+        assert!(
+            ev.written[0].doubly_verified,
+            "Code ⟂ CrossMemory = two independent derivations = doubly verified"
+        );
+        assert_eq!(ev.doubly_verified_count(), 1);
+
+        // a CrossMemory-class admit: its axis IS cross-memory ⇒ self-compare ⇒ not doubly.
+        let mut cm = cand("cross_memory", "reconcile a fact", "fact Y", true);
+        cm.admit_class = VerificationClass::CrossMemory;
+        let ev2 = select_evolution_writes(&[cm], &[], &no_prior);
+        assert_eq!(ev2.written.len(), 1, "still written (both gates passed)");
+        assert!(
+            !ev2.written[0].doubly_verified,
+            "same-axis pair is vacuous (correlation 1) — never doubly verified"
+        );
+        assert_eq!(ev2.doubly_verified_count(), 0);
     }
 
     #[test]

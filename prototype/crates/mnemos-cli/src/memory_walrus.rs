@@ -31,8 +31,15 @@ pub const MAIN_INDEX_POINTER_MAINNET_FILE: &str = "walrus_main_index_mainnet.ref
 /// The sealed-manifest magic (4 bytes) — `WMIX` = Walrus Main IndeX.
 pub const WALRUS_INDEX_MAGIC: [u8; 4] = *b"WMIX";
 
-/// The manifest wire version (the first byte after the magic).
-pub const WALRUS_INDEX_VERSION: u8 = 1;
+/// The legacy v1 wire version (no per-entry 0G rootHash) — still DECODED for
+/// backward compatibility with already-published indexes.
+pub const WALRUS_INDEX_VERSION_V1: u8 = 1;
+/// The v2 wire version (W4 Slice 2): each entry additionally carries an OPTIONAL 0G
+/// Storage rootHash (`root_len(u16 LE)=0` ⇒ None) for the Walrus→0G resilient fetch.
+pub const WALRUS_INDEX_VERSION_V2: u8 = 2;
+/// The manifest wire version this codec WRITES (the latest; the first byte after the
+/// magic). Decode accepts v1 AND v2.
+pub const WALRUS_INDEX_VERSION: u8 = WALRUS_INDEX_VERSION_V2;
 
 /// The index AAD: the manifest seal binds this string, so an index blob can never be
 /// opened as a `.mc` record (their AADs differ) and vice-versa.
@@ -52,6 +59,11 @@ pub struct WalrusMemEntry {
     pub topic: String,
     /// The Walrus blob-id of this memory's encrypted `.mc` sub-store detail.
     pub sub_blob_id: String,
+    /// W4 Slice 2 (P-RAG resilience): the OPTIONAL 0G Storage Merkle rootHash of the
+    /// SAME encrypted `.mc` sub-store, for the Walrus→0G fallback fetch ("메인은
+    /// walrus, walrus 안되면 0g"). `None` until the owner backs the sub up to 0G (a
+    /// funds tx — the agent stays keyless). A v1 index decodes this as `None`.
+    pub sub_0g_root: Option<String>,
 }
 
 /// The MAIN INDEX: the manifest of every memory's `(id, topic, sub_blob_id)`. Encrypted
@@ -80,7 +92,8 @@ pub enum WalrusIndexError {
 
 impl WalrusMainIndex {
     /// Canonical bytes: `magic | version | count(u32 LE) | [ id(u64 LE) |
-    /// topic_len(u16 LE) | topic | blob_len(u16 LE) | blob ]*`. Deterministic.
+    /// topic_len(u16 LE) | topic | blob_len(u16 LE) | blob | root_len(u16 LE) |
+    /// root ]*` (v2; `root_len=0` ⇒ no 0G rootHash). Deterministic.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -98,6 +111,11 @@ impl WalrusMainIndex {
             let blen = u16::try_from(blob.len()).unwrap_or(u16::MAX);
             out.extend_from_slice(&blen.to_le_bytes());
             out.extend_from_slice(&blob[..blen as usize]);
+            // v2: the OPTIONAL 0G Storage rootHash (root_len(u16 LE)=0 ⇒ None).
+            let root = e.sub_0g_root.as_deref().unwrap_or("");
+            let rlen = u16::try_from(root.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&rlen.to_le_bytes());
+            out.extend_from_slice(&root.as_bytes()[..rlen as usize]);
         }
         out
     }
@@ -117,7 +135,8 @@ impl WalrusMainIndex {
         if take(&mut at, 4)? != WALRUS_INDEX_MAGIC {
             return Err(WalrusIndexError::BadMagic);
         }
-        if take(&mut at, 1)?[0] != WALRUS_INDEX_VERSION {
+        let version = take(&mut at, 1)?[0];
+        if version != WALRUS_INDEX_VERSION_V1 && version != WALRUS_INDEX_VERSION_V2 {
             return Err(WalrusIndexError::UnknownVersion);
         }
         let mut count_b = [0u8; 4];
@@ -138,10 +157,29 @@ impl WalrusMainIndex {
             let sub_blob_id = core::str::from_utf8(take(&mut at, u16::from_le_bytes(bl) as usize)?)
                 .map_err(|_| WalrusIndexError::NotUtf8)?
                 .to_string();
+            // v2 adds an OPTIONAL 0G Storage rootHash per entry (root_len=0 ⇒ None); a
+            // v1 blob has no such field, so it decodes with `sub_0g_root: None`.
+            let sub_0g_root = if version >= WALRUS_INDEX_VERSION_V2 {
+                let mut rl = [0u8; 2];
+                rl.copy_from_slice(take(&mut at, 2)?);
+                let rlen = u16::from_le_bytes(rl) as usize;
+                if rlen == 0 {
+                    None
+                } else {
+                    Some(
+                        core::str::from_utf8(take(&mut at, rlen)?)
+                            .map_err(|_| WalrusIndexError::NotUtf8)?
+                            .to_string(),
+                    )
+                }
+            } else {
+                None
+            };
             entries.push(WalrusMemEntry {
                 memory_id,
                 topic,
                 sub_blob_id,
+                sub_0g_root,
             });
         }
         if at != bytes.len() {
@@ -233,6 +271,41 @@ pub fn write_main_index_pointer_mainnet(data_dir: &Path, blob_id: &str) -> std::
         main_index_pointer_mainnet_path(data_dir),
         blob_id.as_bytes(),
     )
+}
+
+/// W4 Slice 2 — the local map file pairing `memory_id → 0G Storage rootHash` for the
+/// Walrus→0G resilient fetch. The OWNER populates it (one `id<TAB>0xroot` line per sub
+/// they uploaded to 0G via the funds-fired `memory backup-0g`); the KEYLESS agent only
+/// READS it when building the v2 index, so a Walrus-down fetch can fall back to 0G. NOT
+/// a secret (a rootHash is a public content address).
+pub const ZEROG_ROOTS_MAP_FILE: &str = "walrus_0g_roots.txt";
+
+/// Read the owner's `memory_id → 0G rootHash` map from the data dir (TAB-separated
+/// lines; `#` comments + blanks skipped). A line whose root is not a valid 0G rootHash
+/// (`0x`+64-hex, per [`zerog_storage::is_valid_root_hash`](crate::zerog_storage::is_valid_root_hash))
+/// is dropped — fail-closed per line. Empty map if the file is absent (⇒ no 0G
+/// fallbacks; honest, never a fabricated root).
+#[must_use]
+pub fn read_0g_roots_map(data_dir: &Path) -> std::collections::BTreeMap<u64, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(data_dir.join(ZEROG_ROOTS_MAP_FILE)) else {
+        return map;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((id_s, root)) = line.split_once('\t') {
+            let root = root.trim();
+            if let Ok(id) = id_s.trim().parse::<u64>() {
+                if crate::zerog_storage::is_valid_root_hash(root) {
+                    map.insert(id, root.to_string());
+                }
+            }
+        }
+    }
+    map
 }
 
 /// E14-W2 + S3 — the feature-gated network navigation the AUTONOMOUS agent loop uses (and
@@ -337,10 +410,75 @@ mod net {
             .ok_or("sub-store decrypt/decode failed (wrong key / tampered)")?;
         Ok(String::from_utf8_lossy(chunk.envelope().content.as_slice()).to_string())
     }
+
+    /// W4 Slice 2 — decrypt + return a sub-store fetched by its WALRUS blob-id (testnet
+    /// or the configured self-host mainnet, mirroring [`fetch_sub_content`]'s routing).
+    /// `None` on any fetch / decrypt failure (fail-closed).
+    fn walrus_get_and_decode(store: &PersistedStore, blob_id: &str) -> Option<String> {
+        #[cfg(feature = "walrus-mainnet")]
+        if let Some(agg) = crate::provider::walrus_selfhost::configured_walrus_aggregator() {
+            let fetched = walrus_get_mainnet(&agg, blob_id)?;
+            let (chunk, _privacy) = store.decode_record(&fetched)?;
+            return Some(String::from_utf8_lossy(chunk.envelope().content.as_slice()).to_string());
+        }
+        let fetched = walrus_get_testnet(blob_id)?;
+        let (chunk, _privacy) = store.decode_record(&fetched)?;
+        Some(String::from_utf8_lossy(chunk.envelope().content.as_slice()).to_string())
+    }
+
+    /// W4 Slice 2 — the 0G Storage FALLBACK: keyless proof-verified download by rootHash
+    /// → AEAD decode. Needs the owner's `0g-storage-client` binary
+    /// (`$ZEROG_STORAGE_CLIENT`) + the `zerog-storage` backend; the AEAD decrypt tag is
+    /// the integrity gate. `None` (fail-closed) when the binary is unset / the download
+    /// fails / the bytes do not open.
+    #[cfg(feature = "zerog-storage")]
+    fn zerog_get_and_decode(store: &PersistedStore, root: &str, memory_id: u64) -> Option<String> {
+        let binary = std::env::var(crate::zerog_storage::ZEROG_STORAGE_BINARY_ENV).ok()?;
+        let out = std::env::temp_dir().join(format!("sinabro_0g_fallback_{memory_id}.mc"));
+        let out_s = out.to_string_lossy();
+        match crate::zerog_storage::run_download_to_bytes(&binary, root, &out_s) {
+            crate::zerog_storage::ZerogFetch::Bytes(bytes) => {
+                let (chunk, _privacy) = store.decode_record(&bytes)?;
+                Some(String::from_utf8_lossy(chunk.envelope().content.as_slice()).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// W4 Slice 2 — RESILIENT fetch of one index entry's encrypted sub-store, following
+    /// the deterministic [`fetch_plan`](crate::memory_crag::fetch_plan): Walrus PRIMARY,
+    /// then the 0G FALLBACK ("메인은 walrus, walrus 안되면 0g"). Returns the decrypted
+    /// content + the backend label, or `None` if NEITHER source yields it (fail-closed).
+    pub fn fetch_entry_resilient(
+        store: &PersistedStore,
+        entry: &super::WalrusMemEntry,
+    ) -> Option<(String, &'static str)> {
+        for src in crate::memory_crag::fetch_plan(&entry.sub_blob_id, entry.sub_0g_root.as_deref())
+        {
+            match src {
+                crate::memory_crag::FetchSource::Walrus(blob) => {
+                    if let Some(content) = walrus_get_and_decode(store, &blob) {
+                        return Some((content, "walrus"));
+                    }
+                }
+                crate::memory_crag::FetchSource::ZeroG(root) => {
+                    #[cfg(feature = "zerog-storage")]
+                    if let Some(content) = zerog_get_and_decode(store, &root, entry.memory_id) {
+                        return Some((content, "0g-fallback"));
+                    }
+                    #[cfg(not(feature = "zerog-storage"))]
+                    {
+                        let _ = root;
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(feature = "put-fixture-net")]
-pub use net::{fetch_sub_content, load_main_index};
+pub use net::{fetch_entry_resilient, fetch_sub_content, load_main_index};
 
 #[cfg(test)]
 mod tests {
@@ -353,11 +491,15 @@ mod tests {
                     memory_id: 0,
                     topic: "delta-neutral funding harvester notes".to_string(),
                     sub_blob_id: "cZWixH4naNATvO4P2IzANkBX7RdJt3nFyCFeZ1SSIks".to_string(),
+                    // no 0G backup for this one (the common case)
+                    sub_0g_root: None,
                 },
                 WalrusMemEntry {
                     memory_id: 7,
                     topic: "sui move audit — bug bounty 분야".to_string(),
                     sub_blob_id: "KzXL8IANxQocPkWDuYJPmFwsVL3Sp5dSDvu874Qi-Ew".to_string(),
+                    // owner backed this sub up to 0G too ⇒ a Walrus→0G fallback exists
+                    sub_0g_root: Some("0x".to_string() + &"ab".repeat(32)),
                 },
             ],
         }
@@ -412,5 +554,63 @@ mod tests {
         let capped = summarize_topic(long.as_bytes());
         assert!(capped.len() <= WALRUS_TOPIC_CAP_BYTES);
         assert_eq!(summarize_topic(b""), "(empty)");
+    }
+
+    #[test]
+    fn v1_index_decodes_with_no_0g_root() {
+        // a hand-built v1 blob (version byte = 1, NO per-entry root field) must still
+        // decode (backward compat with already-published indexes) ⇒ sub_0g_root None.
+        let mut v1 = WALRUS_INDEX_MAGIC.to_vec();
+        v1.push(WALRUS_INDEX_VERSION_V1); // version 1 (legacy)
+        v1.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        v1.extend_from_slice(&5u64.to_le_bytes()); // id = 5
+        v1.extend_from_slice(&1u16.to_le_bytes()); // topic len 1
+        v1.push(b't');
+        v1.extend_from_slice(&1u16.to_le_bytes()); // blob len 1
+        v1.push(b'b');
+        let idx = WalrusMainIndex::from_bytes(&v1).expect("v1 decodes");
+        assert_eq!(idx.entries.len(), 1);
+        assert_eq!(idx.entries[0].memory_id, 5);
+        assert_eq!(idx.entries[0].sub_blob_id, "b");
+        assert_eq!(idx.entries[0].sub_0g_root, None, "v1 has no 0G root");
+    }
+
+    #[test]
+    fn v2_round_trips_the_0g_root() {
+        // idx() entry 7 carries Some(0G root); entry 0 carries None — both round-trip.
+        let back = WalrusMainIndex::from_bytes(&idx().to_bytes()).expect("v2 decode");
+        let want = "0x".to_string() + &"ab".repeat(32);
+        let e7 = back
+            .entries
+            .iter()
+            .find(|e| e.memory_id == 7)
+            .expect("id 7");
+        assert_eq!(e7.sub_0g_root.as_deref(), Some(want.as_str()));
+        let e0 = back
+            .entries
+            .iter()
+            .find(|e| e.memory_id == 0)
+            .expect("id 0");
+        assert_eq!(e0.sub_0g_root, None);
+    }
+
+    #[test]
+    fn read_0g_roots_map_parses_and_fail_closes() {
+        let dir = std::env::temp_dir().join(format!("sinabro_0g_roots_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let good = "0x".to_string() + &"cd".repeat(32);
+        let body = format!("# comment\n7\t{good}\n3\t0xnothex\nno-tab-line\n0\t{good}\n");
+        std::fs::write(dir.join(ZEROG_ROOTS_MAP_FILE), body).expect("write");
+        let map = read_0g_roots_map(&dir);
+        assert_eq!(map.get(&7).map(String::as_str), Some(good.as_str()));
+        assert_eq!(map.get(&0).map(String::as_str), Some(good.as_str()));
+        assert!(
+            !map.contains_key(&3),
+            "a non-hex root is fail-closed dropped"
+        );
+        assert_eq!(map.len(), 2);
+        // absent file ⇒ empty map (no fabricated roots)
+        assert!(read_0g_roots_map(&dir.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

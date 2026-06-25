@@ -1,0 +1,6 @@
+[package]
+name = "verified_pattern"
+edition = "2024.beta"
+
+[addresses]
+verified_pattern = "0x0"

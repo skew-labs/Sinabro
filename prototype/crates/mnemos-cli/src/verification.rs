@@ -322,6 +322,112 @@ pub fn verify(class: VerificationClass, evidence: &VerificationEvidence) -> Veri
     }
 }
 
+// ===========================================================================
+// W4 Slice 3 — the P-HALL formalisms: two-derivation verify + held-out canary
+// ===========================================================================
+
+/// The SOURCE-INDEPENDENCE two-derivation gate (P-HALL; ensemble theory 2301.03962):
+/// two verification receipts INDEPENDENTLY confirm a pattern iff BOTH `admits_write()`
+/// AND their CLASSES DIFFER. The class IS the derivation's axis, so two passes from
+/// DIFFERENT classes (e.g. a compiler oracle AND a cross-memory consistency check) are
+/// independent — their agreement carries real verification gain. Two passes from the
+/// SAME class are a self-compare (correlation 1 ⇒ 0 gain) and are REJECTED as vacuous:
+/// a pattern is never "doubly verified" by re-checking the SAME oracle twice. This is
+/// the deterministic shape of "falsifiable, not vacuous-true".
+#[must_use]
+pub fn two_derivation_admits(a: &VerificationReceipt, b: &VerificationReceipt) -> bool {
+    a.class != b.class && a.admits_write() && b.admits_write()
+}
+
+/// The held-out CANARY: a fixed set of `(class, evidence) → expected verdict` cases the
+/// deterministic gate MUST still classify correctly. Because [`verify`] is a pure
+/// function it cannot drift at runtime — but a future edit that WEAKENED it (a "collapse"
+/// admitting what it must reject, or rejecting what it must admit) flips a canary case.
+/// A tiny held-out set catches collapse (SRT 2505.21444). The cases pin the load-bearing
+/// admit/reject BOUNDARIES across every tier.
+const CANARY: &[(VerificationClass, VerificationEvidence, VerificationVerdict)] = &[
+    // the compiler oracle bit: a pass admits; a fail / honest absence never do
+    (
+        VerificationClass::Code,
+        VerificationEvidence::CodeOracle(Some(true)),
+        VerificationVerdict::Verified,
+    ),
+    (
+        VerificationClass::Code,
+        VerificationEvidence::CodeOracle(Some(false)),
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::Code,
+        VerificationEvidence::CodeOracle(None),
+        VerificationVerdict::NotApplicable,
+    ),
+    // cross-memory: a contradiction is quarantined; consistency admits
+    (
+        VerificationClass::CrossMemory,
+        VerificationEvidence::CrossMemory {
+            contradicts_held_ltm: true,
+        },
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::CrossMemory,
+        VerificationEvidence::CrossMemory {
+            contradicts_held_ltm: false,
+        },
+        VerificationVerdict::Verified,
+    ),
+    // a model may NOT promote its own inference to an owner fact
+    (
+        VerificationClass::PersonalOwner,
+        VerificationEvidence::OwnerProvenance(OwnerProvenance::NotOwner),
+        VerificationVerdict::Unverified,
+    ),
+    // a lone source never confirms; >= N independent does
+    (
+        VerificationClass::ExternalFact,
+        VerificationEvidence::Corroboration {
+            independent_count: 1,
+            threshold: 1,
+        },
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::ExternalFact,
+        VerificationEvidence::Corroboration {
+            independent_count: 2,
+            threshold: 2,
+        },
+        VerificationVerdict::Verified,
+    ),
+    // a fresh model inference is advisory (perf-tracking has not confirmed it)
+    (
+        VerificationClass::ModelInference,
+        VerificationEvidence::PerfTracking(PerfScore {
+            reinforced: 0,
+            demoted: 0,
+        }),
+        VerificationVerdict::Unverified,
+    ),
+    // evidence for the WRONG class is fail-closed (a forged OwnerConfirmed on a Code task)
+    (
+        VerificationClass::Code,
+        VerificationEvidence::OwnerProvenance(OwnerProvenance::OwnerConfirmed),
+        VerificationVerdict::Unverified,
+    ),
+];
+
+/// Re-run the deterministic gate over the held-out [`CANARY`]; `true` iff EVERY case
+/// still classifies to its expected verdict (the gate has NOT collapsed/weakened). The
+/// autonomous write path checks this BEFORE admitting any write — a failing canary
+/// fail-closes the whole write (no pattern is promoted while the gate is suspect).
+#[must_use]
+pub fn canary_intact() -> bool {
+    CANARY
+        .iter()
+        .all(|(class, evidence, want)| verify(*class, evidence).verdict == *want)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -584,6 +690,72 @@ mod tests {
         assert!(
             !PerfScore::default().is_confirmed(),
             "fresh is not confirmed"
+        );
+    }
+
+    /// THE TWO-DERIVATION FORMALISM: two INDEPENDENT passing derivations (different
+    /// classes) doubly-verify; a self-compare (same class) is vacuous (0 gain); a
+    /// failing derivation never doubly-verifies.
+    #[test]
+    fn two_derivation_requires_independent_passing_axes() {
+        let code_pass = verify(
+            VerificationClass::Code,
+            &VerificationEvidence::CodeOracle(Some(true)),
+        );
+        let cm_pass = verify(
+            VerificationClass::CrossMemory,
+            &VerificationEvidence::CrossMemory {
+                contradicts_held_ltm: false,
+            },
+        );
+        // two INDEPENDENT passes (Code ⟂ CrossMemory) ⇒ doubly verified
+        assert!(two_derivation_admits(&code_pass, &cm_pass));
+        assert!(
+            two_derivation_admits(&cm_pass, &code_pass),
+            "order-independent"
+        );
+        // a self-compare (SAME class) is correlation 1 ⇒ 0 gain ⇒ rejected as vacuous
+        let cm_pass2 = verify(
+            VerificationClass::CrossMemory,
+            &VerificationEvidence::CrossMemory {
+                contradicts_held_ltm: false,
+            },
+        );
+        assert!(
+            !two_derivation_admits(&cm_pass, &cm_pass2),
+            "two same-class passes are vacuous, never doubly verified"
+        );
+        // a failing derivation never doubly-verifies, even paired with a pass
+        let code_fail = verify(
+            VerificationClass::Code,
+            &VerificationEvidence::CodeOracle(Some(false)),
+        );
+        assert!(!two_derivation_admits(&code_fail, &cm_pass));
+    }
+
+    /// THE HELD-OUT CANARY: the shipped gate classifies every canary case correctly.
+    #[test]
+    fn canary_is_intact_for_the_shipped_gate() {
+        assert!(
+            canary_intact(),
+            "the deterministic gate must classify every held-out canary correctly"
+        );
+    }
+
+    /// CANARY NON-VACUITY: a canary would CATCH a collapsed gate — the real gate's
+    /// verdict for a failed compile is NOT `Verified`, so a future edit that weakened
+    /// the gate to admit a failed compile would flip the (Code, fail) → Unverified case.
+    #[test]
+    fn canary_would_catch_a_weakened_gate() {
+        let collapsed = (
+            VerificationClass::Code,
+            VerificationEvidence::CodeOracle(Some(false)),
+            VerificationVerdict::Verified, // WRONG: a failed compile must be Unverified
+        );
+        assert_ne!(
+            verify(collapsed.0, &collapsed.1).verdict,
+            collapsed.2,
+            "the real gate rejects what a collapsed gate would admit ⇒ canary non-vacuous"
         );
     }
 }

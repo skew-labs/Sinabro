@@ -2,8 +2,9 @@
 //! (G-WP-09 atoms #603 G.8.9, #604 G.8.10, #606 G.8.12, #610 G.8.16).
 //!
 //! This is the FIRST real network capability in the project. It lifts the Phase-0
-//! no-egress lock for PROVIDERS ONLY (Anthropic/OpenAI/Gemini/OpenRouter; the v1
-//! live codec is OpenRouter only per SOT — see `send_live_text`), under the
+//! no-egress lock for PROVIDERS ONLY (Anthropic/OpenAI/Gemini/OpenRouter/Sakana/
+//! 0G-Compute; the v1 live codec set is OpenRouter | Sakana | ZeroGCompute (all
+//! OpenAI-compatible) — see `send_live_text`), under the
 //! safety kernel, as the designed RD-49 path — never a disabled-path workaround. Funds
 //! custody is UNCHANGED: wallet / gas / chain / mainnet hosts are structurally
 //! unrepresentable here and rejected by the allowlist (funds-egress = 0).
@@ -53,8 +54,23 @@ pub enum ProviderHost {
     Gemini = 3,
     /// OpenRouter — the SOT LLM backend (`RuntimeLlmBackend { OpenRouter=1 }`,
     /// `MNEMOS_ATOM_PLAN.md:310/1024`, OpenAI-compatible, OpenRouter→DeepSeek
-    /// default). This is the ONLY host with a live codec in v1.
+    /// default). OpenAI-compatible Chat Completions codec (live in v1).
     OpenRouter = 4,
+    /// Sakana Fugu — the multi-agent orchestration model, served from Sakana's
+    /// OWN OpenAI-compatible API (`https://api.sakana.ai/v1`; not resold via
+    /// OpenRouter, so a distinct allowlisted host is required to offer it).
+    /// Shares the OpenAI-compatible Chat Completions codec (live in v1). Still a
+    /// pure LLM provider — never a funds / chain / wallet host.
+    Sakana = 5,
+    /// 0G Compute Router — TEE-verified inference (Intel TDX, `dstack` verifier)
+    /// served OpenAI-compatibly from 0G's testnet Router gateway
+    /// (`https://router-api-testnet.integratenetwork.work/v1`). The API key is
+    /// pre-funded out-of-band at `pc.testnet.0g.ai` (owner-only, never here); at
+    /// call time this is a PURE inference provider carrying only a Bearer key —
+    /// never a funds / chain / wallet host. (0G's chain RPC `evmrpc*.0g.ai` is a
+    /// DIFFERENT host, deliberately NOT in this allowlist.) Shares the
+    /// OpenAI-compatible Chat Completions codec (live in v1).
+    ZeroGCompute = 6,
 }
 
 impl ProviderHost {
@@ -66,6 +82,8 @@ impl ProviderHost {
             Self::OpenAi => "api.openai.com",
             Self::Gemini => "generativelanguage.googleapis.com",
             Self::OpenRouter => "openrouter.ai",
+            Self::Sakana => "api.sakana.ai",
+            Self::ZeroGCompute => "router-api-testnet.integratenetwork.work",
         }
     }
 
@@ -77,18 +95,41 @@ impl ProviderHost {
             Self::OpenAi => "https://api.openai.com",
             Self::Gemini => "https://generativelanguage.googleapis.com",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Sakana => "https://api.sakana.ai/v1",
+            Self::ZeroGCompute => "https://router-api-testnet.integratenetwork.work/v1",
         }
     }
 
-    /// The environment-variable name the key reference resolves from at the TLS
-    /// boundary (feature-gated path only).
+    /// Resolve an owner-supplied provider TOKEN to a provider host that HAS a
+    /// live OpenAI-compatible codec in v1 (the frontier / executor-eligible
+    /// set). Closed set, case-insensitive; unknown / codec-less tokens ⇒ `None`
+    /// (a typed deny, never a silent default). This is the ONE token→host
+    /// resolver consumed by BOTH the frontier-provider selector and the
+    /// remote-executor selector, so a new codec host is added in exactly one
+    /// place. There is deliberately NO free-form URL form: a host outside this
+    /// closed set is unreachable, so funds-egress stays structurally impossible.
+    #[must_use]
+    pub fn live_codec_from_token(token: &str) -> Option<Self> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "openrouter" | "or" => Some(Self::OpenRouter),
+            "sakana" | "fugu" => Some(Self::Sakana),
+            "zerog" | "0g" | "zerogcompute" => Some(Self::ZeroGCompute),
+            _ => None,
+        }
+    }
+
+    /// The environment-variable NAME the key reference resolves from at the TLS
+    /// boundary (the env name only — NEVER the secret value). Public so the gated
+    /// consult preview + the provider selector can name the per-host key env.
     #[cfg(feature = "provider-egress")]
-    const fn key_env(self) -> &'static str {
+    pub const fn key_env(self) -> &'static str {
         match self {
             Self::Anthropic => "ANTHROPIC_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Gemini => "GEMINI_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::Sakana => "SAKANA_API_KEY",
+            Self::ZeroGCompute => "ZEROG_ROUTER_API_KEY",
         }
     }
 }
@@ -96,11 +137,13 @@ impl ProviderHost {
 /// The closed set of allowlisted provider hosts — the audit anchor for "providers
 /// only". A host not in this set (including every funds / chain / mainnet RPC
 /// host) is unreachable.
-pub const ALLOWLISTED_PROVIDERS: [ProviderHost; 4] = [
+pub const ALLOWLISTED_PROVIDERS: [ProviderHost; 6] = [
     ProviderHost::Anthropic,
     ProviderHost::OpenAi,
     ProviderHost::Gemini,
     ProviderHost::OpenRouter,
+    ProviderHost::Sakana,
+    ProviderHost::ZeroGCompute,
 ];
 
 /// Whether `host` is an allowlisted provider host. Any host that is not exactly an
@@ -689,6 +732,18 @@ pub(crate) fn extract_error_type(bytes: &[u8]) -> String {
 
 #[cfg(feature = "provider-egress")]
 impl ProviderTransport {
+    /// Construct a transport for `host`, resolving the key REFERENCE from the
+    /// host's OWN `key_env()` so the preflight presence-check and the TLS read
+    /// use the SAME per-host secret (e.g. Sakana ⇒ `SAKANA_API_KEY`, never the
+    /// OpenRouter key). The secret VALUE is never loaded here — only the
+    /// reference is classified; the value is read once at the TLS boundary.
+    #[must_use]
+    pub fn for_host(host: ProviderHost) -> Self {
+        let env = host.key_env();
+        let key = crate::secrets::classify_reference(env, &format!("env:{env}"));
+        Self::new(host, key)
+    }
+
     /// Send ONE real, bounded, redacted consult and return the parsed answer.
     /// The FULL [`preflight`](Self::preflight) gate stack applies (live-dispatch
     /// flag + same-message approval + allowlist + key reference); the key value
@@ -707,13 +762,14 @@ impl ProviderTransport {
         self.preflight(consult, approval)
             .map_err(LiveConsultError::Denied)?;
         match self.host {
-            ProviderHost::OpenRouter => self.openai_chat(
-                consult.request.timeout_ms_u32,
-                system,
-                question,
-                model,
-                max_output_tokens_u32,
-            ),
+            ProviderHost::OpenRouter | ProviderHost::Sakana | ProviderHost::ZeroGCompute => self
+                .openai_chat(
+                    consult.request.timeout_ms_u32,
+                    system,
+                    question,
+                    model,
+                    max_output_tokens_u32,
+                ),
             ProviderHost::Anthropic | ProviderHost::OpenAi | ProviderHost::Gemini => {
                 Err(LiveConsultError::CodecNotImplemented)
             }
@@ -741,15 +797,16 @@ impl ProviderTransport {
         self.preflight(consult, approval)
             .map_err(LiveConsultError::Denied)?;
         match self.host {
-            ProviderHost::OpenRouter => self.openai_chat_stream(
-                consult.request.timeout_ms_u32,
-                system,
-                question,
-                model,
-                max_output_tokens_u32,
-                on_delta,
-                cancel,
-            ),
+            ProviderHost::OpenRouter | ProviderHost::Sakana | ProviderHost::ZeroGCompute => self
+                .openai_chat_stream(
+                    consult.request.timeout_ms_u32,
+                    system,
+                    question,
+                    model,
+                    max_output_tokens_u32,
+                    on_delta,
+                    cancel,
+                ),
             ProviderHost::Anthropic | ProviderHost::OpenAi | ProviderHost::Gemini => {
                 Err(LiveConsultError::CodecNotImplemented)
             }
@@ -1245,10 +1302,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn live_codec_token_is_closed_set() {
+        // The frontier / executor provider selector resolves ONLY codec-capable
+        // hosts; an unknown / codec-less / funds token is a typed deny (`None`),
+        // never a silent default — and there is no free-form URL form.
+        assert_eq!(
+            ProviderHost::live_codec_from_token("openrouter"),
+            Some(ProviderHost::OpenRouter)
+        );
+        assert_eq!(
+            ProviderHost::live_codec_from_token(" Sakana "),
+            Some(ProviderHost::Sakana),
+            "case-insensitive + trimmed"
+        );
+        assert_eq!(
+            ProviderHost::live_codec_from_token("fugu"),
+            Some(ProviderHost::Sakana),
+            "the recognizable model name aliases the Sakana host"
+        );
+        assert_eq!(
+            ProviderHost::live_codec_from_token("zerog"),
+            Some(ProviderHost::ZeroGCompute),
+            "0G Compute (Router, OpenAI-compatible, TEE-attested)"
+        );
+        assert_eq!(
+            ProviderHost::live_codec_from_token(" 0G "),
+            Some(ProviderHost::ZeroGCompute),
+            "case-insensitive + trimmed 0G alias"
+        );
+        // codec-less allowlisted hosts are NOT live-selectable (no v1 codec).
+        assert_eq!(ProviderHost::live_codec_from_token("anthropic"), None);
+        assert_eq!(ProviderHost::live_codec_from_token("gemini"), None);
+        // funds / unknown / URL-shaped tokens all deny.
+        assert_eq!(ProviderHost::live_codec_from_token("solana"), None);
+        assert_eq!(ProviderHost::live_codec_from_token(""), None);
+        assert_eq!(
+            ProviderHost::live_codec_from_token("https://evil.example"),
+            None
+        );
+    }
+
     /// E0e-2 — SI-5 allowlist-excludes-chain (provider leg). A comprehensive
     /// funds / chain / wallet / RPC host corpus is rejected by
     /// [`host_is_allowlisted`], the closed [`ALLOWLISTED_PROVIDERS`] set is exactly
-    /// the four provider hosts (no funds variant exists to allowlist), and no
+    /// the six provider hosts (no funds variant exists to allowlist), and no
     /// allowlisted host string even *looks* like a chain RPC. FAILS if a funds
     /// host ever becomes representable or reachable.
     #[test]
@@ -1270,6 +1368,11 @@ mod tests {
             "mainnet.base.org",
             "bsc-dataseed.binance.org",
             "api.avax.network",
+            // 0G's own CHAIN RPC must stay unreachable via the provider transport:
+            // the 0G COMPUTE Router (pure inference) is allowlisted, the 0G CHAIN RPC
+            // is NOT (funds-egress = 0, even inside the 0G ecosystem).
+            "evmrpc-testnet.0g.ai",
+            "evmrpc.0g.ai",
             "127.0.0.1",
             "localhost",
             "wallet.local",
@@ -1278,8 +1381,8 @@ mod tests {
         for h in FUNDS_HOSTS {
             assert!(!host_is_allowlisted(h), "{h} must NOT be allowlisted");
         }
-        // The closed allowlist is exactly the four provider hosts (no funds variant).
-        assert_eq!(ALLOWLISTED_PROVIDERS.len(), 4);
+        // The closed allowlist is exactly the six provider hosts (no funds variant).
+        assert_eq!(ALLOWLISTED_PROVIDERS.len(), 6);
         for p in ALLOWLISTED_PROVIDERS {
             let host = p.host();
             for needle in [
@@ -1306,6 +1409,8 @@ mod tests {
         // The set is non-empty + correct: every provider host IS reachable.
         assert!(host_is_allowlisted(ProviderHost::Anthropic.host()));
         assert!(host_is_allowlisted(ProviderHost::OpenRouter.host()));
+        assert!(host_is_allowlisted(ProviderHost::Sakana.host()));
+        assert!(host_is_allowlisted(ProviderHost::ZeroGCompute.host()));
     }
 
     #[test]

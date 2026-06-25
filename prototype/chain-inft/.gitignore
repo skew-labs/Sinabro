@@ -1,0 +1,6 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+# vendored deps (forge-std + openzeppelin copied per README; not committed — regenerable)
+lib/

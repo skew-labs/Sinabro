@@ -194,12 +194,21 @@ fn risk_for(ns: CliNamespace, verb: &str) -> CommandRisk {
             // Confirm and renders the locked surface (no execution); with the feature
             // ON, `dispatch_namespace` intercepts it into the phrase-gated executor.
             "put-fixture" => CommandRisk::Network,
-            "backup-walrus" | "backup-walrus-mainnet" => CommandRisk::Network,
+            "backup-walrus" | "backup-walrus-mainnet" | "backup-0g" => CommandRisk::Network,
             "walrus-index" | "walrus-fetch" => CommandRisk::Network,
             _ => CommandRisk::ReadOnly,
         },
         CliNamespace::Provider => match v.as_str() {
             "add" => CommandRisk::LocalWrite,
+            // W2-B: 0G Compute TEE attestation verify (Node sidecar; keyless, read-only).
+            // Network risk; honest "not compiled" surface with the feature off.
+            "attest-0g" => CommandRisk::Network,
+            // W3-B: 0G Compute fine-tune PREPARE — reads verified patterns, writes the
+            // Alpaca dataset locally, emits the owner-run flow. LocalWrite (no network/key).
+            "finetune-0g" => CommandRisk::LocalWrite,
+            // W3-B capstone: mint a fine-tuned expert as an iNFT — PURE PREPARE (emits the
+            // owner-run mint command). ReadOnly: no file write, no network, no key.
+            "mint-expert-0g" => CommandRisk::ReadOnly,
             // P (owner-authorized 2026-06-10): the gated live LLM consult. Network
             // risk in BOTH builds, so with the `provider-egress` feature OFF it
             // classifies to Confirm and renders the locked surface (no execution);
@@ -402,6 +411,7 @@ const RECOGNIZED_VERBS: &[&str] = &[
     "show",
     "scan",
     "detect",
+    "reconcile",
     "route",
     "cache",
     "endpoint",
@@ -492,6 +502,12 @@ const RECOGNIZED_VERBS: &[&str] = &[
     "put-fixture",
     "backup-walrus",
     "backup-walrus-mainnet",
+    "backup-0g",
+    "anchor-0g",
+    "mint-0g",
+    "attest-0g",
+    "finetune-0g",
+    "mint-expert-0g",
     "walrus-index",
     "walrus-fetch",
     "consult",
@@ -1082,6 +1098,11 @@ fn memory_backup_walrus(rest: &[String], out: &mut impl Write) -> io::Result<boo
     // MAIN INDEX. first_sub kept for the round-trip proof.
     let mut entries: Vec<crate::memory_walrus::WalrusMemEntry> = Vec::new();
     let mut first_sub: Option<Vec<u8>> = None;
+    // W4 Slice 2: the owner's keyless `memory_id → 0G rootHash` map, so an index entry
+    // can carry a Walrus→0G fallback root when the owner backed that sub up to 0G.
+    let zerog_roots = crate::memory_store::data_dir()
+        .map(|d| crate::memory_walrus::read_0g_roots_map(&d))
+        .unwrap_or_default();
     for (id, topic, ciphertext) in records.iter().take(BACKUP_WALRUS_MAX_RECORDS) {
         match walrus_put_verified(&mut pub_t, epochs, ciphertext) {
             Some(blob) => {
@@ -1093,6 +1114,7 @@ fn memory_backup_walrus(rest: &[String], out: &mut impl Write) -> io::Result<boo
                     memory_id: *id,
                     topic: topic.clone(),
                     sub_blob_id: blob,
+                    sub_0g_root: zerog_roots.get(id).cloned(),
                 });
             }
             None => {
@@ -1199,6 +1221,451 @@ fn memory_backup_walrus(rest: &[String], out: &mut impl Write) -> io::Result<boo
         ApprovalRequirement::TypedPhrase,
         truth,
         &body,
+    )?;
+    Ok(true)
+}
+
+/// W2-C — the constant phrase the owner types to run the 0G Storage backup ceremony.
+/// DISTINCT from the Walrus phrases so testnet muscle-memory can never cross-fire.
+const BACKUP_ZEROG_CONFIRM_PHRASE: &str = "backup-encrypted-memory-to-0g-testnet";
+
+/// W2-C locked-surface body (no/wrong phrase). Honest about the funds-safe split.
+fn backup_zerog_locked_body() -> Vec<String> {
+    vec![
+        "memory backup-0g = round-trip the agent's ENCRYPTED memory (AES ciphertext) through 0G Storage testnet".to_string(),
+        format!("to run, supply EXACTLY: memory backup-0g {BACKUP_ZEROG_CONFIRM_PHRASE}"),
+        "the AGENT never runs the upload (a0gi fee + EVM signer = FUNDS); it emits the OWNER command + does the KEYLESS download+verify".to_string(),
+        "denied: no run without the exact phrase; custody/funds HARD-LOCKED (PD-6)".to_string(),
+    ]
+}
+
+/// W2-C fail-closed error render for the 0G Storage ceremony.
+fn backup_zerog_error(out: &mut impl Write, envelope_hex: &str, label: &str) -> io::Result<bool> {
+    emit(
+        out,
+        "memory backup-0g",
+        envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        RenderTruth::Red,
+        &[
+            format!("memory backup-0g: {label}"),
+            "fail-closed; nothing partial trusted".to_string(),
+        ],
+    )
+    .map(|()| true)
+}
+
+/// `provider attest-0g [provider]` — W2-B 0G Compute TEE attestation verify (funds-safe).
+/// Runs the Node sidecar (`ZEROG_ATTESTATION_SIDECAR` → verify.js) to verify a 0G Compute
+/// provider's TEE quote. KEYLESS + read-only: the sidecar uses an ephemeral UNFUNDED wallet
+/// (no key, no funds, no chain write); the agent holds no key (PD-6). With the
+/// `zerog-attestation` feature off, renders an honest "not compiled" surface.
+fn provider_attest_zerog(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"provider attest-0g"));
+    let provider = rest.first().map(String::as_str);
+    let mut body =
+        vec!["0G Compute TEE attestation verify (W2-B) — read-only, keyless, no funds".to_string()];
+    #[cfg(feature = "zerog-attestation")]
+    {
+        match std::env::var(crate::zerog_attestation::ZEROG_ATTESTATION_SIDECAR_ENV) {
+            Ok(js) if !js.trim().is_empty() => {
+                match crate::zerog_attestation::run_verify("node", js.trim(), provider) {
+                    Some(v) => {
+                        body.push(format!("  verified    : {}", v.verified));
+                        body.push(format!("  teeVerifier : {}", v.tee_verifier));
+                        body.push(format!("  provider    : {}", v.provider));
+                        body.push(format!("  model       : {}", v.model));
+                    }
+                    None => body.push(
+                        "  verify FAILED (sidecar spawn/parse) — UNVERIFIED (fail-closed)"
+                            .to_string(),
+                    ),
+                }
+            }
+            _ => body.push(format!(
+                "  set {} to prototype/sidecar/zerog-attestation/verify.js (after npm install)",
+                crate::zerog_attestation::ZEROG_ATTESTATION_SIDECAR_ENV
+            )),
+        }
+    }
+    #[cfg(not(feature = "zerog-attestation"))]
+    {
+        let _ = provider;
+        body.push(
+            "  sidecar not compiled (build --features zerog-attestation; npm install in prototype/sidecar/zerog-attestation)"
+                .to_string(),
+        );
+    }
+    emit(
+        out,
+        "provider attest-0g",
+        &envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &body,
+    )
+    .map(|()| true)
+}
+
+/// `memory anchor-0g` — W2-D 0G Chain anchor PREPARE (funds-safe, PD-6). PURE: emits
+/// the locked patternHash + ABI calldata + a keyless read-only dry-run + the exact
+/// OWNER deploy/anchor commands. The agent NEVER deploys/signs/holds a key; the OWNER
+/// fires the funds-bearing txs with their own testnet key. ReadOnly (autonomous prepare).
+fn memory_anchor_zerog(out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"memory anchor-0g"));
+    emit(
+        out,
+        "memory anchor-0g",
+        &envelope_hex,
+        CommandRisk::ReadOnly,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &crate::zerog_chain::anchor_bundle_lines(None),
+    )
+    .map(|()| true)
+}
+
+/// `memory mint-0g` — W3 0G ERC-7857 iNFT mint PREPARE (funds-safe, PD-6). PURE: emits
+/// the locked mint selector + ABI calldata (dataHash = the W2-D patternHash) + a keyless
+/// read-only dry-run + the exact OWNER deploy/mint commands (`forge script`). The agent
+/// NEVER deploys/signs/holds a key; the OWNER fires the funds-bearing txs with their own
+/// testnet key. ReadOnly (autonomous prepare). Mirrors `memory_anchor_zerog` (W2-D).
+fn memory_mint_zerog(out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"memory mint-0g"));
+    emit(
+        out,
+        "memory mint-0g",
+        &envelope_hex,
+        CommandRisk::ReadOnly,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &crate::zerog_inft::mint_bundle_lines(None, None),
+    )
+    .map(|()| true)
+}
+
+/// `provider finetune-0g` — W3-B 0G Compute fine-tune PREPARE (funds-safe, PD-6). Reads the
+/// orchestrator's ONLY-verified patterns (the `autonomy_evolve` R-E-W corpus, filtered by
+/// `parse_pattern_memory` — NOT arbitrary owner memories), writes an Alpaca SFT `.jsonl` to
+/// the data dir, and emits the exact OWNER-RUN `0g-compute-cli fine-tuning` sequence. PURE
+/// prep: no network, no key; the paid training is owner-fired. LocalWrite (writes the
+/// dataset). The fine-tune reinforces oracle-verified behaviour — un-verified text never trains.
+fn provider_finetune_zerog(out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"provider finetune-0g"));
+    let store = match crate::memory_store::PersistedStore::open_local() {
+        Ok(s) => s,
+        Err(_) => {
+            return emit(
+                out,
+                "provider finetune-0g",
+                &envelope_hex,
+                CommandRisk::LocalWrite,
+                ApprovalRequirement::None,
+                RenderTruth::Yellow,
+                &["provider finetune-0g: memory store unavailable (no key/home)".to_string()],
+            )
+            .map(|()| true);
+        }
+    };
+    // ONLY oracle-verified patterns become training data (parse_pattern_memory filters the
+    // `#sinabro-pattern` corpus; a private owner note is not a pattern ⇒ never exported).
+    let pairs: Vec<(String, String)> = store
+        .load_all()
+        .chunks
+        .iter()
+        .filter_map(|(chunk, _)| {
+            let body = String::from_utf8_lossy(chunk.envelope().content.as_slice());
+            crate::autonomy_evolve::parse_pattern_memory(&body)
+                .map(|(_, topic, content)| (topic, content))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return emit(
+            out,
+            "provider finetune-0g",
+            &envelope_hex,
+            CommandRisk::LocalWrite,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &[
+                "provider finetune-0g: no oracle-verified patterns to train on yet".to_string(),
+                "run `daemon evolve <ARM_PHRASE> <goal>` first — ONLY verified + cross-memory-"
+                    .to_string(),
+                "consistent patterns (the R-E-W WRITE corpus) become fine-tune training data"
+                    .to_string(),
+            ],
+        )
+        .map(|()| true);
+    }
+    let n = pairs.len();
+    let jsonl = crate::zerog_finetune::export_alpaca_jsonl(&pairs);
+    let dir = match crate::memory_store::data_dir() {
+        Ok(d) => d,
+        Err(_) => {
+            return emit(
+                out,
+                "provider finetune-0g",
+                &envelope_hex,
+                CommandRisk::LocalWrite,
+                ApprovalRequirement::None,
+                RenderTruth::Red,
+                &["provider finetune-0g: no data dir to write the dataset".to_string()],
+            )
+            .map(|()| true);
+        }
+    };
+    let path = dir.join(crate::zerog_finetune::FINETUNE_DATASET_FILE);
+    if crate::memory_store::atomic_write(&path, jsonl.as_bytes()).is_err() {
+        return emit(
+            out,
+            "provider finetune-0g",
+            &envelope_hex,
+            CommandRisk::LocalWrite,
+            ApprovalRequirement::None,
+            RenderTruth::Red,
+            &["provider finetune-0g: failed to write the dataset file".to_string()],
+        )
+        .map(|()| true);
+    }
+    let mut lines = crate::zerog_finetune::finetune_bundle_lines(&path.display().to_string(), n);
+    lines.push(String::new());
+    lines.push(format!(
+        "  wrote {} bytes (PLAINTEXT dataset — the owner's own verified corpus; review before upload)",
+        jsonl.len()
+    ));
+    emit(
+        out,
+        "provider finetune-0g",
+        &envelope_hex,
+        CommandRisk::LocalWrite,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &lines,
+    )
+    .map(|()| true)
+}
+
+/// `provider mint-expert-0g <adapter_rootHash> [kind]` — W3-B capstone: mint a fine-tuned
+/// expert as an ERC-7857 iNFT on the existing AgentNFT (the W3 proxy). `dataHash` = the
+/// LoRA adapter's 0G Storage rootHash (the weights ARE the intelligence); the descriptor
+/// names the expert. PURE PREPARE: builds the mint calldata + emits the OWNER-run mint; the
+/// agent never signs (PD-6). ReadOnly. Reuses the W3 `zerog_inft` mint encoder.
+fn provider_mint_expert_zerog(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"provider mint-expert-0g"));
+    let root_arg = rest.get(1).map(String::as_str).unwrap_or("");
+    let kind = rest.get(2).map(String::as_str).unwrap_or("generalist");
+    if crate::zerog_inft::parse_root_hash(root_arg).is_none() {
+        return emit(
+            out,
+            "provider mint-expert-0g",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &[
+                "provider mint-expert-0g <adapter_rootHash> [kind] — mint a fine-tuned expert as an iNFT"
+                    .to_string(),
+                "  <adapter_rootHash> = the LoRA adapter's 0G Storage rootHash (0x + 64 hex)"
+                    .to_string(),
+                "  upload the decrypted adapter to 0G Storage first (W2-C `memory backup-0g`)"
+                    .to_string(),
+            ],
+        )
+        .map(|()| true);
+    }
+    emit(
+        out,
+        "provider mint-expert-0g",
+        &envelope_hex,
+        CommandRisk::ReadOnly,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &crate::zerog_inft::expert_mint_bundle_lines(root_arg, kind, None, None),
+    )
+    .map(|()| true)
+}
+
+/// `memory backup-0g <phrase> [rootHash]` — funds-safe 0G Storage round-trip (W2-C).
+///
+/// PREPARE (no rootHash): gate → load the first REAL `.mc` record → write the AES
+/// ciphertext to a temp file → EMIT the exact OWNER-RUN upload command (the agent NEVER
+/// runs it: a0gi fee + EVM signer = FUNDS) + the ciphertext fingerprint + the keyless
+/// verify step. VERIFY (rootHash present): gate → run the KEYLESS proof-verified
+/// `download --proof` (`zerog-storage` feature) → byte-match the original ciphertext.
+/// The agent holds NO signer key; custody/chain-write HARD-LOCKED (PD-6).
+fn memory_backup_zerog(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
+
+    let envelope_hex = hex16(&sha256_32(b"memory backup-0g"));
+    let phrase = rest.get(1).map(String::as_str).unwrap_or("");
+    let root_arg = rest.get(2).map(String::as_str);
+
+    let mut prompt = ApprovalPrompt::new(
+        ApprovalRequirement::TypedPhrase,
+        BACKUP_ZEROG_CONFIRM_PHRASE,
+    );
+    if !matches!(prompt.evaluate(phrase.trim()), ApprovalDecision::Approved) {
+        emit(
+            out,
+            "memory backup-0g",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &backup_zerog_locked_body(),
+        )?;
+        return Ok(true);
+    }
+
+    let store = match crate::memory_store::PersistedStore::open_local() {
+        Ok(s) => s,
+        Err(_) => {
+            return backup_zerog_error(
+                out,
+                &envelope_hex,
+                "memory store unavailable (no key/home)",
+            );
+        }
+    };
+    let records = store.records_for_walrus();
+    let Some((id, _topic, ciphertext)) = records.first() else {
+        emit(
+            out,
+            "memory backup-0g",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &[
+                "memory backup-0g: the store has no encrypted records to back up".to_string(),
+                "save a memory first (`memory save …`), then back it up to 0G Storage".to_string(),
+            ],
+        )?;
+        return Ok(true);
+    };
+    let dir = match crate::memory_store::data_dir() {
+        Ok(d) => d,
+        Err(_) => return backup_zerog_error(out, &envelope_hex, "no data dir for temp ciphertext"),
+    };
+
+    // VERIFY mode (a rootHash arg present): keyless proof-verified download + byte-match.
+    if let Some(root) = root_arg {
+        if !crate::zerog_storage::is_valid_root_hash(root) {
+            return backup_zerog_error(out, &envelope_hex, "rootHash must be 0x + 64 hex");
+        }
+        #[cfg(feature = "zerog-storage")]
+        {
+            let Ok(binary) = std::env::var(crate::zerog_storage::ZEROG_STORAGE_BINARY_ENV) else {
+                return backup_zerog_error(
+                    out,
+                    &envelope_hex,
+                    "set ZEROG_STORAGE_CLIENT to the built 0g-storage-client binary path",
+                );
+            };
+            let out_path = dir.join(format!("zerog_backup_{id}.dl"));
+            let verdict = crate::zerog_storage::run_download(
+                &binary,
+                root,
+                &out_path.display().to_string(),
+                ciphertext,
+            );
+            use crate::zerog_storage::ZerogVerify;
+            let (truth, line) = match verdict {
+                ZerogVerify::ByteMatch => (
+                    RenderTruth::Green,
+                    format!(
+                        "0G Storage round-trip VERIFIED: id={id} root={root} — download --proof OK + byte-match=true"
+                    ),
+                ),
+                ZerogVerify::Mismatch => (
+                    RenderTruth::Red,
+                    format!("0G verify: downloaded bytes != original ciphertext (root={root})"),
+                ),
+                ZerogVerify::ExitNonZero(c) => (
+                    RenderTruth::Red,
+                    format!("0G verify: 0g-storage-client exit {c:?} (proof/integrity failure)"),
+                ),
+                ZerogVerify::SpawnFailed => (
+                    RenderTruth::Red,
+                    "0G verify: could not run 0g-storage-client (check ZEROG_STORAGE_CLIENT)"
+                        .to_string(),
+                ),
+                ZerogVerify::InvalidRoot => {
+                    (RenderTruth::Red, "0G verify: invalid rootHash".to_string())
+                }
+            };
+            emit(
+                out,
+                "memory backup-0g",
+                &envelope_hex,
+                CommandRisk::Network,
+                ApprovalRequirement::TypedPhrase,
+                truth,
+                &[
+                    line,
+                    "KEYLESS download (no signer key); custody/chain-write HARD-LOCKED (PD-6)"
+                        .to_string(),
+                ],
+            )?;
+            return Ok(true);
+        }
+        #[cfg(not(feature = "zerog-storage"))]
+        {
+            emit(
+                out,
+                "memory backup-0g",
+                &envelope_hex,
+                CommandRisk::Network,
+                ApprovalRequirement::TypedPhrase,
+                RenderTruth::Yellow,
+                &[
+                    "memory backup-0g verify: the 0G storage client path is not compiled"
+                        .to_string(),
+                    "build sinabro with `--features zerog-storage` for the keyless download+verify"
+                        .to_string(),
+                ],
+            )?;
+            return Ok(true);
+        }
+    }
+
+    // PREPARE mode: write the ciphertext to a temp file + emit the OWNER upload command.
+    let temp_path = dir.join(format!("zerog_backup_{id}.mc"));
+    let temp_str = temp_path.display().to_string();
+    if crate::memory_store::atomic_write(&temp_path, ciphertext).is_err() {
+        return backup_zerog_error(out, &envelope_hex, "could not write temp ciphertext");
+    }
+    let fingerprint = hex16(&sha256_32(ciphertext));
+    let cmd = crate::zerog_storage::upload_command(&temp_str);
+    emit(
+        out,
+        "memory backup-0g",
+        &envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        RenderTruth::Green,
+        &[
+            format!(
+                "memory backup-0g: wrote encrypted record id={id} -> {temp_str} ({} bytes; AES ciphertext; 0G encryption OFF)",
+                ciphertext.len()
+            ),
+            "0G Storage upload needs an EVM signer + a0gi fee = FUNDS, so the AGENT never runs it."
+                .to_string(),
+            "OWNER 1 (build the client, Go>=1.23): git clone https://github.com/0gfoundation/0g-storage-client && (cd 0g-storage-client && go build) && export ZEROG_STORAGE_CLIENT=$PWD/0g-storage-client/0g-storage-client"
+                .to_string(),
+            "OWNER 2 (fund a TESTNET signer via faucet.0g.ai): export ZEROG_STORAGE_SIGNER_KEY=0x<testnet-private-key>"
+                .to_string(),
+            "OWNER 3 (run the upload — FUNDS; key from YOUR env, never the agent's):".to_string(),
+            format!("  {cmd}"),
+            format!(
+                "OWNER 4 (copy 'root = 0x…' from stderr, then KEYLESS verify): memory backup-0g {BACKUP_ZEROG_CONFIRM_PHRASE} 0x<root>"
+            ),
+            format!(
+                "ciphertext fingerprint sha256[..8]={fingerprint}; custody/chain-write HARD-LOCKED (PD-6); agent holds NO signer key"
+            ),
+        ],
     )?;
     Ok(true)
 }
@@ -1334,6 +1801,8 @@ fn memory_backup_walrus_mainnet(rest: &[String], out: &mut impl Write) -> io::Re
                     memory_id: *id,
                     topic: topic.clone(),
                     sub_blob_id: blob,
+                    // mainnet self-host Walrus memory; the 0G-testnet fallback does not pair here.
+                    sub_0g_root: None,
                 });
             }
             Err(_) => {
@@ -1905,20 +2374,77 @@ fn provider_consult_model() -> String {
     )
 }
 
+/// Resolve WHICH frontier provider host the consult egresses to, from
+/// `SINABRO_FRONTIER_PROVIDER` (closed set; unset/blank ⇒ the OpenRouter default
+/// for back-compat; an unknown token ⇒ a typed deny — never a silent fallback).
+/// The host is a closed enum (no base-URL form), so funds-egress stays
+/// structurally impossible regardless of the env value.
+#[cfg(feature = "provider-egress")]
+fn resolve_frontier_provider() -> Result<crate::provider::egress::ProviderHost, &'static str> {
+    match std::env::var(crate::commands::model_select::FRONTIER_PROVIDER_ENV) {
+        Ok(token) if !token.trim().is_empty() => {
+            crate::provider::egress::ProviderHost::live_codec_from_token(&token)
+                .ok_or("unknown frontier provider; set SINABRO_FRONTIER_PROVIDER=openrouter|sakana")
+        }
+        _ => Ok(crate::provider::egress::ProviderHost::OpenRouter),
+    }
+}
+
+/// The effective frontier model for `host`: the `OPENROUTER_MODEL` override if
+/// set + non-empty (byte-faithful, same as `provider_consult_model`), else the
+/// per-provider default (OpenRouter ⇒ DeepSeek, Sakana ⇒ Fugu) — never a silent
+/// cross-provider default.
+#[cfg(feature = "provider-egress")]
+fn provider_consult_model_for(host: crate::provider::egress::ProviderHost) -> String {
+    let env_val = std::env::var(PROVIDER_CONSULT_MODEL_ENV).ok();
+    if env_val.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        return crate::commands::model_select::resolve_frontier_model(env_val.as_deref());
+    }
+    match host {
+        crate::provider::egress::ProviderHost::Sakana => {
+            crate::commands::model_select::FRONTIER_SAKANA_DEFAULT_MODEL.to_string()
+        }
+        crate::provider::egress::ProviderHost::ZeroGCompute => {
+            crate::commands::model_select::ZEROG_DEFAULT_MODEL.to_string()
+        }
+        _ => crate::commands::model_select::FRONTIER_DEFAULT_MODEL.to_string(),
+    }
+}
+
 /// The denial / gated-preview body when the exact phrase is absent or wrong —
 /// render-only, NEVER touches redaction, the builder, or the network.
 #[cfg(feature = "provider-egress")]
 fn provider_consult_locked_body() -> Vec<String> {
+    // Honest per-selection preview: name the ACTUAL frontier provider host, key
+    // env, and model the live call WOULD use (per SINABRO_FRONTIER_PROVIDER), never
+    // a hardcoded OpenRouter claim; an invalid selection is surfaced as-is.
+    let (call_line, key_line, model) = match resolve_frontier_provider() {
+        Ok(host) => (
+            format!(
+                "provider consult is a LIVE LLM call ({}, OpenAI-compatible)",
+                host.host()
+            ),
+            format!(
+                "key: {} env, read only at the TLS boundary, never shown",
+                host.key_env()
+            ),
+            provider_consult_model_for(host),
+        ),
+        Err(reason) => (
+            format!("provider consult is a LIVE LLM call ({reason})"),
+            "key: per-provider env, read only at the TLS boundary, never shown".to_string(),
+            provider_consult_model(),
+        ),
+    };
     #[allow(unused_mut)] // mut is consumed only when a local-serving feature is on
     let mut body = vec![
-        "provider consult is a LIVE LLM call (OpenRouter, OpenAI-compatible)".to_string(),
+        call_line,
         "risk=network approval=typed-phrase (exact); bounded agentic loop (<=5 turns)".to_string(),
         format!("usage: provider consult {PROVIDER_CONSULT_CONFIRM_PHRASE} <question>"),
         format!(
-            "bounds: question<={PROVIDER_CONSULT_MAX_QUESTION_BYTES}B output<={PROVIDER_CONSULT_MAX_OUTPUT_TOKENS}tok model={} (set OPENROUTER_MODEL to change)",
-            provider_consult_model()
+            "bounds: question<={PROVIDER_CONSULT_MAX_QUESTION_BYTES}B output<={PROVIDER_CONSULT_MAX_OUTPUT_TOKENS}tok model={model} (set OPENROUTER_MODEL to change)"
         ),
-        "key: OPENROUTER_API_KEY env, read only at the TLS boundary, never shown".to_string(),
+        key_line,
         "denied: no live call without the exact phrase".to_string(),
     ];
     // P3-3 (⑧ T6 no-hidden-route): when a local-serving feature is also
@@ -2306,9 +2832,7 @@ fn provider_consult(
 ) -> io::Result<bool> {
     use crate::commands::model_compress::ConsultScope;
     use crate::commands::model_route::ConsultTrigger;
-    use crate::provider::egress::{
-        EgressApproval, ProviderHost, ProviderTransport, RedactedConsult,
-    };
+    use crate::provider::egress::{EgressApproval, ProviderTransport, RedactedConsult};
     use crate::provider::frontier_consult::{self, BoundedConsultInputs, BoundedConsultRequest};
     use crate::provider::redaction::{RedactionRequest, redact};
     use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
@@ -2393,9 +2917,12 @@ fn provider_consult(
     let Some(consult) = RedactedConsult::new(request, receipt) else {
         return provider_consult_error(out, &envelope_hex, "consult payload rejected");
     };
-    let key = crate::secrets::classify_reference("OPENROUTER_API_KEY", "env:OPENROUTER_API_KEY");
-    let transport = ProviderTransport::new(ProviderHost::OpenRouter, key);
-    let model = provider_consult_model();
+    let host = match resolve_frontier_provider() {
+        Ok(host) => host,
+        Err(reason) => return provider_consult_error(out, &envelope_hex, reason),
+    };
+    let transport = ProviderTransport::for_host(host);
+    let model = provider_consult_model_for(host);
     // Step 4 (agent-core): the consult is an AGENTIC LOOP — the model may
     // autonomously call the two READ-ONLY memory tools (`memory index` /
     // `memory read <id>`) before answering, bounded by the m-agent iteration
@@ -3605,6 +4132,227 @@ mod fim_tests {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SLICE 2 (owner 2026-06-23 "executor도 웬만한 모델 다 배선 … 로컬 정체성 유지") — the
+// orchestrate IMPLEMENT brain ("executor"): LOCAL loopback (the DEFAULT — zero-egress,
+// first-class, byte-unchanged) OR a REMOTE egress provider. The remote leg reuses the
+// EXISTING gated `ProviderTransport` (same redaction wall; the orchestrate phrase IS its
+// same-message owner-arm); the host is a CLOSED allowlisted enum (`live_codec_from_token`
+// — no base-URL form), so funds-egress stays structurally impossible. The orchestrate
+// REASONING role stays loopback in v1. custody/funds/chain-write HARD-LOCKED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The resolved IMPLEMENT brain for the two-model loop.
+#[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
+enum ExecutorTarget {
+    /// LOCAL loopback (default): the per-port `LocalChatTransport` pool. Zero egress.
+    Local,
+    /// REMOTE egress provider: the gated `ProviderTransport` (redaction-walled,
+    /// owner-armed). Only a closed-set allowlisted host; no arbitrary URL.
+    #[cfg(feature = "provider-egress")]
+    Remote(Box<RemoteExecutor>),
+}
+
+/// Materials for a REMOTE executor leg: the gated transport, the authorizing
+/// `RedactedConsult` (the orchestrate phrase IS its same-message approval), and the
+/// fixed remote model id. Built ONCE; reused for every implement sub-task (mirrors the
+/// provider-fan executor's one-consult-many-turns shape).
+#[cfg(all(
+    feature = "provider-egress",
+    any(feature = "local-mlx", feature = "local-vllm")
+))]
+struct RemoteExecutor {
+    transport: crate::provider::egress::ProviderTransport,
+    consult: crate::provider::egress::RedactedConsult,
+    model: String,
+    host: crate::provider::egress::ProviderHost,
+}
+
+/// Resolve the executor brain from `SINABRO_EXECUTOR_MODE` (+ `_PROVIDER` / `_MODEL`
+/// when remote). Unset/blank/`local` ⇒ Local (the default; zero-egress). `remote` ⇒ a
+/// closed-set provider egress leg (requires `provider-egress`; otherwise a typed deny —
+/// never a silent downgrade to a different brain). An unknown mode/provider/model ⇒ a
+/// typed deny (no silent fallback). `receipt` authorizes the remote leg's consult.
+#[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
+fn resolve_executor_target(
+    receipt: crate::provider::redaction::RedactionReceipt,
+    task: &str,
+) -> Result<ExecutorTarget, String> {
+    let mode = std::env::var(crate::commands::model_select::EXECUTOR_MODE_ENV)
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    match mode.as_str() {
+        "" | "local" | "loopback" => {
+            let _ = (receipt, task); // the local leg needs no consult
+            Ok(ExecutorTarget::Local)
+        }
+        "remote" | "provider" => resolve_remote_executor(receipt, task),
+        other => Err(format!(
+            "unknown {} '{other}'; use local|remote",
+            crate::commands::model_select::EXECUTOR_MODE_ENV
+        )),
+    }
+}
+
+/// Build a REMOTE executor leg (closed-set host + validated model + authorizing
+/// consult). Mirrors `provider_consult`'s bounded-request construction.
+#[cfg(all(
+    feature = "provider-egress",
+    any(feature = "local-mlx", feature = "local-vllm")
+))]
+fn resolve_remote_executor(
+    receipt: crate::provider::redaction::RedactionReceipt,
+    task: &str,
+) -> Result<ExecutorTarget, String> {
+    use crate::commands::model_compress::ConsultScope;
+    use crate::commands::model_route::ConsultTrigger;
+    use crate::provider::egress::{ProviderHost, ProviderTransport, RedactedConsult};
+    use crate::provider::frontier_consult::{self, BoundedConsultInputs, BoundedConsultRequest};
+    use crate::route::RouteExecutionState;
+
+    // provider: closed codec-capable set; unset ⇒ OpenRouter default; unknown ⇒ deny.
+    let host = match std::env::var(crate::commands::model_select::EXECUTOR_PROVIDER_ENV) {
+        Ok(token) if !token.trim().is_empty() => ProviderHost::live_codec_from_token(&token)
+            .ok_or_else(|| {
+                format!(
+                    "unknown {} '{}'; use openrouter|sakana",
+                    crate::commands::model_select::EXECUTOR_PROVIDER_ENV,
+                    token.trim()
+                )
+            })?,
+        _ => ProviderHost::OpenRouter,
+    };
+    // model: validated; unset ⇒ the per-provider default.
+    let model = match std::env::var(crate::commands::model_select::EXECUTOR_MODEL_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => crate::commands::model_select::validate_model_id(&raw)
+            .map(str::to_string)
+            .map_err(|deny| {
+                format!(
+                    "invalid {}: {}",
+                    crate::commands::model_select::EXECUTOR_MODEL_ENV,
+                    deny.label()
+                )
+            })?,
+        _ => match host {
+            ProviderHost::Sakana => {
+                crate::commands::model_select::FRONTIER_SAKANA_DEFAULT_MODEL.to_string()
+            }
+            ProviderHost::ZeroGCompute => {
+                crate::commands::model_select::ZEROG_DEFAULT_MODEL.to_string()
+            }
+            _ => crate::commands::model_select::FRONTIER_DEFAULT_MODEL.to_string(),
+        },
+    };
+    // The authorizing consult — the orchestrate phrase IS its same-message approval
+    // (mirrors `provider_consult`; the live wire content is per-subtask + redacted).
+    let inputs = BoundedConsultInputs {
+        route_state: RouteExecutionState::Slow,
+        trigger: ConsultTrigger::LowConfidenceHighBlastRadius,
+        scope: ConsultScope::minimal(),
+        redaction_report_hash_32: receipt.redacted_payload_hash_32(),
+        evidence_refs_hash_32: sha256_32(b"orchestrate-remote-executor-v1"),
+        prompt_hash_32: sha256_32(task.as_bytes()),
+        timeout_ms_u32: PROVIDER_CONSULT_TIMEOUT_MS,
+        local_verification_command_hash_32: sha256_32(b"orchestrate-oracle-verifies-implement"),
+    };
+    let Some(request) = frontier_consult::build(&inputs) else {
+        return Err("bounded consult request denied".to_string());
+    };
+    let request = BoundedConsultRequest {
+        live_dispatch_allowed: true,
+        ..request
+    };
+    let Some(consult) = RedactedConsult::new(request, receipt) else {
+        return Err("consult payload rejected".to_string());
+    };
+    Ok(ExecutorTarget::Remote(Box::new(RemoteExecutor {
+        transport: ProviderTransport::for_host(host),
+        consult,
+        model,
+        host,
+    })))
+}
+
+/// `remote` requested but the `provider-egress` transport is NOT compiled ⇒ a typed
+/// deny (never a silent downgrade to the local brain).
+#[cfg(all(
+    not(feature = "provider-egress"),
+    any(feature = "local-mlx", feature = "local-vllm")
+))]
+fn resolve_remote_executor(
+    receipt: crate::provider::redaction::RedactionReceipt,
+    task: &str,
+) -> Result<ExecutorTarget, String> {
+    let _ = (receipt, task);
+    Err("remote executor not compiled (build sinabro with the provider-egress feature)".to_string())
+}
+
+/// Run ONE implement sub-task through the REMOTE executor (the gated egress transport).
+/// SI-2 egress choke: this send fn redacts its OWN assembled payload at the boundary
+/// (defense-in-depth — it never trusts the caller to have gated), so a secret-shaped
+/// message is withheld here too; the egress preflight (live-dispatch + approval +
+/// allowlist + key) then gates again.
+#[cfg(all(
+    feature = "provider-egress",
+    any(feature = "local-mlx", feature = "local-vllm")
+))]
+fn remote_executor_turn(
+    remote: &RemoteExecutor,
+    system: &str,
+    user: &str,
+) -> Result<crate::agent_loop::AgentTurn, crate::agent_loop::AgentTransportError> {
+    use crate::provider::redaction::{RedactionRequest, redact};
+    // SI-2: redact the assembled outbound message at the send boundary itself.
+    let frags = [user];
+    match redact(&RedactionRequest {
+        fragments: &frags,
+        candidate_memory_ids: &[],
+        deleted_ids: &[],
+        include_private_memory: false,
+    }) {
+        Ok(r) if r.secret_fragments_denied_u32() == 0 => {}
+        _ => {
+            return Err(crate::agent_loop::AgentTransportError {
+                class_label: "assembled message denied by redaction".to_string(),
+            });
+        }
+    }
+    match remote.transport.send_live_text(
+        &remote.consult,
+        crate::provider::egress::EgressApproval::grant(),
+        system,
+        user,
+        &remote.model,
+        PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
+    ) {
+        Ok(o) => Ok(crate::agent_loop::AgentTurn {
+            answer_text: o.answer_text,
+            input_tokens_u64: o.input_tokens,
+            output_tokens_u64: o.output_tokens,
+            cached_tokens_u64: o.cached_tokens,
+        }),
+        Err(e) => Err(crate::agent_loop::AgentTransportError {
+            class_label: consult_denied_label(&e),
+        }),
+    }
+}
+
+/// A short, owner-visible label for the resolved executor brain (render honesty: the
+/// loop reports WHICH brain implemented — loopback vs which remote provider).
+#[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
+fn executor_target_label(executor: &ExecutorTarget) -> String {
+    match executor {
+        ExecutorTarget::Local => "local (loopback; zero-egress)".to_string(),
+        #[cfg(feature = "provider-egress")]
+        ExecutorTarget::Remote(remote) => format!(
+            "remote ({}; egress, redaction-walled, model={})",
+            remote.host.host(),
+            remote.model
+        ),
+    }
+}
+
 /// P1-2b — the TWO-MODEL ORCHESTRATION verb (`provider orchestrate <phrase>
 /// <task>`): the frontier reasoning role PLANS (a `SUBTASK` envelope) → the plan is
 /// decomposed FAIL-CLOSED → each sub-task is routed by the pure L2 selector to its
@@ -3686,6 +4434,12 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
             "task is secret-shaped; not orchestrated",
         );
     }
+    // SLICE 2: resolve the IMPLEMENT brain (local loopback default | remote egress).
+    // Consumes the task receipt to authorize a remote leg's consult (dropped if local).
+    let executor = match resolve_executor_target(receipt, task) {
+        Ok(target) => target,
+        Err(reason) => return provider_orchestrate_error(out, &envelope_hex, &reason),
+    };
     // GATE 4: resolve the loopback bind + the default reasoning-role model.
     let Some(port) = crate::commands::model_select::resolve_local_port(
         std::env::var(SINABRO_LOCAL_PORT_ENV).ok().as_deref(),
@@ -3777,6 +4531,8 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
                               system: &str,
                               user: &str|
          -> Result<AgentTurn, AgentTransportError> {
+            // Per-message redaction wall — applies to BOTH the local and remote legs
+            // (a remote leg's egress preflight then gates a SECOND time).
             let frags = [user];
             match redact(&RedactionRequest {
                 fragments: &frags,
@@ -3791,36 +4547,47 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
                     });
                 }
             }
-            let worker = match local_pool.entry(port) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => match LocalChatTransport::new(
-                    crate::provider::local_endpoint::LoopbackBind::localhost(port),
-                    &base_model,
-                    PROVIDER_CONSULT_TIMEOUT_MS,
-                ) {
-                    Some(t) => v.insert(t),
-                    None => {
-                        return Err(AgentTransportError {
-                            class_label: "local worker http client failed to build".to_string(),
-                        });
+            // Route to the resolved IMPLEMENT brain: LOCAL loopback pool (byte-unchanged)
+            // OR the gated REMOTE egress transport.
+            match &executor {
+                ExecutorTarget::Local => {
+                    let worker = match local_pool.entry(port) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            match LocalChatTransport::new(
+                                crate::provider::local_endpoint::LoopbackBind::localhost(port),
+                                &base_model,
+                                PROVIDER_CONSULT_TIMEOUT_MS,
+                            ) {
+                                Some(t) => v.insert(t),
+                                None => {
+                                    return Err(AgentTransportError {
+                                        class_label: "local worker http client failed to build"
+                                            .to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    };
+                    match worker.send_local_text_with(
+                        model_id,
+                        system,
+                        user,
+                        PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
+                    ) {
+                        Ok(o) => Ok(AgentTurn {
+                            answer_text: o.answer_text,
+                            input_tokens_u64: o.input_tokens,
+                            output_tokens_u64: o.output_tokens,
+                            cached_tokens_u64: o.cached_tokens,
+                        }),
+                        Err(error) => Err(AgentTransportError {
+                            class_label: error.class_label(),
+                        }),
                     }
-                },
-            };
-            match worker.send_local_text_with(
-                model_id,
-                system,
-                user,
-                PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
-            ) {
-                Ok(o) => Ok(AgentTurn {
-                    answer_text: o.answer_text,
-                    input_tokens_u64: o.input_tokens,
-                    output_tokens_u64: o.output_tokens,
-                    cached_tokens_u64: o.cached_tokens,
-                }),
-                Err(error) => Err(AgentTransportError {
-                    class_label: error.class_label(),
-                }),
+                }
+                #[cfg(feature = "provider-egress")]
+                ExecutorTarget::Remote(remote) => remote_executor_turn(remote, system, user),
             }
         };
         // P1-3-full(a) (S2-2): the CODE oracle is LIVE — a `sui_move` sub-task's Move
@@ -3854,6 +4621,7 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
         "orchestrate: stop={:?} endpoint=127.0.0.1:{port} reasoning-model={base_model}",
         outcome.stop
     ));
+    body.push(format!("executor: {}", executor_target_label(&executor)));
     body.push(format!(
         "sub-tasks: {} (implemented {})",
         outcome.subtasks.len(),
@@ -4099,15 +4867,18 @@ pub fn orchestrate_run_for(
         return Err("no valid approved sub-tasks to run (all disabled / malformed)".to_string());
     };
     let frags = [task];
-    match redact(&RedactionRequest {
+    let receipt = match redact(&RedactionRequest {
         fragments: &frags,
         candidate_memory_ids: &[],
         deleted_ids: &[],
         include_private_memory: false,
     }) {
-        Ok(r) if r.secret_fragments_denied_u32() == 0 && r.outgoing_fragment_count_u32() > 0 => {}
+        Ok(r) if r.secret_fragments_denied_u32() == 0 && r.outgoing_fragment_count_u32() > 0 => r,
         _ => return Err("task is secret-shaped; not run".to_string()),
-    }
+    };
+    // SLICE 2: resolve the IMPLEMENT brain (local loopback default | remote egress).
+    // Consumes the task receipt to authorize a remote leg's consult (dropped if local).
+    let executor = resolve_executor_target(receipt, task)?;
     let Some(port) = crate::commands::model_select::resolve_local_port(
         std::env::var(SINABRO_LOCAL_PORT_ENV).ok().as_deref(),
         LOCAL_CONSULT_DEFAULT_PORT,
@@ -4177,6 +4948,8 @@ pub fn orchestrate_run_for(
                               system: &str,
                               user: &str|
          -> Result<AgentTurn, AgentTransportError> {
+            // Per-message redaction wall — applies to BOTH the local and remote legs
+            // (a remote leg's egress preflight then gates a SECOND time).
             let f = [user];
             match redact(&RedactionRequest {
                 fragments: &f,
@@ -4191,36 +4964,47 @@ pub fn orchestrate_run_for(
                     });
                 }
             }
-            let worker = match local_pool.entry(port) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => match LocalChatTransport::new(
-                    crate::provider::local_endpoint::LoopbackBind::localhost(port),
-                    &base_model,
-                    PROVIDER_CONSULT_TIMEOUT_MS,
-                ) {
-                    Some(t) => v.insert(t),
-                    None => {
-                        return Err(AgentTransportError {
-                            class_label: "local worker http client failed to build".to_string(),
-                        });
+            // Route to the resolved IMPLEMENT brain: LOCAL loopback pool (byte-unchanged)
+            // OR the gated REMOTE egress transport.
+            match &executor {
+                ExecutorTarget::Local => {
+                    let worker = match local_pool.entry(port) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            match LocalChatTransport::new(
+                                crate::provider::local_endpoint::LoopbackBind::localhost(port),
+                                &base_model,
+                                PROVIDER_CONSULT_TIMEOUT_MS,
+                            ) {
+                                Some(t) => v.insert(t),
+                                None => {
+                                    return Err(AgentTransportError {
+                                        class_label: "local worker http client failed to build"
+                                            .to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    };
+                    match worker.send_local_text_with(
+                        model_id,
+                        system,
+                        user,
+                        PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
+                    ) {
+                        Ok(o) => Ok(AgentTurn {
+                            answer_text: o.answer_text,
+                            input_tokens_u64: o.input_tokens,
+                            output_tokens_u64: o.output_tokens,
+                            cached_tokens_u64: o.cached_tokens,
+                        }),
+                        Err(error) => Err(AgentTransportError {
+                            class_label: error.class_label(),
+                        }),
                     }
-                },
-            };
-            match worker.send_local_text_with(
-                model_id,
-                system,
-                user,
-                PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
-            ) {
-                Ok(o) => Ok(AgentTurn {
-                    answer_text: o.answer_text,
-                    input_tokens_u64: o.input_tokens,
-                    output_tokens_u64: o.output_tokens,
-                    cached_tokens_u64: o.cached_tokens,
-                }),
-                Err(error) => Err(AgentTransportError {
-                    class_label: error.class_label(),
-                }),
+                }
+                #[cfg(feature = "provider-egress")]
+                ExecutorTarget::Remote(remote) => remote_executor_turn(remote, system, user),
             }
         };
         let mut code_oracle = |st: &crate::provider::executor_route::SubTask,
@@ -4591,6 +5375,9 @@ fn cmd_daemon_evolve(rest: &[String], out: &mut impl Write) -> io::Result<bool> 
                             memory_id: *id,
                             topic: topic.clone(),
                             sub_blob_id: blob,
+                            // autonomous evolve backup (testnet); 0G roots are paired via
+                            // the canonical `memory backup-walrus` owner ceremony.
+                            sub_0g_root: None,
                         });
                     }
                 }
@@ -5089,9 +5876,7 @@ fn provider_fan(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
     };
     use crate::commands::model_compress::ConsultScope;
     use crate::commands::model_route::ConsultTrigger;
-    use crate::provider::egress::{
-        EgressApproval, ProviderHost, ProviderTransport, RedactedConsult,
-    };
+    use crate::provider::egress::{EgressApproval, ProviderTransport, RedactedConsult};
     use crate::provider::frontier_consult::{self, BoundedConsultInputs, BoundedConsultRequest};
     use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
     use crate::route::RouteExecutionState;
@@ -5204,7 +5989,11 @@ fn provider_fan(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
     let Some(consult) = RedactedConsult::new(request, receipt) else {
         return provider_fan_error(out, &envelope_hex, "consult payload rejected");
     };
-    let model = provider_consult_model();
+    let host = match resolve_frontier_provider() {
+        Ok(host) => host,
+        Err(reason) => return provider_fan_error(out, &envelope_hex, reason),
+    };
+    let model = provider_consult_model_for(host);
     let policy = TombstonePolicy::new();
     // P1-2: the loop sees the REAL persisted memory (degraded-empty if no
     // key) with each chunk's OWNER privacy class — the agent's `memory
@@ -5251,11 +6040,7 @@ fn provider_fan(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
             handles.push((
                 index,
                 scope.spawn(move || {
-                    let key = crate::secrets::classify_reference(
-                        "OPENROUTER_API_KEY",
-                        "env:OPENROUTER_API_KEY",
-                    );
-                    let transport = ProviderTransport::new(ProviderHost::OpenRouter, key);
+                    let transport = ProviderTransport::for_host(host);
                     let mut turns_u8: u8 = 0;
                     let outcome = {
                         let mut live = FnTransport(|system: &str, user_message: &str| {
@@ -7510,6 +8295,63 @@ fn audit_detect_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
     (truth, crate::audit::detect::report_lines(&report))
 }
 
+/// O-1 (Oracle Bootstrap Pillar 1): read a finance reconciliation CERTIFICATE from `<path>`
+/// and run the deterministic [`crate::reconcile_oracle`] checker — re-sum / re-price the
+/// stated line items and assert the accounting invariant, FAIL-CLOSED. RECONCILED ⇒ Green,
+/// VIOLATED (a sound reject) ⇒ Red, malformed/unreadable ⇒ Yellow (honest absence). The
+/// model's prose never reaches the checker (only the typed numbers do). HONEST LOCK:
+/// arithmetic-sound (the claim reconciles with the STATED items), NOT that positions are real.
+fn audit_reconcile_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::reconcile_oracle::{ReconcileVerdict, check_reconciliation, parse_certificate};
+    let Some(path) = rest.get(1) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit reconcile <path> — deterministically check a finance reconciliation certificate (O-1)".to_string(),
+                "  solvency: `solvent` then `reserve|liability <amount_minor> <source>` lines".to_string(),
+                "  NAV:      `nav <claimed_minor>` then `holding <qty> <price_minor> <source>` lines".to_string(),
+            ],
+        );
+    };
+    let text = match std::fs::read_to_string(std::path::Path::new(path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!(
+                    "audit reconcile: cannot read certificate at {path}"
+                )],
+            );
+        }
+    };
+    let Some(claim) = parse_certificate(&text) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit reconcile: malformed certificate (fail-closed; nothing reconciled)"
+                    .to_string(),
+            ],
+        );
+    };
+    let r = check_reconciliation(&claim);
+    let (truth, label) = match r.verdict {
+        ReconcileVerdict::Reconciled => (RenderTruth::Green, "RECONCILED"),
+        ReconcileVerdict::Violated => (RenderTruth::Red, "VIOLATED"),
+        ReconcileVerdict::NotApplicable => (RenderTruth::Yellow, "NOT-APPLICABLE"),
+    };
+    (
+        truth,
+        vec![
+            format!(
+                "verdict: {label} (computed={} target={})",
+                r.computed_minor, r.target_minor
+            ),
+            r.detail.to_string(),
+            "honest LOCK: arithmetic-sound (the claim reconciles with the STATED items); NOT that the positions / sources are real".to_string(),
+        ],
+    )
+}
+
 // A① (CURSOR_PARITY_REFRAME_DESIGN.md §3 A①): `context lsp-diagnostics <path>` is
 // the owner/GUI consumer of the language-server READ — the SAME `crate::lsp::diagnose`
 // pipeline the loop `TOOL: lsp diagnostics` uses (the walled file read → a sandboxed
@@ -8360,6 +9202,42 @@ fn dispatch_namespace(
             return memory_backup_walrus_mainnet(rest, out);
         }
     }
+    // W2-C (0G Storage round-trip, funds-safe): the agent emits the OWNER upload command
+    // (upload = a0gi fee + EVM signer = FUNDS) + does the KEYLESS download+verify. PREPARE
+    // works in any build; the verify subprocess is `zerog-storage`-gated (honest-degrade).
+    if matches!(ns, CliNamespace::Memory) && verb.eq_ignore_ascii_case("backup-0g") {
+        return memory_backup_zerog(rest, out);
+    }
+    // W2-D (0G Chain anchor PREPARE, funds-safe): emit the locked patternHash + ABI
+    // calldata + a keyless read-only dry-run + the OWNER deploy/anchor commands. PURE
+    // (no network, no key); the agent never deploys/signs (PD-6). ReadOnly autonomous.
+    if matches!(ns, CliNamespace::Memory) && verb.eq_ignore_ascii_case("anchor-0g") {
+        return memory_anchor_zerog(out);
+    }
+    // W3 (0G ERC-7857 iNFT mint PREPARE, funds-safe): emit the locked mint selector + ABI
+    // calldata (dataHash = the W2-D patternHash) + a keyless read-only dry-run + the OWNER
+    // deploy/mint commands. PURE (no network, no key); the agent never deploys/signs (PD-6).
+    if matches!(ns, CliNamespace::Memory) && verb.eq_ignore_ascii_case("mint-0g") {
+        return memory_mint_zerog(out);
+    }
+    // W2-B (0G Compute TEE attestation verify, funds-safe): run the Node sidecar to verify a
+    // provider's TEE quote. KEYLESS + read-only (ephemeral unfunded wallet; no key/funds/
+    // chain-write). zerog-attestation-gated; honest-degrade off.
+    if matches!(ns, CliNamespace::Provider) && verb.eq_ignore_ascii_case("attest-0g") {
+        return provider_attest_zerog(rest, out);
+    }
+    // W3-B (0G Compute fine-tune PREPARE, funds-safe): build the Alpaca dataset from the
+    // orchestrator's verified patterns + emit the owner-run 0g-compute-cli flow. PURE (no
+    // network/key); the paid training is owner-fired (PD-6). LocalWrite (writes the dataset).
+    if matches!(ns, CliNamespace::Provider) && verb.eq_ignore_ascii_case("finetune-0g") {
+        return provider_finetune_zerog(out);
+    }
+    // W3-B capstone (mint a fine-tuned expert as an iNFT, funds-safe): build the mint
+    // calldata (dataHash = the adapter's 0G Storage rootHash) + emit the owner-run mint.
+    // PURE (no network/key); the agent never signs (PD-6). ReadOnly.
+    if matches!(ns, CliNamespace::Provider) && verb.eq_ignore_ascii_case("mint-expert-0g") {
+        return provider_mint_expert_zerog(rest, out);
+    }
     // P3-3 (owner-authorized 2026-06-11): the gated LOCAL consult route, only
     // when compiled with a local-serving feature. Routed on the EXACT local
     // phrase ONLY, so every pre-existing `provider consult` surface (the
@@ -8511,6 +9389,24 @@ fn dispatch_namespace(
         emit(
             out,
             "audit detect",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // O-1 (Oracle Bootstrap): `audit reconcile <path>` deterministically checks a finance
+    // reconciliation certificate (Σreserve ≥ Σliability, or NAV == Σqty×price), fail-closed.
+    // The model proposes the certificate; this checker validates the arithmetic — no LLM
+    // judge. ReadOnly (a pure arithmetic check + one cert-file read; no chain/socket/custody).
+    if matches!(ns, CliNamespace::Audit) && verb.eq_ignore_ascii_case("reconcile") {
+        let envelope_hex = hex16(&sha256_32(b"audit reconcile"));
+        let (truth, body) = audit_reconcile_body(rest);
+        emit(
+            out,
+            "audit reconcile",
             &envelope_hex,
             CommandRisk::ReadOnly,
             ApprovalRequirement::None,
@@ -11074,9 +11970,7 @@ fn cmd_daemon_run_frontier(rest: &[String], out: &mut impl Write) -> io::Result<
     use crate::commands::model_compress::ConsultScope;
     use crate::commands::model_route::ConsultTrigger;
     use crate::daemon::runtime::{AutonomyRuntime, TurnOutcome};
-    use crate::provider::egress::{
-        EgressApproval, ProviderHost, ProviderTransport, RedactedConsult,
-    };
+    use crate::provider::egress::{EgressApproval, ProviderTransport, RedactedConsult};
     use crate::provider::frontier_consult::{self, BoundedConsultInputs, BoundedConsultRequest};
     use crate::provider::route_select::ConsultPhrase;
     use crate::repl::approval::ApprovalPrompt;
@@ -11176,9 +12070,12 @@ fn cmd_daemon_run_frontier(rest: &[String], out: &mut impl Write) -> io::Result<
     let Some(consult) = RedactedConsult::new(request, receipt) else {
         return provider_consult_error(out, &envelope_hex, "consult payload rejected");
     };
-    let key = crate::secrets::classify_reference("OPENROUTER_API_KEY", "env:OPENROUTER_API_KEY");
-    let transport_p = ProviderTransport::new(ProviderHost::OpenRouter, key);
-    let model = provider_consult_model();
+    let host = match resolve_frontier_provider() {
+        Ok(host) => host,
+        Err(reason) => return provider_consult_error(out, &envelope_hex, reason),
+    };
+    let transport_p = ProviderTransport::for_host(host);
+    let model = provider_consult_model_for(host);
 
     // Recall the owner's REAL persisted store (READ-class autonomous knowledge base).
     let mem = consult_memory_load();
@@ -11368,9 +12265,7 @@ fn cmd_daemon_serve(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
         serve_poll_arm_cycle,
     };
     use crate::daemon::runtime::{AutonomyRuntime, RuntimeHandle};
-    use crate::provider::egress::{
-        EgressApproval, ProviderHost, ProviderTransport, RedactedConsult,
-    };
+    use crate::provider::egress::{EgressApproval, ProviderTransport, RedactedConsult};
     use crate::provider::frontier_consult::{self, BoundedConsultInputs, BoundedConsultRequest};
     use crate::route::RouteExecutionState;
     use crate::telegram::egress::TelegramHost;
@@ -11454,9 +12349,12 @@ fn cmd_daemon_serve(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
     let Some(consult) = RedactedConsult::new(request, receipt) else {
         return daemon_serve_error(out, &envelope_hex, "consult payload rejected");
     };
-    let key = crate::secrets::classify_reference("OPENROUTER_API_KEY", "env:OPENROUTER_API_KEY");
-    let transport_p = ProviderTransport::new(ProviderHost::OpenRouter, key);
-    let model = provider_consult_model();
+    let host = match resolve_frontier_provider() {
+        Ok(host) => host,
+        Err(reason) => return daemon_serve_error(out, &envelope_hex, reason),
+    };
+    let transport_p = ProviderTransport::for_host(host);
+    let model = provider_consult_model_for(host);
     let system = format!(
         "{}\n\n{}",
         sinabro_system_prompt(false),
@@ -12790,6 +13688,7 @@ mod tests {
             "put-fixture",
             "backup-walrus",
             "backup-walrus-mainnet",
+            "backup-0g",
             "walrus-index",
             "walrus-fetch",
             "web-fetch",

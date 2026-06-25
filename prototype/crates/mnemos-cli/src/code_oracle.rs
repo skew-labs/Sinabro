@@ -147,14 +147,13 @@ pub fn materialize_package(src: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// The CODE oracle: extract Move from `answer`, materialize a temp package, run
-/// `sui move build --path <pkg>` in the E6 network-DENIED sandbox, and return the typed
-/// evidence. `CodeOracle(Some(true))` ONLY on a real exit-0 build; `Some(false)` when a
-/// build ran and failed / timed out; `None` when there is no Move, no `sui`, no kernel
-/// sandbox, or a path with whitespace (the argv-split sandbox cannot safely carry it) —
-/// an honest absence, never a false `Verified`.
-#[must_use]
-pub fn sui_build_oracle(answer: &str) -> VerificationEvidence {
+/// Shared CODE-oracle core: extract Move from `answer`, materialize a temp package, run
+/// `sui move <sub> --path <pkg>` in the E6 network-DENIED sandbox (HOME withheld), and
+/// return the typed exit-code evidence. `sub` ∈ {`"build"` structural compile, `"test"`
+/// compile + behavioral unit tests}. `CodeOracle(Some(true))` ONLY on a real exit-0 run;
+/// `Some(false)` when it ran and failed / timed out; `None` on honest absence (no Move,
+/// no `sui`, no kernel sandbox, a whitespace path) — NEVER a false `Verified`.
+fn run_sui_move_oracle(answer: &str, sub: &str) -> VerificationEvidence {
     let Some(src) = extract_move_source(answer) else {
         return VerificationEvidence::CodeOracle(None); // nothing to compile
     };
@@ -166,14 +165,14 @@ pub fn sui_build_oracle(answer: &str) -> VerificationEvidence {
     };
     let pkg_str = pkg.to_string_lossy().to_string();
     let sui_str = sui.to_string_lossy().to_string();
-    // argv-only (no shell): "<sui> move build --path <pkg>". The sandbox splits on
+    // argv-only (no shell): "<sui> move <sub> --path <pkg>". The sandbox splits on
     // whitespace, so a path containing whitespace cannot be safely carried — fail-closed
     // to an honest absence (macOS temp/install paths are whitespace-free).
     if sui_str.split_whitespace().count() != 1 || pkg_str.split_whitespace().count() != 1 {
         let _ = std::fs::remove_dir_all(&pkg);
         return VerificationEvidence::CodeOracle(None);
     }
-    let line = format!("{sui_str} move build --path {pkg_str}");
+    let line = format!("{sui_str} move {sub} --path {pkg_str}");
     // Withhold HOME from the build child: with no HOME, `sui` resolves its BUNDLED
     // framework (offline, fast, no `~/.move` cache needed) instead of probing
     // `$HOME/.move` — which, on a box without a warm cache, attempts a network fetch
@@ -190,21 +189,49 @@ pub fn sui_build_oracle(answer: &str) -> VerificationEvidence {
         Ok(outcome) => VerificationEvidence::CodeOracle(Some(
             outcome.exit_code == Some(0) && !outcome.timed_out,
         )),
-        // No kernel sandbox on this host ⇒ honest absence (NEVER an unsandboxed build).
+        // No kernel sandbox on this host ⇒ honest absence (NEVER an unsandboxed run).
         Err(SandboxRunDeny::SandboxUnavailable) => VerificationEvidence::CodeOracle(None),
-        // A pre-spawn wall (empty/over-long/spawn-failed) ⇒ the build did not pass.
+        // A pre-spawn wall (empty/over-long/spawn-failed) ⇒ the check did not pass.
         Err(_) => VerificationEvidence::CodeOracle(Some(false)),
     };
     let _ = std::fs::remove_dir_all(&pkg);
     evidence
 }
 
+/// The CODE oracle (structural compile): run `sui move build` in the net-DENIED sandbox.
+/// `CodeOracle(Some(true))` ONLY on a real exit-0 build; `Some(false)` on a failed build;
+/// `None` on honest absence — never a false `Verified`.
+#[must_use]
+pub fn sui_build_oracle(answer: &str) -> VerificationEvidence {
+    run_sui_move_oracle(answer, "build")
+}
+
+/// The CODE oracle STRENGTHENED with behavioral unit tests (W4 ②; the architecture's L3
+/// "compile + tests", EvalPlus 2305.01210-motivated): runs `sui move test` — which
+/// COMPILES the package AND runs its `#[test]` functions. A failing test exits non-zero
+/// ⇒ `CodeOracle(Some(false))`, a SOUND reject that catches behaviorally-broken code
+/// which merely COMPILES (LIVE-probed 2026-06-25: a failing assert exits 1, a passing
+/// test exits 0, a broken compile exits 1). `Some(true)` only on a clean compile AND all
+/// tests passing (or no tests). Because `sui move test` includes the build, this is
+/// STRICTLY STRONGER than [`sui_build_oracle`] — never weaker.
+///
+/// Honest scope: model-WRITTEN passing tests do NOT over-certify correctness (EvalPlus:
+/// sparse/weak tests let broken code pass) — this is a sound REJECTOR (a failing test is
+/// a real bug), not a strong acceptor. The genuinely-INDEPENDENT second derivation is the
+/// cross-memory check (a different class), not this same-axis stronger compile.
+#[must_use]
+pub fn sui_test_oracle(answer: &str) -> VerificationEvidence {
+    run_sui_move_oracle(answer, "test")
+}
+
 /// The orchestrate verb's per-sub-task verify oracle: the `sui_move` CODE rung gets the
-/// real `sui move build` oracle; `solana_anchor` / `web3_frontend` are Code class but
-/// their build toolchain is an owner go-live (`Absent` ⇒ NotApplicable, honest); the
-/// non-Code trust tiers (personal / external-fact / model-inference / cross-memory) ride
-/// the P1-4 autonomous R-E-W loop, so here they are `Absent`. The MODEL's answer text is
-/// fed only to the deterministic COMPILER, never to `verify` (no self-certification).
+/// real `sui move test` oracle (W4 ②: COMPILE + behavioral unit tests — strictly stronger
+/// than build-only, a failing test is a sound reject); `solana_anchor` / `web3_frontend`
+/// are Code class but their toolchain is an owner go-live (`Absent` ⇒ NotApplicable,
+/// honest); the non-Code trust tiers (personal / external-fact / model-inference /
+/// cross-memory) ride the P1-4 autonomous R-E-W loop, so here they are `Absent`. The
+/// MODEL's answer text is fed only to the deterministic COMPILER/TEST-RUNNER, never to
+/// `verify` (no self-certification — the hidden-oracle β boundary).
 #[must_use]
 pub fn orchestrate_verify_oracle(
     subtask: &SubTask,
@@ -214,8 +241,8 @@ pub fn orchestrate_verify_oracle(
         return VerificationEvidence::Absent;
     }
     match outcome.answer.as_deref() {
-        Some(answer) => sui_build_oracle(answer),
-        None => VerificationEvidence::CodeOracle(None), // no answer to compile
+        Some(answer) => sui_test_oracle(answer),
+        None => VerificationEvidence::CodeOracle(None), // no answer to compile/test
     }
 }
 
@@ -307,6 +334,42 @@ mod tests {
             sui_build_oracle(broken),
             VerificationEvidence::CodeOracle(Some(false)),
             "a type-error module ⇒ Some(false)"
+        );
+    }
+
+    /// LIVE TEST oracle (macOS + `sui` present; W4 ②): a module with a PASSING `#[test]`
+    /// ⇒ Some(true); a module that COMPILES but whose `#[test]` FAILS ⇒ Some(false) — the
+    /// behavioral reject build-only would MISS. The real `sui move test` in the net-DENIED
+    /// sandbox is the bit. Honest-absence contract when `sui` / the kernel sandbox is gone.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn live_test_oracle_is_strictly_stronger_than_build() {
+        if resolve_sui_bin().is_none() || !crate::sandbox_exec::seatbelt_available() {
+            assert_eq!(
+                sui_test_oracle("module x::y { public fun f() {} }"),
+                VerificationEvidence::CodeOracle(None)
+            );
+            return;
+        }
+        let passing = "```move\nmodule okp::m {\n    public fun add(a: u64, b: u64): u64 { a + b }\n    #[test]\n    fun t_ok() { assert!(add(2, 3) == 5, 0); }\n}\n```";
+        assert_eq!(
+            sui_test_oracle(passing),
+            VerificationEvidence::CodeOracle(Some(true)),
+            "compiles + passing test ⇒ Some(true)"
+        );
+        // a module that COMPILES but whose test FAILS — the W4 ② behavioral reject.
+        let failing = "```move\nmodule badp::m {\n    public fun add(a: u64, b: u64): u64 { a + b }\n    #[test]\n    fun t_bad() { assert!(add(2, 3) == 6, 0); }\n}\n```";
+        assert_eq!(
+            sui_test_oracle(failing),
+            VerificationEvidence::CodeOracle(Some(false)),
+            "compiles but a failing test ⇒ Some(false) (behavioral reject)"
+        );
+        // build-only PASSES that same module (it compiles) — proving the strengthening is
+        // real, not vacuous: the test oracle is strictly stronger than the build oracle.
+        assert_eq!(
+            sui_build_oracle(failing),
+            VerificationEvidence::CodeOracle(Some(true)),
+            "build-only passes the compiling-but-test-failing module ⇒ test oracle is strictly stronger"
         );
     }
 }

@@ -1,0 +1,6 @@
+# the 0G compute SDK (~63 MB) + ethers are fetched by `npm install`; not vendored.
+node_modules/
+package-lock.json
+# attestation report scratch dirs (verifyService writes quotes/collateral to a temp dir)
+*.tmp
+attestations/

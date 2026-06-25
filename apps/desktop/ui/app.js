@@ -1573,6 +1573,11 @@ function sectionHTML(label, inner) {
 // TIER-1 (A#4): a curated known-model list for the OPENROUTER_MODEL dropdown (OpenRouter
 // ids). GUI-owned; the core validates + falls back to the default for anything unset.
 const KNOWN_MODELS = [
+  // BYO-model (Slice 1+2): GLM-5.2 executor via OpenRouter (z-ai/glm-5.2 — cheaper than
+  // Z.ai direct); Fugu Ultra is the model id when the provider = sakana.
+  "z-ai/glm-5.2",
+  "z-ai/glm-4.7",
+  "fugu-ultra",
   "deepseek/deepseek-chat",
   "deepseek/deepseek-r1",
   "anthropic/claude-sonnet-4",
@@ -1628,7 +1633,47 @@ function secretsSectionHTML(statuses) {
     return kRow(icon(secret ? "shield" : "command"), esc(label), `${esc(env)} — memory-only; the value is sent to the process env and never read back.`, ctl);
   });
   return kCard(rows)
+    + byoModelCardHTML(statuses)
     + kCard(kRow(icon("clock"), "Memory-only", "Secrets are cleared when the app closes; raw secrets are never written to disk.", kPill("ephemeral", "ok")));
+}
+
+// SLICE 1+2 (BYO-MODEL, owner 2026-06-23) — the routing controls: WHICH frontier provider
+// the consult egresses to, and whether the two-model loop's IMPLEMENT brain ("executor") is
+// the LOCAL loopback (default · zero-egress · first-class) or a REMOTE provider (egress ·
+// redaction-walled · owner-armed). REAL controls: each <select>/<input> rides the SAME
+// data-secret-input / data-secret-set → set_secret(process env) path the model dropdown uses
+// (the core reads the env; no config file). The provider is a CLOSED set (openrouter/sakana)
+// — there is NO arbitrary-URL form, so funds-egress stays structurally impossible.
+function byoModelCardHTML(statuses) {
+  const present = (n) => !!((statuses || []).find((s) => s.name === n) || {}).present;
+  const setClear = (env) => kBtn("Set", `data-secret-set="${esc(env)}"`)
+    + (present(env) ? kBtn("Clear", `data-secret-clear="${esc(env)}"`, true) : "")
+    + kPill(present(env) ? "set (memory)" : "default", present(env) ? "ok" : "");
+  const provSelect = (env) => `<select class="panel-input" data-secret-input="${esc(env)}">`
+    + `<option value="">— OpenRouter (default) —</option>`
+    + `<option value="openrouter">OpenRouter</option>`
+    + `<option value="sakana">Sakana Fugu</option></select>` + setClear(env);
+  const modelOpts = KNOWN_MODELS.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+  return kGroup("Routing · BYO model")
+    + kCard([
+        kRow(icon("sparkles"), "Frontier provider",
+          "SINABRO_FRONTIER_PROVIDER — which provider the frontier consult egresses to (closed set; egress · redaction-walled · owner-armed). Unset = OpenRouter. Pick Sakana to use Fugu (then set the model to fugu-ultra).",
+          provSelect("SINABRO_FRONTIER_PROVIDER")),
+      ])
+    + kCard([
+        kRow(icon("zap"), "Executor mode",
+          "SINABRO_EXECUTOR_MODE — the two-model loop's implement brain. local = loopback · zero-egress · free (default · first-class · air-gappable); remote = a provider via egress · redaction-walled · owner-armed.",
+          `<select class="panel-input" data-secret-input="SINABRO_EXECUTOR_MODE"><option value="">— local (loopback) · default —</option><option value="local">Local (loopback · zero-egress)</option><option value="remote">Remote (provider · egress)</option></select>` + setClear("SINABRO_EXECUTOR_MODE")),
+        kRow(icon("sparkles"), "Executor provider",
+          "SINABRO_EXECUTOR_PROVIDER — used only when the mode is remote (closed set). GLM-5.2 = the OpenRouter model id z-ai/glm-5.2.",
+          provSelect("SINABRO_EXECUTOR_PROVIDER")),
+        kRow(icon("command"), "Executor model",
+          "SINABRO_EXECUTOR_MODEL — used only when the mode is remote. TYPE ANY model id (free-text — e.g. a per-domain LoRA adapter id), or pick a known one; unset = the provider default.",
+          `<input class="panel-input" list="byo-known-models" data-secret-input="SINABRO_EXECUTOR_MODEL" placeholder="type a model id (or pick) — unset = provider default" autocomplete="off" spellcheck="false" /><datalist id="byo-known-models">${modelOpts}</datalist>` + setClear("SINABRO_EXECUTOR_MODEL")),
+      ])
+    + kCard(kRow(icon("shield"), "Both brains — your choice",
+        "LOCAL stays first-class (zero-egress, air-gappable, free). REMOTE routes through the SAME redaction wall + same-message owner-arm as the frontier; the host is a closed allowlist (no provider can be a funds host), so funds / chain / wallet stay HARD-LOCKED.",
+        kPill("custody hard-locked", "lock")));
 }
 
 // S4 (WALRUS_MAINNET_SELFHOST) — the dedicated self-host Walrus section: the two endpoint
@@ -1693,12 +1738,13 @@ async function modelPanelHTML() {
   const keyOk = keyPresent === true;
   return `
     <div class="set-title">Models &amp; provider</div>
-    <div class="set-lede">A frontier model reasons; a local model executes. Frontier is egress-gated.</div>
+    <div class="set-lede">A frontier model reasons; an executor model implements — each can be a LOCAL loopback (zero-egress) or a REMOTE provider (egress · gated). Routing lives in Settings.</div>
     ${kGroup("Frontier")}
     ${kCard([
       kRow(icon("sparkles"), `Provider key ${keyOk ? '<span class="sdot ok"></span>' : '<span class="sdot off"></span>'}`, keyOk ? "OPENROUTER_API_KEY set — read only at the TLS boundary, never shown." : "Set OPENROUTER_API_KEY to consult the frontier.", kBtn(keyOk ? "Change key" : "Set key", 'data-ov-nav="general"', true)),
       kRow(icon("zap"), "Model", "OPENROUTER_MODEL · default deepseek/deepseek-chat.", `<span class="set-val mono">deepseek-chat</span>`),
       kRow(icon("shield"), "Egress", "One-shot, bounded, phrase auto-injected; no silent fallback (core-enforced).", kPill("gated", "ok")),
+      kRow(icon("zap"), "Routing · BYO model", "Pick the frontier provider (OpenRouter / Sakana Fugu) and the executor brain (local loopback or a remote provider). Local stays first-class; custody HARD-LOCKED.", kBtn("Configure", 'data-ov-nav="general"', true)),
     ])}
     ${kGroup("Live consult")}
     ${kCard(kRow(icon("list"), "Provider status", "", kBtn("Run", 'data-panel-run="provider status"', true)))}`;

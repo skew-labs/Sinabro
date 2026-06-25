@@ -1,0 +1,12 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="sinabro mark">
+  <!-- app-icon emblem · monochrome black -->
+  <rect width="512" height="512" rx="116" fill="#0a0a0b"/>
+  <!-- accreting orbit: an open ring that grows "little by little" (시나브로) around a core -->
+  <circle cx="256" cy="256" r="132" fill="none" stroke="#fafafa" stroke-width="30"
+          stroke-linecap="round" stroke-dasharray="600 829" transform="rotate(-104 256 256)"/>
+  <!-- inner trace (a second, smaller layer accreting) -->
+  <circle cx="256" cy="256" r="84" fill="none" stroke="#fafafa" stroke-width="14"
+          stroke-linecap="round" stroke-dasharray="250 528" transform="rotate(150 256 256)" opacity="0.92"/>
+  <!-- core -->
+  <circle cx="256" cy="256" r="40" fill="#fafafa"/>
+</svg>
