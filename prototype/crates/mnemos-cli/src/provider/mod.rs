@@ -43,6 +43,7 @@ pub mod local_endpoint;
 pub mod local_mlx;
 #[cfg(feature = "local-vllm")]
 pub mod local_vllm;
+pub mod lora_manifest;
 pub mod redaction;
 pub mod registry;
 pub mod route_fsm;

@@ -36,11 +36,18 @@ pub mod agent_loop;
 // frontier SYNTHESIZE. A NEW caller chaining the UNMODIFIED run_agent_loop_with;
 // L1 of the three-layer separation. Plan: P1_ORCHESTRATOR_PLAN.md.
 pub mod agent_orchestrator;
+// D-1 (AGENT-NATIVE GITHUB, owner 2026-07-01 "우리 에이전트만의 깃허브"): the PURE
+// content-addressed artifact registry core — a git-object analog (skills / adapters /
+// strategies / memories / code / oracles addressed by content hash) + the AGRX manifest
+// codec. NO egress / NO execution here; D-2..D-6 add the AI-native wire protocol, the
+// gated Walrus publish/fetch, the loop tool, the GUI, and the sandboxed fetch-then-propose.
+pub mod agent_registry;
 pub mod audit;
 pub mod command;
 pub mod commands;
 pub mod completion;
 pub mod config;
+pub mod conformal;
 pub mod daemon;
 pub mod dispatch;
 pub mod doctor;
@@ -60,6 +67,9 @@ pub mod memory;
 pub mod memory_crag;
 pub mod memory_store;
 pub mod memory_walrus;
+pub mod metamorphic_oracle;
+pub mod recognition_elicit;
+pub mod recognition_synth;
 pub mod reconcile_oracle;
 pub mod revert_blob;
 pub mod zerog_attestation;
@@ -71,6 +81,19 @@ pub mod zerog_storage;
 // agent-proposed side effects — `execute_authorized_mutate` requires a
 // MutateCapability witness (IV-A1), so no exec/edit runs without owner authority.
 pub mod mutate_execute;
+// ONCHAIN PIVOT C-0: the single gated chokepoint for an owner-BOUNDED on-chain tx —
+// `execute_authorized_chain_tx` requires a `ChainTxCapability` witness (minted ONLY from a
+// VALID owner-armed `CustodyGrant` + a within-bounds tx). C-0 is INERT (no sign/broadcast,
+// money 0); C-2 adds the isolated signer + RPC. Blanket `CustodyCapability` stays uninhabited.
+pub mod chain_execute;
+pub mod chain_signer;
+pub mod skew_execute;
+// O-5 (Oracle Bootstrap §6.9 + §6.6): capitalize a CERTIFIED oracle as an ERC-7857 iNFT —
+// composes the LOCKED `zerog_inft` encoder; the dataHash is a deterministic certified-oracle
+// commitment, FAIL-CLOSED on a TYPED cert (recognition = the conformal α-budget O-3c; reconcile/
+// metamorphic = deterministic-sound, canary-gated). PURE PREPARE; custody/funds HARD-LOCKED
+// (the binary signs nothing — the owner FIRES the mint).
+pub mod oracle_inft;
 // P4-1 (owner-authorized 2026-06-11): OTel trace export — the thin OTLP/JSON
 // projection over the consult receipt truth. cfg-gated to the ONLY features
 // whose executors can call it (⑨ IV-O5: the default build compiles ZERO
@@ -103,7 +126,14 @@ pub mod search;
 pub mod secrets;
 pub mod settings_sync;
 pub mod setup;
+pub mod skew_catalog;
+pub mod skew_history;
+pub mod skew_oracle;
+pub mod skew_payoff_svg;
+pub mod skew_read;
+pub mod skew_strategy;
 pub mod skill;
+pub mod solana_codec;
 pub mod telegram;
 pub mod test_run;
 pub mod tool;

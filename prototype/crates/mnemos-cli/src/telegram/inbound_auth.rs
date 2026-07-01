@@ -377,6 +377,12 @@ pub fn authenticate_and_mint(
         // exhaustive (PD-4). A bold session is NOT a single-tier grant anyway (it has no
         // EgressGrant ctor here — `arm_bold_session` is the sole home, in grant.rs).
         GrantTier::BoldSession => InboundAuthOutcome::MintFailed,
+        // ONCHAIN PIVOT C-0: CUSTODY (a bounded on-chain tx) is owner-armed DISPATCH only
+        // (the `daemon chain-*` ceremony), NEVER an inbound remote-approvable action —
+        // `tier_for` never returns Custody, so this arm is unreachable; fail-closed (mint
+        // nothing) keeps inbound custody structurally impossible while the closed-enum match
+        // stays exhaustive (PD-4). Custody is local-owner-ceremony only.
+        GrantTier::Custody => InboundAuthOutcome::MintFailed,
     }
 }
 

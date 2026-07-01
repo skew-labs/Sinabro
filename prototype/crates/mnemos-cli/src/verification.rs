@@ -9,21 +9,38 @@
 //!
 //!   sub-task `kind` --classify--> VerificationClass --(class-typed ORACLE evidence)--> verdict
 //!
-//! ## The five trust tiers (DGM-H general; compiler = ONE class, NOT universal)
+//! ## The trust tiers, typed onto the Oracle Ladder (O-2; §6.4 — compiler = ONE rung)
 //!
-//! Each class has its OWN oracle; none is the model's self-judgment:
+//! Each class has its OWN oracle; none is the model's self-judgment. [`OracleRung`] names
+//! each class's GUARANTEE strength (R0 strongest … R6 quarantine floor):
 //! * `Code`           — a compiler / test / formal exit-code bit (the real
-//!   `sui move build` in the E6 network-DENIED sandbox; P1-3-full(a)).
+//!   `sui move build` in the E6 network-DENIED sandbox; P1-3-full(a)). **R0**.
+//! * `Invariant`      — a deterministic accounting/constraint identity the
+//!   [`crate::reconcile_oracle`] re-derives FAIL-CLOSED (O-2): a reconciled certificate is
+//!   sound on the arithmetic, NOT that the inputs are real (the honest LOCK). **R1**.
+//! * `Induced`        — a checker INDUCED + held-out-CERTIFIED from the customer's recognition
+//!   set ([`crate::recognition_synth`], O-3b): a certified `Accept` admits a provisional
+//!   recognition-calibrated pattern; an `Escalate` defers. **R5**.
 //! * `PersonalOwner`  — PROVENANCE: owner-authored AND owner-confirmed (a model may
-//!   NOT promote its own inference to an owner fact — structural, not advisory).
+//!   NOT promote its own inference to an owner fact — structural, not advisory). **R5**.
 //! * `ExternalFact`   — `>= N` INDEPENDENT source-linked corroborations (a lone /
-//!   weak source NEVER confirms; [`CORROBORATION_MIN`] is the floor).
+//!   weak source NEVER confirms; [`CORROBORATION_MIN`] is the floor). **R4**.
 //! * `ModelInference` — the LOWEST trust: advisory until DGM-H PERFORMANCE-TRACKING
 //!   accumulates verified-good outcomes (retrieve→act→verified-good ⇒ reinforce;
 //!   →failure ⇒ demote). The universal non-compiler oracle; breaks the RAG↔HALL
-//!   compound. This is the TOTAL fail-safe: an UNKNOWN expert kind lands here.
+//!   compound. This is the TOTAL fail-safe: an UNKNOWN expert kind lands here. **R6**.
 //! * `CrossMemory`    — write-time CONTRADICTION-DETECTION vs the held LTM; a
-//!   conflicting pattern is quarantined (Unverified), never written.
+//!   conflicting pattern is quarantined (Unverified), never written. **R2** (a
+//!   contradiction is a sound reject; consistency is "not-yet-falsified").
+//! * `Metamorphic`    — O-4: a summarization METAMORPHIC relation (`summary ⊆ source`:
+//!   quote + number containment + a compression target) the [`crate::metamorphic_oracle`]
+//!   re-checks. A SOUND REJECTOR (rejector-only): a FALSIFIED relation is Unverified (a sound
+//!   reject, never written); a `NotFalsified` is `NotApplicable` and NEVER admits a write (a
+//!   metamorphic pass is "not-yet-falsified", not proof — so this class never even ADMITS). **R2**.
+//! * `Strategy`       — K-4: a SKEW trading strategy conformal-CERTIFIED from its deterministic
+//!   SHADOW track record (every candidate trade leg gated by the K-1 trade oracle; the
+//!   [`crate::conformal::certify_far_default`] FAR bound). A CERTIFIED strategy admits a (doubly-
+//!   verified) write; an uncertified one defers. certified ≠ profitable (honest LOCK). **R4**.
 //!
 //! ## drift-0 + token-min (META-LAW)
 //!
@@ -38,20 +55,80 @@
 //! `Unverified` (failed / quarantined / advisory) and `NotApplicable` (honest
 //! oracle-absence) never auto-admit. custody/funds stay HARD-LOCKED: pure, no IO.
 
+use crate::metamorphic_oracle::SummaryVerdict;
 use crate::provider::executor_route::ExecutorKind;
+use crate::recognition_synth::InducedVerdict;
+use crate::reconcile_oracle::ReconcileVerdict;
 
 /// The minimum number of INDEPENDENT corroborations an [`VerificationClass::ExternalFact`]
 /// needs before it can be `Verified` (a single source never confirms a fact). The
 /// caller may demand MORE (its own `threshold`), never fewer — the verdict clamps up.
 pub const CORROBORATION_MIN: u32 = 2;
 
-/// The verification class a sub-task falls into — which kind of oracle can judge it.
-/// OPEN to extension; these five are the v1 trust tiers.
+/// The Oracle Ladder rung (O-2; master plan §6.4) — the TYPED strength hierarchy this
+/// module's trust classes sit on. The rung names a class's GUARANTEE, not a new gate: the
+/// load-bearing admit/reject decision is still [`verify`] (a pure function of `(class,
+/// evidence)`), and [`VerificationClass::rung`] is a total projection onto this ladder.
+///
+/// The ladder is the same generalization the master plan §6.8 system-fit map names
+/// ("Oracle Ladder R0-R6 | generalizes `verification.rs`"): a pattern is WRITTEN as
+/// VERIFIED only when it cleared a rung whose guarantee its domain requires; R6 is the
+/// quarantine floor that NEVER ACCUMULATEs as verified. The runtime oracle stays
+/// DETERMINISTIC at every rung — the model PROPOSES, an L0 check judges (§6.5: no LLM
+/// judge, the reward-hacking block).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OracleRung {
+    /// R0 — formal / compiler oracle (sound+complete-ish; free, deterministic). The
+    /// strongest rung: an exit-code bit from a real compiler / test.
+    R0Formal,
+    /// R1 — invariant / constraint oracle (S1; sound on the CHECKED invariant, incomplete).
+    /// The finance reconciliation oracle (O-1) lives here: it re-derives a stated identity
+    /// FAIL-CLOSED. Sound on the arithmetic, NOT that the inputs are real (the honest LOCK).
+    R1Invariant,
+    /// R2 — metamorphic oracle (S2; a SOUND REJECTOR only — it proves a VIOLATION, never
+    /// truth). A write-time cross-memory contradiction is exactly this: a conflict is a
+    /// sound reject; consistency is "not-yet-falsified", never proof of correctness.
+    R2Metamorphic,
+    /// R3 — simulation / reality oracle (S4; correct within a tolerance). No v1 trust class
+    /// maps here on its own (the sandboxed-exec dimension is folded into the R0 `Code`
+    /// oracle, §6.8); the rung is enumerated so the ladder is complete + future-extensible.
+    R3Simulation,
+    /// R4 — independent redundancy (S3) + conformal threshold (calibrated confidence). The
+    /// external-fact tier: `>= N` INDEPENDENT corroborations, a lone source never confirms.
+    R4Redundancy,
+    /// R5 — calibrated-human (a customer recognition set + conformal; `P(correct) >= 1-α`).
+    /// The owner-provenance tier: an owner-authored + owner-confirmed fact via a human gate.
+    R5CalibratedHuman,
+    /// R6 — deferred / quarantine: guarantee NONE, labeled UNVERIFIED, **NEVER ACCUMULATEs
+    /// as verified**. The total fail-safe floor: an unknown / un-mapped expert kind, or a
+    /// fresh model inference, sits here until an INDEPENDENT downstream oracle escalates it
+    /// (the DGM-H perf-tracking promotion is that escalation OUT of R6).
+    R6Quarantine,
+}
+
+/// The verification class a sub-task falls into — which kind of oracle can judge it. OPEN to
+/// extension; each maps to an [`OracleRung`] (O-2). The `Invariant` (R1) tier is produced by the
+/// reconcile-oracle bridge ([`reconciliation_receipt`]), `Induced` (R5) by the
+/// recognition-synthesis bridge ([`recognition_receipt`]), and `Metamorphic` (R2) by the
+/// summarization bridge ([`metamorphic_receipt`]); the other five by `classify`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerificationClass {
     /// Code / skill output a deterministic compiler / test / formal oracle judges
-    /// (exit-code truth). The compiler rung.
+    /// (exit-code truth). The compiler rung (Oracle Ladder R0).
     Code,
+    /// An INVARIANT / constraint the deterministic [`crate::reconcile_oracle`] re-derives
+    /// FAIL-CLOSED (Oracle Ladder R1; O-2). The non-coding analog of the compiler: a
+    /// financial CERTIFICATE that reconciles with its STATED items is `Verified` — sound on
+    /// the arithmetic, NOT that the positions/sources are real (the honest LOCK carries).
+    /// This class is produced by the reconcile-oracle bridge ([`reconciliation_receipt`]),
+    /// not by [`classify`]'s kind routing (it is an oracle-produced class, like the Code bit).
+    Invariant,
+    /// A checker INDUCED + held-out-CERTIFIED from the customer's recognition set (Oracle Ladder
+    /// R5; O-3b — [`crate::recognition_synth`]). Its 3-way verdict (`Accept`/`Reject`/`Escalate`)
+    /// is produced by the [`recognition_receipt`] bridge: a CERTIFIED `Accept` admits a write (a
+    /// provisional, recognition-calibrated R5 pattern); an uncertified accept / a `Reject` does
+    /// not; an `Escalate` defers (honest absence). The QUANTITATIVE conformal α-budget = O-3c.
+    Induced,
     /// A personal / owner memory: PROVENANCE is the oracle (owner-authored +
     /// owner-confirmed = highest trust; a model may not author an owner fact).
     PersonalOwner,
@@ -63,6 +140,68 @@ pub enum VerificationClass {
     /// A cross-memory write: the oracle is write-time CONTRADICTION-DETECTION vs the
     /// held LTM (a conflict is quarantined, never written).
     CrossMemory,
+    /// O-4: a summarization METAMORPHIC relation the [`crate::metamorphic_oracle`] re-checks
+    /// (`summary ⊆ source`: quote + number containment + a compression target). A SOUND
+    /// REJECTOR (Oracle Ladder R2): a falsified relation is `Unverified` (a sound reject,
+    /// quarantined, never written); a `NotFalsified` is `NotApplicable` and NEVER admits a
+    /// write (rejector-only — a metamorphic pass is "not-yet-falsified", not a verification).
+    /// Produced by the [`metamorphic_receipt`] bridge, not by [`classify`]'s kind routing.
+    Metamorphic,
+    /// K-4: a SKEW trading STRATEGY conformal-CERTIFIED from its deterministic SHADOW track record
+    /// (Oracle Ladder R4: independent redundancy + the exact conformal threshold). A strategy is
+    /// shadow-evaluated over the real K-3 history with EVERY candidate trade leg gated by the K-1
+    /// trade oracle (no LLM judge); the [`crate::conformal::certify_far_default`] FAR bound CERTIFIES
+    /// it iff its out-of-bounds proposal RATE is provably bounded (`k` oracle-denied fires in `n`
+    /// total fires; `k=0, n≥10`). A CERTIFIED strategy admits a write (then still subject to the SAME
+    /// canary + cross-memory + two-derivation gates — Strategy R4 ⟂ CrossMemory R2 ⇒ DOUBLY VERIFIED);
+    /// an UNcertified one does not. Produced by the [`strategy_receipt`] bridge, not by [`classify`].
+    /// HONEST LOCK: certified = proposals stay IN-BOUNDS (the affordability/safety property), NOT
+    /// profitable; shadow money 0; the live sub-budget is the owner-armed K-2 path.
+    Strategy,
+}
+
+impl VerificationClass {
+    /// The Oracle Ladder rung this trust class sits on (O-2; §6.4) — a TOTAL projection
+    /// (drift-0: every class resolves, exhaustively, so a future class forces a rung
+    /// decision at compile time). The mapping names each class's GUARANTEE strength:
+    /// * `Code`          → R0 (formal/compiler — sound+complete-ish);
+    /// * `Invariant`     → R1 (the reconcile oracle — sound on the checked invariant);
+    /// * `CrossMemory` / `Metamorphic` → R2 (metamorphic sound-rejectors — a contradiction /
+    ///   a falsified `summary ⊆ source` relation is a SOUND REJECT; satisfaction is
+    ///   "not-yet-falsified", never proof of truth);
+    /// * `ExternalFact`  → R4 (independent redundancy — `>= N` corroborations);
+    /// * `PersonalOwner` → R5 (calibrated-human — owner gate);
+    /// * `ModelInference`→ R6 (quarantine — advisory/UNVERIFIED until perf-tracking escalates
+    ///   it OUT of R6; never auto-ACCUMULATEs).
+    ///
+    /// (R3 simulation has no v1 class of its own — the sandboxed-exec dimension is folded
+    /// into the R0 `Code` oracle, §6.8. The rung is enumerated for ladder completeness.)
+    #[must_use]
+    pub const fn rung(self) -> OracleRung {
+        match self {
+            VerificationClass::Code => OracleRung::R0Formal,
+            VerificationClass::Invariant => OracleRung::R1Invariant,
+            // both a write-time cross-memory contradiction check AND the O-4 summarization
+            // metamorphic checker are R2 sound-rejectors — the rung names the GUARANTEE, which
+            // multiple oracle types share (like R5's PersonalOwner + Induced).
+            VerificationClass::CrossMemory | VerificationClass::Metamorphic => {
+                OracleRung::R2Metamorphic
+            }
+            // both the independent-corroboration external-fact tier AND a Skew strategy
+            // conformal-certified from its shadow track record are R4 (independent redundancy + the
+            // exact conformal threshold) — the rung names the GUARANTEE, shared by multiple oracle types.
+            VerificationClass::ExternalFact | VerificationClass::Strategy => {
+                OracleRung::R4Redundancy
+            }
+            // both the owner-provenance tier AND a checker induced+certified from the customer's
+            // recognition set (O-3b) are calibrated-human (R5) — the rung names the guarantee
+            // STRENGTH, which multiple oracle types can share.
+            VerificationClass::PersonalOwner | VerificationClass::Induced => {
+                OracleRung::R5CalibratedHuman
+            }
+            VerificationClass::ModelInference => OracleRung::R6Quarantine,
+        }
+    }
 }
 
 /// The typed verdict for a sub-task (the model never produces this).
@@ -143,6 +282,21 @@ pub enum VerificationEvidence {
     /// `Code`: the compiler / test oracle bit — `Some(true)` passed, `Some(false)`
     /// failed, `None` the oracle did not run (honest absence).
     CodeOracle(Option<bool>),
+    /// `Invariant` (R1): the deterministic [`crate::reconcile_oracle`] verdict for a finance
+    /// CERTIFICATE — `Reconciled` admits, `Violated` is a sound reject, `NotApplicable` an
+    /// honest absence. The model PROPOSES the certificate; this verdict is the L0 checker's,
+    /// never the model's text (the §6.5 no-LLM-judge boundary).
+    Reconciliation(ReconcileVerdict),
+    /// `Induced` (R5): the [`crate::recognition_synth`] checker's 3-way verdict on an example +
+    /// whether the checker passed the held-out zero-false-accept CERTIFICATION (O-3b). A
+    /// CERTIFIED `Accept` admits; an uncertified accept / a `Reject` does not; an `Escalate`
+    /// defers. The verdict is the induced checker's (pure geometry), never the model's text.
+    Recognition {
+        /// The induced checker's 3-way verdict for the example.
+        verdict: InducedVerdict,
+        /// Whether the checker passed the held-out zero-false-accept gate (§6.5-4).
+        certified: bool,
+    },
     /// `PersonalOwner`: the owner provenance of the pattern.
     OwnerProvenance(OwnerProvenance),
     /// `ExternalFact`: how many INDEPENDENT sources corroborate it, and the caller's
@@ -159,6 +313,22 @@ pub enum VerificationEvidence {
     CrossMemory {
         /// `true` ⇒ the pattern conflicts with held memory ⇒ quarantined.
         contradicts_held_ltm: bool,
+    },
+    /// `Metamorphic` (R2; O-4): whether a summarization metamorphic relation was VIOLATED (the
+    /// [`crate::metamorphic_oracle`] checker's bool). `true` ⇒ a sound reject (`Unverified`);
+    /// `false` ⇒ NOT-falsified (`NotApplicable`, NEVER admits — rejector-only). The verdict is
+    /// the checker's (pure string/integer geometry), never the model's text.
+    Metamorphic {
+        /// `true` ⇒ a metamorphic relation was falsified (a sound reject) ⇒ `Unverified`.
+        violation: bool,
+    },
+    /// `Strategy` (R4; K-4): whether a Skew strategy passed the deterministic conformal SHADOW
+    /// certification (`crate::conformal::certify_far_default(k, n)` over its oracle-gated shadow track
+    /// record). `true` ⇒ CERTIFIED (admits); `false` ⇒ not certified (never admits). The bit is the
+    /// deterministic FAR-bound result, never the model's say-so (the §6.5 no-LLM-judge boundary).
+    StrategyShadow {
+        /// `true` ⇒ the strategy's out-of-bounds proposal rate is provably bounded (conformal-certified).
+        certified: bool,
     },
     /// No oracle evidence supplied for this sub-task (honest absence ⇒ NotApplicable).
     Absent,
@@ -236,6 +406,40 @@ pub fn verify(class: VerificationClass, evidence: &VerificationEvidence) -> Veri
             "code oracle failed (compiler/test exit nonzero)",
         ),
         (C::Code, E::CodeOracle(None)) => (NotApplicable, "code oracle not run (honest absence)"),
+        // --- Invariant (R1): the reconcile oracle verdict (sound on the arithmetic only) ---
+        (C::Invariant, E::Reconciliation(rv)) => match rv {
+            ReconcileVerdict::Reconciled => (
+                Verified,
+                "invariant reconciled (R1: arithmetic-sound; NOT that positions/sources are real)",
+            ),
+            ReconcileVerdict::Violated => (
+                Unverified,
+                "invariant violated (R1 sound reject: insolvent / NAV mismatch)",
+            ),
+            ReconcileVerdict::NotApplicable => (
+                NotApplicable,
+                "invariant oracle not applicable (malformed/empty certificate; honest absence)",
+            ),
+        },
+        // --- Induced (R5): the recognition-synthesized checker's verdict (certify-gated) ---
+        (C::Induced, E::Recognition { verdict, certified }) => match (*verdict, *certified) {
+            (InducedVerdict::Accept, true) => (
+                Verified,
+                "induced checker ACCEPT + held-out certified (R5 provisional; α-budget = O-3c)",
+            ),
+            (InducedVerdict::Accept, false) => (
+                Unverified,
+                "induced checker ACCEPT but NOT certified (held-out zero-false-accept gate unmet)",
+            ),
+            (InducedVerdict::Reject, _) => (
+                Unverified,
+                "induced checker REJECT (a sound trustworthy negative — never admits)",
+            ),
+            (InducedVerdict::Escalate, _) => (
+                NotApplicable,
+                "induced checker ESCALATE (deferred to a human; honest absence — R6 quarantine)",
+            ),
+        },
         // --- PersonalOwner: owner provenance ---
         (C::PersonalOwner, E::OwnerProvenance(OwnerProvenance::OwnerConfirmed)) => (
             Verified,
@@ -304,6 +508,34 @@ pub fn verify(class: VerificationClass, evidence: &VerificationEvidence) -> Veri
                 (Verified, "cross-memory consistent with the held LTM")
             }
         }
+        // --- Metamorphic (R2, O-4): a SOUND REJECTOR — NEVER yields Verified ---
+        (C::Metamorphic, E::Metamorphic { violation }) => {
+            if *violation {
+                (
+                    Unverified,
+                    "metamorphic relation FALSIFIED (R2 sound reject: fabricated quote / unsupported number / over-compression — quarantined, never written)",
+                )
+            } else {
+                (
+                    NotApplicable,
+                    "metamorphic relations NOT falsified (PROVISIONAL — may still OMIT key info; R2 rejector-only NEVER admits a write)",
+                )
+            }
+        }
+        // --- Strategy (R4, K-4): the conformal shadow-certification bit ---
+        (C::Strategy, E::StrategyShadow { certified }) => {
+            if *certified {
+                (
+                    Verified,
+                    "skew strategy conformal-CERTIFIED (R4: out-of-bounds proposal rate provably bounded over the oracle-gated shadow record; certified ≠ profitable — honest LOCK)",
+                )
+            } else {
+                (
+                    Unverified,
+                    "skew strategy NOT certified (insufficient in-bounds shadow fires or out-of-bounds rate too high — never admits)",
+                )
+            }
+        }
         // --- honest absence: no oracle evidence supplied for this class ---
         (_, E::Absent) => (
             NotApplicable,
@@ -320,6 +552,83 @@ pub fn verify(class: VerificationClass, evidence: &VerificationEvidence) -> Veri
         verdict,
         detail: detail.to_string(),
     }
+}
+
+/// O-2: the reconcile-oracle R1 entry — the SINGLE bridge from the deterministic
+/// [`crate::reconcile_oracle`] checker to the [`VerificationClass::Invariant`] (R1) rung.
+/// Produce the typed write-admission receipt for a finance reconciliation `verdict`: a
+/// `Reconciled` certificate `admits_write()`; a `Violated` (a sound reject) / `NotApplicable`
+/// (honest absence) one does NOT. The model never reaches [`verify`] — only the checker's
+/// TYPED verdict does (the §6.5 no-LLM-judge boundary). The honest LOCK carries through the
+/// receipt detail: admitting means arithmetic-sound, NOT that the positions/sources are real.
+#[must_use]
+pub fn reconciliation_receipt(verdict: ReconcileVerdict) -> VerificationReceipt {
+    verify(
+        VerificationClass::Invariant,
+        &VerificationEvidence::Reconciliation(verdict),
+    )
+}
+
+/// O-3b: the recognition-synthesis R5 entry — the SINGLE bridge from the induced
+/// [`crate::recognition_synth`] checker to the [`VerificationClass::Induced`] (R5) rung. Produce
+/// the typed write-admission receipt for an induced checker's `verdict` + its `certified` gate:
+/// a CERTIFIED `Accept` `admits_write()`; an uncertified accept / a `Reject` does NOT; an
+/// `Escalate` is the honest `NotApplicable` (deferred to a human, R6-quarantine-shaped). The
+/// model never reaches [`verify`] — only the induced checker's TYPED verdict + the deterministic
+/// certify bit do. HONEST LOCK: an admitted `Accept` is a PROVISIONAL R5 pattern (held-out
+/// zero-false-accept gated); the quantitative conformal α-budget is the deferred O-3c.
+#[must_use]
+pub fn recognition_receipt(verdict: InducedVerdict, certified: bool) -> VerificationReceipt {
+    verify(
+        VerificationClass::Induced,
+        &VerificationEvidence::Recognition { verdict, certified },
+    )
+}
+
+/// O-4: the summarization metamorphic R2 entry — the SINGLE bridge from the deterministic
+/// [`crate::metamorphic_oracle`] checker to the [`VerificationClass::Metamorphic`] (R2) rung. A
+/// SOUND REJECTOR, rejector-only (owner-locked O-4 seam Q3): a `Rejected` verdict is `Unverified`
+/// (a sound reject — it BLOCKS a write, never admits one); a `NotFalsified` is the honest
+/// `NotApplicable` (PROVISIONAL — never admits; a metamorphic pass is "not-yet-falsified", not a
+/// verification); a malformed input is the honest absence. Because this class NEVER yields
+/// `Verified`, it is a pure write-time GATE — never an admitting derivation, so it cannot be
+/// wrongly marked "doubly verified" (the same-rung two-derivation subtlety is moot). The model
+/// never reaches [`verify`] — only the checker's TYPED verdict does (§6.5 no-LLM-judge boundary).
+#[must_use]
+pub fn metamorphic_receipt(verdict: SummaryVerdict) -> VerificationReceipt {
+    match verdict {
+        // a falsified relation ⇒ Unverified (a SOUND reject; it BLOCKS the write).
+        SummaryVerdict::Rejected => verify(
+            VerificationClass::Metamorphic,
+            &VerificationEvidence::Metamorphic { violation: true },
+        ),
+        // not-falsified ⇒ NotApplicable (PROVISIONAL; NEVER admits — rejector-only).
+        SummaryVerdict::NotFalsified => verify(
+            VerificationClass::Metamorphic,
+            &VerificationEvidence::Metamorphic { violation: false },
+        ),
+        // malformed / empty ⇒ the honest absence (also never admits).
+        SummaryVerdict::NotApplicable => verify(
+            VerificationClass::Metamorphic,
+            &VerificationEvidence::Absent,
+        ),
+    }
+}
+
+/// K-4: the strategy-certification R4 entry — the SINGLE bridge from the deterministic conformal
+/// SHADOW certification ([`crate::conformal::certify_far_default`] over a strategy's oracle-gated shadow
+/// track record) to the [`VerificationClass::Strategy`] (R4) rung. A CERTIFIED strategy `admits_write()`
+/// (then still subject to the SAME canary + cross-memory + two-derivation gates — Strategy R4 ⟂
+/// CrossMemory R2 ⇒ DOUBLY VERIFIED); an UNcertified one does NOT. The model never reaches [`verify`] —
+/// only the deterministic conformal `certified` bit does (the §6.5 no-LLM-judge boundary). HONEST LOCK:
+/// admitting means the strategy's PROPOSALS stay in-bounds over the shadow distribution, NOT that it is
+/// PROFITABLE; shadow money 0; the live sub-budget is the owner-armed K-2 path.
+#[must_use]
+pub fn strategy_receipt(certified: bool) -> VerificationReceipt {
+    verify(
+        VerificationClass::Strategy,
+        &VerificationEvidence::StrategyShadow { certified },
+    )
 }
 
 // ===========================================================================
@@ -362,6 +671,57 @@ const CANARY: &[(VerificationClass, VerificationEvidence, VerificationVerdict)] 
         VerificationEvidence::CodeOracle(None),
         VerificationVerdict::NotApplicable,
     ),
+    // the R1 invariant/reconciliation oracle: a reconciled cert admits; a violation never
+    // does; a malformed cert is an honest NotApplicable (the boundaries that close ACCUMULATE)
+    (
+        VerificationClass::Invariant,
+        VerificationEvidence::Reconciliation(ReconcileVerdict::Reconciled),
+        VerificationVerdict::Verified,
+    ),
+    (
+        VerificationClass::Invariant,
+        VerificationEvidence::Reconciliation(ReconcileVerdict::Violated),
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::Invariant,
+        VerificationEvidence::Reconciliation(ReconcileVerdict::NotApplicable),
+        VerificationVerdict::NotApplicable,
+    ),
+    // the R5 induced checker: only a CERTIFIED accept admits; uncertified/reject never; escalate
+    // defers (the boundaries that gate the recognition-synthesis ACCUMULATE)
+    (
+        VerificationClass::Induced,
+        VerificationEvidence::Recognition {
+            verdict: InducedVerdict::Accept,
+            certified: true,
+        },
+        VerificationVerdict::Verified,
+    ),
+    (
+        VerificationClass::Induced,
+        VerificationEvidence::Recognition {
+            verdict: InducedVerdict::Accept,
+            certified: false,
+        },
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::Induced,
+        VerificationEvidence::Recognition {
+            verdict: InducedVerdict::Reject,
+            certified: true,
+        },
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::Induced,
+        VerificationEvidence::Recognition {
+            verdict: InducedVerdict::Escalate,
+            certified: true,
+        },
+        VerificationVerdict::NotApplicable,
+    ),
     // cross-memory: a contradiction is quarantined; consistency admits
     (
         VerificationClass::CrossMemory,
@@ -376,6 +736,32 @@ const CANARY: &[(VerificationClass, VerificationEvidence, VerificationVerdict)] 
             contradicts_held_ltm: false,
         },
         VerificationVerdict::Verified,
+    ),
+    // O-4 metamorphic (R2 rejector-only): a FALSIFIED relation is a sound reject (Unverified);
+    // a NOT-falsified pass is the honest NotApplicable — NEITHER is ever Verified (the rejector
+    // property pinned: a future edit that let a metamorphic pass ADMIT would flip the 2nd case).
+    (
+        VerificationClass::Metamorphic,
+        VerificationEvidence::Metamorphic { violation: true },
+        VerificationVerdict::Unverified,
+    ),
+    (
+        VerificationClass::Metamorphic,
+        VerificationEvidence::Metamorphic { violation: false },
+        VerificationVerdict::NotApplicable,
+    ),
+    // K-4 strategy (R4): only a CONFORMAL-CERTIFIED strategy admits; an uncertified one never does
+    // (the boundary that gates the strategy ACCUMULATE — a future edit letting an uncertified
+    // strategy admit would flip the 2nd case).
+    (
+        VerificationClass::Strategy,
+        VerificationEvidence::StrategyShadow { certified: true },
+        VerificationVerdict::Verified,
+    ),
+    (
+        VerificationClass::Strategy,
+        VerificationEvidence::StrategyShadow { certified: false },
+        VerificationVerdict::Unverified,
     ),
     // a model may NOT promote its own inference to an owner fact
     (
@@ -655,15 +1041,231 @@ mod tests {
 
         for class in [
             VerificationClass::Code,
+            VerificationClass::Invariant,
+            VerificationClass::Induced,
             VerificationClass::PersonalOwner,
             VerificationClass::ExternalFact,
             VerificationClass::ModelInference,
             VerificationClass::CrossMemory,
+            VerificationClass::Metamorphic,
+            VerificationClass::Strategy,
         ] {
             let r = verify(class, &VerificationEvidence::Absent);
             assert_eq!(r.verdict, VerificationVerdict::NotApplicable, "{class:?}");
             assert!(!r.admits_write(), "{class:?} + Absent never admits");
         }
+    }
+
+    /// K-4 THE R4 STRATEGY RUNG: only a CONFORMAL-CERTIFIED strategy admits a write; an uncertified
+    /// one defers (Unverified). The bit is the deterministic conformal cert, never the model's text;
+    /// a certified strategy (R4) is INDEPENDENT of the write-time cross-memory axis (R2) ⇒ doubly
+    /// verified. Wrong-class evidence fail-closes.
+    #[test]
+    fn strategy_rung_admits_only_a_certified_strategy() {
+        let ok = strategy_receipt(true);
+        assert_eq!(ok.class, VerificationClass::Strategy);
+        assert_eq!(ok.class.rung(), OracleRung::R4Redundancy);
+        assert_eq!(ok.verdict, VerificationVerdict::Verified);
+        assert!(ok.admits_write(), "a certified strategy admits a write");
+
+        let no = strategy_receipt(false);
+        assert_eq!(no.verdict, VerificationVerdict::Unverified);
+        assert!(!no.admits_write(), "an uncertified strategy never admits");
+
+        // R4 ⟂ R2 (cross-memory) ⇒ a certified strategy is doubly verified (independent axes).
+        let cm = verify(
+            VerificationClass::CrossMemory,
+            &VerificationEvidence::CrossMemory {
+                contradicts_held_ltm: false,
+            },
+        );
+        assert!(
+            two_derivation_admits(&ok, &cm),
+            "Strategy (R4) ⟂ CrossMemory (R2) = two independent passing derivations"
+        );
+
+        // wrong-class fail-closed: StrategyShadow evidence fed to a Code task never admits.
+        let mismatch = verify(
+            VerificationClass::Code,
+            &VerificationEvidence::StrategyShadow { certified: true },
+        );
+        assert!(
+            !mismatch.admits_write(),
+            "strategy evidence on a non-Strategy class never admits (fail-closed)"
+        );
+    }
+
+    /// O-2 THE ORACLE LADDER TYPING: every trust class projects to its rung TOTALLY, and the
+    /// non-obvious mappings are pinned — the reconcile oracle is R1, a cross-memory check is
+    /// the R2 sound-rejector, and model-inference is the R6 quarantine floor.
+    #[test]
+    fn every_class_projects_to_its_oracle_ladder_rung() {
+        assert_eq!(VerificationClass::Code.rung(), OracleRung::R0Formal);
+        assert_eq!(VerificationClass::Invariant.rung(), OracleRung::R1Invariant);
+        assert_eq!(
+            VerificationClass::CrossMemory.rung(),
+            OracleRung::R2Metamorphic,
+            "a contradiction check is a sound rejector (R2), never proof of truth"
+        );
+        assert_eq!(
+            VerificationClass::Metamorphic.rung(),
+            OracleRung::R2Metamorphic,
+            "a summarization metamorphic checker is a sound rejector (R2) — shares the rung"
+        );
+        assert_eq!(
+            VerificationClass::ExternalFact.rung(),
+            OracleRung::R4Redundancy
+        );
+        assert_eq!(
+            VerificationClass::PersonalOwner.rung(),
+            OracleRung::R5CalibratedHuman
+        );
+        assert_eq!(
+            VerificationClass::Induced.rung(),
+            OracleRung::R5CalibratedHuman,
+            "a checker induced+certified from the customer recognition set is calibrated-human (R5)"
+        );
+        assert_eq!(
+            VerificationClass::ModelInference.rung(),
+            OracleRung::R6Quarantine,
+            "model inference is the R6 quarantine floor (never auto-ACCUMULATEs)"
+        );
+    }
+
+    /// O-3b THE R5 INDUCED RUNG: only a CERTIFIED `Accept` admits a write; an uncertified accept
+    /// and a `Reject` do not; an `Escalate` defers (the R6-quarantine-shaped honest absence).
+    #[test]
+    fn induced_rung_admits_only_a_certified_accept() {
+        let ok = recognition_receipt(InducedVerdict::Accept, true);
+        assert_eq!(ok.class, VerificationClass::Induced);
+        assert!(ok.admits_write(), "a certified ACCEPT admits");
+
+        assert!(
+            !recognition_receipt(InducedVerdict::Accept, false).admits_write(),
+            "an UNcertified accept never admits (certify-before-accumulate)"
+        );
+        assert!(
+            !recognition_receipt(InducedVerdict::Reject, true).admits_write(),
+            "a REJECT is a sound negative — never admits"
+        );
+        let esc = recognition_receipt(InducedVerdict::Escalate, true);
+        assert_eq!(esc.verdict, VerificationVerdict::NotApplicable);
+        assert!(!esc.admits_write(), "an ESCALATE defers — never admits");
+    }
+
+    /// O-4 THE R2 METAMORPHIC RUNG (rejector-only): a FALSIFIED relation is a sound reject
+    /// (Unverified — blocks the write); a NOT-falsified pass is the honest NotApplicable. CRUCIAL:
+    /// this class NEVER yields Verified — `metamorphic_receipt` cannot admit a write for ANY input,
+    /// so it is a pure write-time GATE (the maximally-paranoid sound-rejector posture; it is never
+    /// an admitting derivation, so the same-rung two-derivation subtlety cannot arise).
+    #[test]
+    fn metamorphic_rung_is_a_sound_rejector_that_never_admits() {
+        use crate::metamorphic_oracle::SummaryVerdict;
+
+        // a falsified relation ⇒ Unverified (a sound reject — never admits).
+        let rejected = metamorphic_receipt(SummaryVerdict::Rejected);
+        assert_eq!(rejected.class, VerificationClass::Metamorphic);
+        assert_eq!(rejected.verdict, VerificationVerdict::Unverified);
+        assert!(
+            !rejected.admits_write(),
+            "a metamorphic REJECT blocks a write, never admits one"
+        );
+
+        // a NOT-falsified pass ⇒ NotApplicable — PROVISIONAL, NEVER admits (rejector-only).
+        let pass = metamorphic_receipt(SummaryVerdict::NotFalsified);
+        assert_eq!(pass.verdict, VerificationVerdict::NotApplicable);
+        assert!(
+            !pass.admits_write(),
+            "a metamorphic PASS is not-yet-falsified — it NEVER admits a write (R2 rejector-only)"
+        );
+
+        // a malformed input ⇒ the honest absence, also never admits.
+        let na = metamorphic_receipt(SummaryVerdict::NotApplicable);
+        assert_eq!(na.verdict, VerificationVerdict::NotApplicable);
+        assert!(!na.admits_write());
+
+        // THE REJECTOR PROPERTY: NO verdict the bridge can produce is Verified — so a metamorphic
+        // derivation can NEVER be an admitting axis (it is a pure GATE).
+        assert_eq!(
+            VerificationClass::Metamorphic.rung(),
+            OracleRung::R2Metamorphic
+        );
+        for v in [
+            SummaryVerdict::Rejected,
+            SummaryVerdict::NotFalsified,
+            SummaryVerdict::NotApplicable,
+        ] {
+            assert_ne!(
+                metamorphic_receipt(v).verdict,
+                VerificationVerdict::Verified,
+                "the R2 metamorphic rejector NEVER yields Verified for any input"
+            );
+        }
+
+        // wrong-class fail-closed: Metamorphic evidence fed to a Code task never admits.
+        let mismatch = verify(
+            VerificationClass::Code,
+            &VerificationEvidence::Metamorphic { violation: false },
+        );
+        assert!(
+            !mismatch.admits_write(),
+            "metamorphic evidence on a non-Metamorphic class never admits (fail-closed)"
+        );
+    }
+
+    /// O-2 THE R1 RECONCILIATION RUNG: the reconcile oracle's verdict drives the typed
+    /// write-admission — `Reconciled` admits (R1 Verified), `Violated` is a sound reject,
+    /// a malformed cert is an honest `NotApplicable`. The model's text is never an input.
+    #[test]
+    fn invariant_rung_admits_only_a_reconciled_certificate() {
+        let ok = reconciliation_receipt(ReconcileVerdict::Reconciled);
+        assert_eq!(ok.class, VerificationClass::Invariant);
+        assert_eq!(ok.verdict, VerificationVerdict::Verified);
+        assert!(
+            ok.admits_write(),
+            "a reconciled R1 certificate admits a write"
+        );
+
+        let bad = reconciliation_receipt(ReconcileVerdict::Violated);
+        assert_eq!(bad.verdict, VerificationVerdict::Unverified);
+        assert!(!bad.admits_write(), "a violated certificate never admits");
+
+        let na = reconciliation_receipt(ReconcileVerdict::NotApplicable);
+        assert_eq!(na.verdict, VerificationVerdict::NotApplicable);
+        assert!(!na.admits_write(), "a malformed certificate never admits");
+
+        // wrong-class fail-closed: a reconcile verdict fed to a Code task is a typed mismatch.
+        let mismatch = verify(
+            VerificationClass::Code,
+            &VerificationEvidence::Reconciliation(ReconcileVerdict::Reconciled),
+        );
+        assert!(
+            !mismatch.admits_write(),
+            "Reconciliation evidence on a non-Invariant class never admits (fail-closed)"
+        );
+    }
+
+    /// O-2 closes ACCUMULATE at the ladder level: an R1 reconciliation admit is INDEPENDENT
+    /// of the write-time cross-memory check (R1 ⟂ R2 ⇒ different classes), so a reconciled
+    /// pattern is DOUBLY VERIFIED — the strongest trust, not a vacuous self-compare.
+    #[test]
+    fn r1_reconciliation_is_independent_of_the_cross_memory_axis() {
+        let r1 = reconciliation_receipt(ReconcileVerdict::Reconciled);
+        let cm = verify(
+            VerificationClass::CrossMemory,
+            &VerificationEvidence::CrossMemory {
+                contradicts_held_ltm: false,
+            },
+        );
+        assert!(
+            two_derivation_admits(&r1, &cm),
+            "R1 (invariant) ⟂ R2 (cross-memory) = two independent passing derivations"
+        );
+        assert_ne!(
+            r1.class.rung(),
+            cm.class.rung(),
+            "the two derivations sit on different rungs (independent axes)"
+        );
     }
 
     /// Falsifiability canary: `admits_write` is genuinely selective — Verified admits,

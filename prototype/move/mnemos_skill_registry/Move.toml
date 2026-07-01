@@ -13,7 +13,8 @@
 [package]
 name = "mnemos_skill_registry"
 edition = "2024.beta"
-# published-at = "0x..."  # operator-set after approved publish; NOT this atom.
+# Testnet deploy (owner-directed 2026-07-01 "배포해라 테스트넷에"): published to Sui TESTNET.
+published-at = "0x9aa9c3dc92eeb5b3c2c8898e2999696b3a544fdb78b26b1c98546714919ea08b"
 
 [addresses]
 # `0x0` is the Sui Move pre-publish placeholder; the operator replaces it with the

@@ -203,6 +203,12 @@ mod tests {
                 StageBPublishDecision::Admit,
             ),
             (
+                // D-3: the owner-directed public-registry artifact admits (derived from
+                // `stage_b_publish_allowed`; its sole constructor secret-scans first).
+                PublishPayloadClass::PublicRegistryArtifact,
+                StageBPublishDecision::Admit,
+            ),
+            (
                 PublishPayloadClass::RealUserMemory,
                 StageBPublishDecision::RequireOwnerSignature,
             ),

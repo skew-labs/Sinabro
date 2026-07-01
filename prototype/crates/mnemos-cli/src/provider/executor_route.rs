@@ -251,6 +251,65 @@ pub fn parse_subtask_envelope(text: &str) -> Option<Vec<SubTask>> {
     if tasks.is_empty() { None } else { Some(tasks) }
 }
 
+/// Layer a decomposed sub-task list into DETERMINISTIC topological WAVES by its
+/// `deps` DAG — the K-5 parallel-fleet ordering truth (the parsed-but-unused
+/// [`SubTask::deps`] becomes load-bearing). Returns waves of INDICES into
+/// `subtasks`: wave 0 is every sub-task with no (resolved) dependency; each later
+/// wave becomes ready only once every one of its deps has landed in an earlier
+/// wave. Within a wave the indices are ordered by sub-task `id` (drift-0: a stable,
+/// schedule-INDEPENDENT order, so the fan-out's collected result never depends on
+/// thread timing).
+///
+/// Fail-closed `None` on (a) a duplicate sub-task `id` (a dep could not name it
+/// uniquely), (b) a `dep` id that names no sub-task, (c) a self-dependency, or (d) a
+/// dependency CYCLE — the caller stops typed rather than guessing an order or
+/// deadlocking. An empty input yields `Some(vec![])` (no waves).
+#[must_use]
+pub fn topological_waves(subtasks: &[SubTask]) -> Option<Vec<Vec<usize>>> {
+    use std::collections::BTreeMap;
+    // id -> index; a duplicate id is fail-closed (deps would be ambiguous).
+    let mut id_to_idx: BTreeMap<u32, usize> = BTreeMap::new();
+    for (idx, st) in subtasks.iter().enumerate() {
+        if id_to_idx.insert(st.id, idx).is_some() {
+            return None;
+        }
+    }
+    let n = subtasks.len();
+    let mut indeg: Vec<usize> = vec![0; n];
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n]; // edges: dep -> dependent
+    for (idx, st) in subtasks.iter().enumerate() {
+        for dep_id in &st.deps {
+            let dep_idx = *id_to_idx.get(dep_id)?; // unknown dep id ⇒ None
+            if dep_idx == idx {
+                return None; // self-dependency is a 1-cycle
+            }
+            succ[dep_idx].push(idx);
+            indeg[idx] += 1;
+        }
+    }
+    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    ready.sort_by_key(|&i| subtasks[i].id);
+    let mut waves: Vec<Vec<usize>> = Vec::new();
+    let mut peeled = 0usize;
+    while !ready.is_empty() {
+        peeled += ready.len();
+        let mut next: Vec<usize> = Vec::new();
+        for &i in &ready {
+            for &j in &succ[i] {
+                indeg[j] -= 1;
+                if indeg[j] == 0 {
+                    next.push(j);
+                }
+            }
+        }
+        next.sort_by_key(|&i| subtasks[i].id);
+        waves.push(std::mem::take(&mut ready));
+        ready = next;
+    }
+    // Unpeeled nodes ⇒ a cycle left the graph non-empty (fail-closed).
+    if peeled == n { Some(waves) } else { None }
+}
+
 // ===========================================================================
 // P1-5 — the LoRA router-table CONFIG SEAM (PURE codec; the owner fills the table).
 // ===========================================================================
@@ -488,6 +547,68 @@ mod tests {
             parse_subtask_envelope("\n   \n").is_none(),
             "no sub-tasks is malformed"
         );
+    }
+
+    // ---- K-5 topological waves (deps-DAG, deterministic, fail-closed) ----
+
+    #[test]
+    fn waves_independent_is_one_wave_in_id_order() {
+        let st = parse_subtask_envelope(
+            "SUBTASK 1 sui_move - a\nSUBTASK 2 audit - b\nSUBTASK 3 nl_bridge - c",
+        )
+        .expect("valid");
+        // All independent ⇒ one wave, ordered by id (drift-0).
+        assert_eq!(topological_waves(&st), Some(vec![vec![0, 1, 2]]));
+    }
+
+    #[test]
+    fn waves_linear_chain_is_n_waves() {
+        let st = parse_subtask_envelope(
+            "SUBTASK 1 sui_move - a\nSUBTASK 2 audit 1 b\nSUBTASK 3 nl_bridge 2 c",
+        )
+        .expect("valid");
+        assert_eq!(
+            topological_waves(&st),
+            Some(vec![vec![0], vec![1], vec![2]])
+        );
+    }
+
+    #[test]
+    fn waves_diamond_orders_by_dependency_then_id() {
+        // 1 -> {2,3} -> 4
+        let st = parse_subtask_envelope(
+            "SUBTASK 1 sui_move - a\nSUBTASK 2 audit 1 b\nSUBTASK 3 audit 1 c\nSUBTASK 4 nl_bridge 2,3 d",
+        )
+        .expect("valid");
+        assert_eq!(
+            topological_waves(&st),
+            Some(vec![vec![0], vec![1, 2], vec![3]])
+        );
+    }
+
+    #[test]
+    fn waves_fail_closed_on_cycle_unknown_self_and_dup() {
+        let cyc =
+            parse_subtask_envelope("SUBTASK 1 sui_move 2 a\nSUBTASK 2 audit 1 b").expect("parses");
+        assert!(topological_waves(&cyc).is_none(), "cycle ⇒ None");
+
+        let unknown = parse_subtask_envelope("SUBTASK 1 sui_move 9 a").expect("parses");
+        assert!(
+            topological_waves(&unknown).is_none(),
+            "unknown dep id ⇒ None"
+        );
+
+        let self_dep = parse_subtask_envelope("SUBTASK 1 sui_move 1 a").expect("parses");
+        assert!(topological_waves(&self_dep).is_none(), "self-dep ⇒ None");
+
+        let dup =
+            parse_subtask_envelope("SUBTASK 1 sui_move - a\nSUBTASK 1 audit - b").expect("parses");
+        assert!(topological_waves(&dup).is_none(), "duplicate id ⇒ None");
+    }
+
+    #[test]
+    fn waves_empty_is_empty() {
+        assert_eq!(topological_waves(&[]), Some(Vec::<Vec<usize>>::new()));
     }
 
     // ---- P1-5 routing-table config seam (pure, fail-closed) ----

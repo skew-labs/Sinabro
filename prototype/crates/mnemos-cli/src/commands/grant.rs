@@ -59,6 +59,15 @@ pub enum GrantTier {
     /// is still ABSENT (PD-6). A `BoldSession` ceremony arms ONLY a [`BoldSessionGrant`]
     /// (via [`arm_bold_session`]) — never a plain single-tier grant (compile-forced).
     BoldSession = 4,
+    /// User-BOUNDED CUSTODY — a single on-chain transaction within an owner-armed
+    /// bound (per-tx max · total budget · chain/protocol allowlist · TTL · revoke ·
+    /// kill). ONCHAIN PIVOT C-0: REPLACES the blanket PD-6 funds-lock with a BOUNDED
+    /// grant. It does NOT inhabit [`crate::commands::authority::CustodyCapability`]
+    /// (that stays UNINHABITED — blanket/unbounded custody is STILL impossible); it
+    /// mints the NEW, distinct [`crate::commands::authority::ChainTxCapability`]. Armed
+    /// ONLY by its own [`CUSTODY_ARM_PHRASE`]; never inbound-armable; the model holds
+    /// no phrase, so it cannot arm custody.
+    Custody = 5,
 }
 
 /// The arming typed-phrase for the EGRESS tier (the owner types this EXACTLY at
@@ -77,6 +86,12 @@ pub const DOWNLOAD_ARM_PHRASE: &str = "arm-download-bounded-revocable";
 /// or custody (PD-6, uninhabited). The model holds no `ApprovalPrompt` and types no
 /// phrase, so it cannot arm a bold session.
 pub const BOLD_ARM_PHRASE: &str = "arm-bold-session-edit-run-bounded-revocable";
+/// The arming typed-phrase for the user-BOUNDED CUSTODY tier (ONCHAIN PIVOT C-0). A
+/// DISTINCT gesture: the owner arms a per-tx-max / total-budget / chain+protocol-allowlist
+/// / TTL bound for on-chain transactions. NEVER armed by any other phrase (PD-2) and NEVER
+/// inbound-armable (custody is local-owner-ceremony only). The model holds no
+/// [`ApprovalPrompt`] and types no phrase, so it cannot arm custody.
+pub const CUSTODY_ARM_PHRASE: &str = "arm-custody-chain-tx-bounded-revocable";
 
 /// Proof that the owner completed the arming typed-phrase ceremony this turn,
 /// bound to the tier it was completed for. PRIVATE fields + the ONLY constructor
@@ -224,7 +239,10 @@ impl EgressGrant {
     pub fn arm(ceremony: OwnerArmCeremony, bounds: GrantBounds) -> Option<Self> {
         match ceremony.tier {
             GrantTier::Egress => Some(Self(GrantCore::new(ceremony.audit_hash_32, bounds))),
-            GrantTier::MutateLocal | GrantTier::MutateDownload | GrantTier::BoldSession => None,
+            GrantTier::MutateLocal
+            | GrantTier::MutateDownload
+            | GrantTier::BoldSession
+            | GrantTier::Custody => None,
         }
     }
 
@@ -268,7 +286,10 @@ impl MutateGrant {
     pub fn arm(ceremony: OwnerArmCeremony, bounds: GrantBounds) -> Option<Self> {
         match ceremony.tier {
             GrantTier::MutateLocal => Some(Self(GrantCore::new(ceremony.audit_hash_32, bounds))),
-            GrantTier::Egress | GrantTier::MutateDownload | GrantTier::BoldSession => None,
+            GrantTier::Egress
+            | GrantTier::MutateDownload
+            | GrantTier::BoldSession
+            | GrantTier::Custody => None,
         }
     }
 
@@ -389,7 +410,10 @@ impl DownloadGrant {
     pub fn arm(ceremony: OwnerArmCeremony, bounds: GrantBounds) -> Option<Self> {
         match ceremony.tier {
             GrantTier::MutateDownload => Some(Self(GrantCore::new(ceremony.audit_hash_32, bounds))),
-            GrantTier::Egress | GrantTier::MutateLocal | GrantTier::BoldSession => None,
+            GrantTier::Egress
+            | GrantTier::MutateLocal
+            | GrantTier::BoldSession
+            | GrantTier::Custody => None,
         }
     }
 
@@ -525,7 +549,10 @@ pub fn arm_bold_session(
             egress: EgressGrant(GrantCore::new(ceremony.audit_hash_32, bounds)),
             mutate: MutateGrant(GrantCore::new(ceremony.audit_hash_32, bounds)),
         }),
-        GrantTier::Egress | GrantTier::MutateLocal | GrantTier::MutateDownload => None,
+        GrantTier::Egress
+        | GrantTier::MutateLocal
+        | GrantTier::MutateDownload
+        | GrantTier::Custody => None,
     }
 }
 
@@ -546,6 +573,220 @@ pub fn arm_local_bold_session(
     let ceremony =
         OwnerArmCeremony::complete(prompt, response, GrantTier::BoldSession, audit_hash_32)?;
     arm_bold_session(ceremony, bounds)
+}
+
+// ===========================================================================
+// ONCHAIN PIVOT C-0 — user-BOUNDED custody (a NEW bounded capability, NOT blanket).
+// `CustodyCapability` (commands/authority.rs) STAYS uninhabited (blanket/unbounded custody
+// is forever impossible). This block mints the bounded, owner-armed CUSTODY grant that gates
+// the NEW `ChainTxCapability` — the typed authorization for ONE on-chain tx within the
+// owner's bounds. C-0 is PURE/typed: it AUTHORIZES; it never signs or broadcasts (no key,
+// money 0 — the real signing/transport is C-2).
+// ===========================================================================
+
+/// A proposed on-chain transaction — the typed thing a [`CustodyGrant`] authorizes against
+/// its bounds. Carries only what the bound check needs (the chain, the protocol, and the
+/// amount in integer MINOR units — NO float). The signing/calldata details are C-2; C-0 only
+/// decides whether this request is within the owner's bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainTxRequest {
+    /// The target chain (matched against the grant's `chain_allowlist`, exact).
+    pub chain: String,
+    /// The target protocol / contract label (matched against `protocol_allowlist`, exact).
+    pub protocol: String,
+    /// The transaction value in integer MINOR units (e.g. wei / lamports). NO float.
+    pub amount_minor: u128,
+}
+
+/// The bounds an owner-armed CUSTODY grant boxes on-chain spending by (ONCHAIN PIVOT C-0).
+/// Every field is an UPPER limit / an allowlist: a tx authorizes ONLY while the grant is
+/// unexpired + within the action cap + unrevoked AND its chain/protocol are allowlisted AND
+/// `amount <= per_tx_max` AND `spent + amount <= total_budget`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustodyBounds {
+    /// The reused base bounds: `max_actions` (tx-count cap) + `expires_at` (TTL).
+    pub base: GrantBounds,
+    /// The maximum value of a SINGLE transaction (minor units) — the user's per-tx ceiling.
+    pub per_tx_max_minor: u128,
+    /// The maximum CUMULATIVE value across all txs under this grant — the user's total budget.
+    pub total_budget_minor: u128,
+    /// The chains a tx may target (exact match). Empty ⇒ nothing authorized (fail-closed).
+    pub chain_allowlist: Vec<String>,
+    /// The protocols a tx may target (exact match). Empty ⇒ nothing authorized (fail-closed).
+    pub protocol_allowlist: Vec<String>,
+}
+
+/// Why a custody grant did not authorize a transaction (fail-closed; explicit). The first
+/// three mirror [`GrantDenied`] (the reused base); the rest are custody-specific.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustodyDenied {
+    /// `now >= expires_at` — the arm window ended.
+    Expired = 1,
+    /// `actions_used >= max_actions` — the tx-count cap is spent.
+    RateExceeded = 2,
+    /// The owner revoked the grant.
+    Revoked = 3,
+    /// `amount > per_tx_max` — the single-tx ceiling is exceeded.
+    PerTxExceeded = 4,
+    /// `spent + amount > total_budget` (or the sum overflowed) — the budget is exceeded.
+    BudgetExceeded = 5,
+    /// The tx's chain is not in the allowlist.
+    ChainNotAllowed = 6,
+    /// The tx's protocol is not in the allowlist.
+    ProtocolNotAllowed = 7,
+}
+
+/// A custody grant's authorization verdict for one transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustodyAuthorization {
+    /// The grant authorizes this on-chain transaction (within ALL bounds).
+    Authorized,
+    /// The grant does not authorize it (with the reason).
+    Denied(CustodyDenied),
+}
+
+/// The shared, PRIVATE custody grant core — not constructible or nameable outside this module
+/// (the public [`CustodyGrant`] newtype wraps it, so it cannot be struct-literal'd by any
+/// external / agent path). Reuses [`GrantCore`] for expiry/rate/revoke + adds the custody bounds.
+#[derive(Clone, Debug)]
+struct CustodyGrantCore {
+    base: GrantCore,
+    per_tx_max_minor: u128,
+    total_budget_minor: u128,
+    chain_allowlist: Vec<String>,
+    protocol_allowlist: Vec<String>,
+}
+
+impl CustodyGrantCore {
+    /// Fail-closed custody authorization for ONE tx at `now`, given how many txs already
+    /// fired (`actions_used`) and how much has been spent (`spent_minor`). Order: the base
+    /// (revoked/expired/rate) → chain allowlist → protocol allowlist → per-tx ceiling → total
+    /// budget (checked add; an overflow is denied). Every check is an upper limit; ANY failure
+    /// denies (no silent authorize).
+    fn authorize(
+        &self,
+        now_epoch_ms: u64,
+        actions_used_u32: u32,
+        spent_minor: u128,
+        tx: &ChainTxRequest,
+    ) -> CustodyAuthorization {
+        match self.base.authorize(now_epoch_ms, actions_used_u32) {
+            GrantAuthorization::Denied(GrantDenied::Expired) => {
+                return CustodyAuthorization::Denied(CustodyDenied::Expired);
+            }
+            GrantAuthorization::Denied(GrantDenied::RateExceeded) => {
+                return CustodyAuthorization::Denied(CustodyDenied::RateExceeded);
+            }
+            GrantAuthorization::Denied(GrantDenied::Revoked) => {
+                return CustodyAuthorization::Denied(CustodyDenied::Revoked);
+            }
+            GrantAuthorization::Authorized => {}
+        }
+        if !self.chain_allowlist.iter().any(|c| c == &tx.chain) {
+            return CustodyAuthorization::Denied(CustodyDenied::ChainNotAllowed);
+        }
+        if !self.protocol_allowlist.iter().any(|p| p == &tx.protocol) {
+            return CustodyAuthorization::Denied(CustodyDenied::ProtocolNotAllowed);
+        }
+        if tx.amount_minor > self.per_tx_max_minor {
+            return CustodyAuthorization::Denied(CustodyDenied::PerTxExceeded);
+        }
+        match spent_minor.checked_add(tx.amount_minor) {
+            Some(total) if total <= self.total_budget_minor => CustodyAuthorization::Authorized,
+            _ => CustodyAuthorization::Denied(CustodyDenied::BudgetExceeded),
+        }
+    }
+
+    fn revoke(self) -> Self {
+        Self {
+            base: self.base.revoke(),
+            ..self
+        }
+    }
+}
+
+/// An owner-armed user-BOUNDED CUSTODY grant (ONCHAIN PIVOT C-0). Type-distinct from every
+/// other grant; armed ONLY by a [`GrantTier::Custody`] ceremony ([`CUSTODY_ARM_PHRASE`]).
+/// Unforgeable: PRIVATE field, no struct literal; [`arm`](Self::arm) is the ONLY ctor — a
+/// forge is a COMPILE error (PD-4). It gates the NEW
+/// [`crate::commands::authority::ChainTxCapability`]; it does NOT touch the (uninhabited)
+/// `CustodyCapability` — blanket custody stays impossible.
+///
+/// ```compile_fail
+/// let _forged = sinabro::commands::grant::CustodyGrant(todo!());
+/// ```
+#[derive(Clone, Debug)]
+pub struct CustodyGrant(CustodyGrantCore);
+
+impl CustodyGrant {
+    /// Arm a custody grant from a completed custody ceremony + bounds. Returns `None` if the
+    /// ceremony was for a different tier (no cross-tier arming) — the ONLY constructor.
+    #[must_use]
+    pub fn arm(ceremony: OwnerArmCeremony, bounds: CustodyBounds) -> Option<Self> {
+        match ceremony.tier {
+            GrantTier::Custody => Some(Self(CustodyGrantCore {
+                base: GrantCore::new(ceremony.audit_hash_32, bounds.base),
+                per_tx_max_minor: bounds.per_tx_max_minor,
+                total_budget_minor: bounds.total_budget_minor,
+                chain_allowlist: bounds.chain_allowlist,
+                protocol_allowlist: bounds.protocol_allowlist,
+            })),
+            GrantTier::Egress
+            | GrantTier::MutateLocal
+            | GrantTier::MutateDownload
+            | GrantTier::BoldSession => None,
+        }
+    }
+
+    /// Fail-closed authorization for one on-chain tx at `now`, given the txs already fired +
+    /// the amount already spent under this grant.
+    #[must_use]
+    pub fn authorize(
+        &self,
+        now_epoch_ms: u64,
+        actions_used_u32: u32,
+        spent_minor: u128,
+        tx: &ChainTxRequest,
+    ) -> CustodyAuthorization {
+        self.0
+            .authorize(now_epoch_ms, actions_used_u32, spent_minor, tx)
+    }
+
+    /// Revoke the grant (the next re-derivation denies with [`CustodyDenied::Revoked`]).
+    #[must_use]
+    pub fn revoke(self) -> Self {
+        Self(self.0.revoke())
+    }
+
+    /// The audit hash bound at arm time.
+    #[must_use]
+    pub fn audit_hash_32(&self) -> [u8; 32] {
+        self.0.base.audit_hash_32
+    }
+
+    /// The tier this grant authorizes (always [`GrantTier::Custody`]).
+    #[must_use]
+    pub const fn tier(&self) -> GrantTier {
+        GrantTier::Custody
+    }
+}
+
+/// Owner-path (ONCHAIN PIVOT C-0): arm a user-BOUNDED custody grant from a typed-phrase
+/// ceremony completed THIS turn. The SINGLE home for the custody ceremony + arm (the e0c SI-3
+/// allowlist home, `grant.rs`), used by the owner-armed `daemon chain-*` verb. `None`
+/// (fail-closed) on a wrong/replayed phrase or a tier mismatch. The unforgeable gate is the
+/// ceremony: the model holds no [`ApprovalPrompt`] and types no phrase, so it cannot reach this
+/// path — a custody grant is minted ONLY via the owner-arm ceremony.
+#[must_use]
+pub fn arm_local_custody_grant(
+    prompt: &mut ApprovalPrompt,
+    response: &str,
+    audit_hash_32: [u8; 32],
+    bounds: CustodyBounds,
+) -> Option<CustodyGrant> {
+    let ceremony = OwnerArmCeremony::complete(prompt, response, GrantTier::Custody, audit_hash_32)?;
+    CustodyGrant::arm(ceremony, bounds)
 }
 
 #[cfg(test)]
@@ -797,6 +1038,127 @@ mod tests {
         assert_eq!(
             authorize_mutate(Some(g.mutate()), 1, 2),
             AutonomyAuthorization::Denied(GrantDenied::RateExceeded)
+        );
+    }
+
+    // ---- ONCHAIN PIVOT C-0 user-BOUNDED custody --------------------------------
+
+    fn custody_ceremony() -> Option<OwnerArmCeremony> {
+        let mut p = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+        OwnerArmCeremony::complete(&mut p, CUSTODY_ARM_PHRASE, GrantTier::Custody, AUDIT)
+    }
+
+    fn custody_bounds(per_tx: u128, budget: u128) -> CustodyBounds {
+        CustodyBounds {
+            base: bounds(3, 1000),
+            per_tx_max_minor: per_tx,
+            total_budget_minor: budget,
+            chain_allowlist: vec!["ethereum".to_string(), "base".to_string()],
+            protocol_allowlist: vec!["uniswap".to_string()],
+        }
+    }
+
+    fn tx(chain: &str, protocol: &str, amount: u128) -> ChainTxRequest {
+        ChainTxRequest {
+            chain: chain.to_string(),
+            protocol: protocol.to_string(),
+            amount_minor: amount,
+        }
+    }
+
+    #[test]
+    fn custody_grant_authorizes_within_all_bounds() {
+        let g = CustodyGrant::arm(custody_ceremony().expect("c"), custody_bounds(100, 250))
+            .expect("custody arm");
+        assert_eq!(
+            g.authorize(999, 0, 0, &tx("ethereum", "uniswap", 100)),
+            CustodyAuthorization::Authorized
+        );
+        // an allowlisted second chain, within the remaining budget
+        assert_eq!(
+            g.authorize(999, 1, 150, &tx("base", "uniswap", 100)),
+            CustodyAuthorization::Authorized
+        );
+        assert_eq!(g.tier(), GrantTier::Custody);
+        assert_eq!(g.audit_hash_32(), AUDIT);
+    }
+
+    #[test]
+    fn custody_grant_denies_every_bound_breach_fail_closed() {
+        let g = CustodyGrant::arm(custody_ceremony().expect("c"), custody_bounds(100, 250))
+            .expect("arm");
+        use CustodyDenied as D;
+        // per-tx ceiling exceeded
+        assert_eq!(
+            g.authorize(999, 0, 0, &tx("ethereum", "uniswap", 101)),
+            CustodyAuthorization::Denied(D::PerTxExceeded)
+        );
+        // total budget exceeded (spent 200 + 100 > 250)
+        assert_eq!(
+            g.authorize(999, 0, 200, &tx("ethereum", "uniswap", 100)),
+            CustodyAuthorization::Denied(D::BudgetExceeded)
+        );
+        // chain not allowlisted
+        assert_eq!(
+            g.authorize(999, 0, 0, &tx("solana", "uniswap", 10)),
+            CustodyAuthorization::Denied(D::ChainNotAllowed)
+        );
+        // protocol not allowlisted
+        assert_eq!(
+            g.authorize(999, 0, 0, &tx("ethereum", "unknown-protocol", 10)),
+            CustodyAuthorization::Denied(D::ProtocolNotAllowed)
+        );
+        // expired / rate / revoked (the reused base)
+        assert_eq!(
+            g.authorize(1000, 0, 0, &tx("ethereum", "uniswap", 10)),
+            CustodyAuthorization::Denied(D::Expired)
+        );
+        assert_eq!(
+            g.authorize(999, 3, 0, &tx("ethereum", "uniswap", 10)),
+            CustodyAuthorization::Denied(D::RateExceeded)
+        );
+        assert_eq!(
+            g.clone()
+                .revoke()
+                .authorize(0, 0, 0, &tx("ethereum", "uniswap", 10)),
+            CustodyAuthorization::Denied(D::Revoked)
+        );
+        // budget overflow (checked_add) is denied — never a silent authorize
+        let gmax = CustodyGrant::arm(
+            custody_ceremony().expect("c"),
+            custody_bounds(u128::MAX, u128::MAX),
+        )
+        .expect("arm");
+        assert_eq!(
+            gmax.authorize(999, 0, u128::MAX, &tx("ethereum", "uniswap", 1)),
+            CustodyAuthorization::Denied(D::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn custody_ceremony_is_tier_distinct_from_every_other_tier() {
+        // a custody ceremony cannot arm any other grant (no cross-tier escalation)
+        assert!(EgressGrant::arm(custody_ceremony().expect("c"), bounds(1, 1)).is_none());
+        assert!(MutateGrant::arm(custody_ceremony().expect("c"), bounds(1, 1)).is_none());
+        assert!(DownloadGrant::arm(custody_ceremony().expect("c"), bounds(1, 1)).is_none());
+        assert!(arm_bold_session(custody_ceremony().expect("c"), bounds(1, 1)).is_none());
+        // and no other ceremony can arm a custody grant
+        assert!(CustodyGrant::arm(egress_ceremony().expect("c"), custody_bounds(1, 1)).is_none());
+        assert!(CustodyGrant::arm(download_ceremony().expect("c"), custody_bounds(1, 1)).is_none());
+        assert!(CustodyGrant::arm(bold_ceremony().expect("c"), custody_bounds(1, 1)).is_none());
+    }
+
+    #[test]
+    fn arm_local_custody_grant_requires_the_exact_phrase() {
+        let mut p = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+        assert!(arm_local_custody_grant(&mut p, "nope", AUDIT, custody_bounds(10, 10)).is_none());
+        let mut p2 = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+        let g =
+            arm_local_custody_grant(&mut p2, CUSTODY_ARM_PHRASE, AUDIT, custody_bounds(100, 100))
+                .expect("arm");
+        assert_eq!(
+            g.authorize(1, 0, 0, &tx("ethereum", "uniswap", 50)),
+            CustodyAuthorization::Authorized
         );
     }
 }

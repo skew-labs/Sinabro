@@ -1,15 +1,16 @@
-//! Web3 RPC reader — the agent's owner-armed CHAIN READ (E10-3b). Threat model:
+//! Web3 RPC reader — the agent's AUTONOMOUS multi-chain CHAIN READ (E10-3b, reframed by ONCHAIN
+//! PIVOT C-1). Threat model:
 //! `ops/evidence/stage_g/agent_loop/WEB3_RPC_READER_THREAT_MODEL.md` (IV-W3R1..IV-W3R9).
 //!
 //! # The one place sinabro dials a chain RPC endpoint (READ-ONLY)
 //!
-//! This OPENS the wall E6/E10 keep `(deny network*)` — but only a BOUNDED,
-//! owner-armed, READ-ONLY JSON-RPC query to the OWNER'S OWN configured endpoint.
-//! Unlike `web_fetch` (a free loop READ tool), the web3 reader is NOT a loop tool:
-//! the only entry is the owner ceremony (`daemon web3-read`), and
-//! [`render_web3_read`] REQUIRES an [`EgressCapability`] witness (minted ONLY from a
-//! valid owner-armed `EgressGrant`) — the model holds no constructor, so it cannot
-//! self-dial a chain (IV-W3R7). The agent still "cannot reach a chain on its own".
+//! This OPENS the wall E6/E10 keep `(deny network*)` — but only a BOUNDED, READ-ONLY JSON-RPC
+//! query to a chain in the OWNER-CONFIGURED registry. ONCHAIN PIVOT C-1: chain reads are now
+//! READ-class (like `web_fetch`), so [`render_web3_read`] takes a [`ReadCapability`] witness and
+//! the agent reads chains AUTONOMOUSLY via the `web3 read` loop tool — but ONLY the chains the
+//! owner configured (the [`Web3ChainRegistry`] is the bound; the agent supplies a chain NAME,
+//! never a URL — IV-W3R3). A chain WRITE stays UNREPRESENTABLE (the method enum has no write
+//! variant), so the agent reads but cannot write.
 //!
 //! Parts (always-compiled unless noted):
 //! * [`Web3RpcMethod`] — a READ-ONLY method allowlist (Solana + Sui). A WRITE method
@@ -39,7 +40,7 @@
 //! untouched: no wallet/sign/funds symbol exists here, the method allowlist blocks a
 //! chain WRITE, and `CustodyCapability` is uninhabited (PD-6).
 
-use crate::commands::authority::EgressCapability;
+use crate::commands::authority::ReadCapability;
 use crate::provider::redaction::{RedactionRequest, redact};
 
 /// The owner-arm phrase for the web3 RPC reader ceremony (distinct audit binding).
@@ -70,6 +71,11 @@ pub enum Web3RpcMethod {
     SolGetHealth,
     /// Solana `getBlockHeight` — the current block height.
     SolGetBlockHeight,
+    /// Solana `getProgramAccounts` — every account owned by a program (K-0b; the Skew
+    /// markets/positions enumerator). dataSize/memcmp filters are passed via `params`.
+    SolGetProgramAccounts,
+    /// Solana `getMultipleAccounts` — data for several addresses in one call (K-0b).
+    SolGetMultipleAccounts,
     /// Sui `suix_getBalance` — coin balance for an address.
     SuiGetBalance,
     /// Sui `sui_getObject` — an object by id.
@@ -78,6 +84,22 @@ pub enum Web3RpcMethod {
     SuiGetTransactionBlock,
     /// Sui `sui_getLatestCheckpointSequenceNumber` — the latest checkpoint.
     SuiGetLatestCheckpoint,
+    /// EVM `eth_getBalance` — native-coin balance (wei) for an address (ONCHAIN PIVOT C-1).
+    EthGetBalance,
+    /// EVM `eth_call` — a READ-ONLY contract call (no state change; the contract-state reader).
+    EthCall,
+    /// EVM `eth_getLogs` — event logs matching a filter.
+    EthGetLogs,
+    /// EVM `eth_blockNumber` — the latest block number.
+    EthBlockNumber,
+    /// EVM `eth_getTransactionReceipt` — a transaction's receipt by hash.
+    EthGetTransactionReceipt,
+    /// EVM `eth_gasPrice` — the current gas price.
+    EthGasPrice,
+    /// EVM `eth_getCode` — the bytecode at an address.
+    EthGetCode,
+    /// EVM `eth_chainId` — the chain id.
+    EthChainId,
 }
 
 impl Web3RpcMethod {
@@ -91,14 +113,25 @@ impl Web3RpcMethod {
             Self::SolGetSlot => "getSlot",
             Self::SolGetHealth => "getHealth",
             Self::SolGetBlockHeight => "getBlockHeight",
+            Self::SolGetProgramAccounts => "getProgramAccounts",
+            Self::SolGetMultipleAccounts => "getMultipleAccounts",
             Self::SuiGetBalance => "suix_getBalance",
             Self::SuiGetObject => "sui_getObject",
             Self::SuiGetTransactionBlock => "sui_getTransactionBlock",
             Self::SuiGetLatestCheckpoint => "sui_getLatestCheckpointSequenceNumber",
+            Self::EthGetBalance => "eth_getBalance",
+            Self::EthCall => "eth_call",
+            Self::EthGetLogs => "eth_getLogs",
+            Self::EthBlockNumber => "eth_blockNumber",
+            Self::EthGetTransactionReceipt => "eth_getTransactionReceipt",
+            Self::EthGasPrice => "eth_gasPrice",
+            Self::EthGetCode => "eth_getCode",
+            Self::EthChainId => "eth_chainId",
         }
     }
 
-    /// The chain label (`solana` / `sui`) for the render.
+    /// The chain FAMILY (`solana` / `sui` / `evm`) — selects which configured chain a
+    /// method may run against (an EVM method runs only on an `evm`-family chain).
     #[must_use]
     pub const fn chain(self) -> &'static str {
         match self {
@@ -107,11 +140,21 @@ impl Web3RpcMethod {
             | Self::SolGetSignatureStatuses
             | Self::SolGetSlot
             | Self::SolGetHealth
-            | Self::SolGetBlockHeight => "solana",
+            | Self::SolGetBlockHeight
+            | Self::SolGetProgramAccounts
+            | Self::SolGetMultipleAccounts => "solana",
             Self::SuiGetBalance
             | Self::SuiGetObject
             | Self::SuiGetTransactionBlock
             | Self::SuiGetLatestCheckpoint => "sui",
+            Self::EthGetBalance
+            | Self::EthCall
+            | Self::EthGetLogs
+            | Self::EthBlockNumber
+            | Self::EthGetTransactionReceipt
+            | Self::EthGasPrice
+            | Self::EthGetCode
+            | Self::EthChainId => "evm",
         }
     }
 
@@ -125,16 +168,26 @@ impl Web3RpcMethod {
             Self::SolGetSlot => "sol_slot",
             Self::SolGetHealth => "sol_health",
             Self::SolGetBlockHeight => "sol_block_height",
+            Self::SolGetProgramAccounts => "sol_program_accounts",
+            Self::SolGetMultipleAccounts => "sol_multi_account",
             Self::SuiGetBalance => "sui_balance",
             Self::SuiGetObject => "sui_object",
             Self::SuiGetTransactionBlock => "sui_tx",
             Self::SuiGetLatestCheckpoint => "sui_checkpoint",
+            Self::EthGetBalance => "eth_balance",
+            Self::EthCall => "eth_call",
+            Self::EthGetLogs => "eth_logs",
+            Self::EthBlockNumber => "eth_block",
+            Self::EthGetTransactionReceipt => "eth_receipt",
+            Self::EthGasPrice => "eth_gas",
+            Self::EthGetCode => "eth_code",
+            Self::EthChainId => "eth_chain_id",
         }
     }
 
     /// Every read method (for the honest "available methods" render + parse).
     #[must_use]
-    pub const fn all() -> [Self; 10] {
+    pub const fn all() -> [Self; 20] {
         [
             Self::SolGetBalance,
             Self::SolGetAccountInfo,
@@ -142,10 +195,20 @@ impl Web3RpcMethod {
             Self::SolGetSlot,
             Self::SolGetHealth,
             Self::SolGetBlockHeight,
+            Self::SolGetProgramAccounts,
+            Self::SolGetMultipleAccounts,
             Self::SuiGetBalance,
             Self::SuiGetObject,
             Self::SuiGetTransactionBlock,
             Self::SuiGetLatestCheckpoint,
+            Self::EthGetBalance,
+            Self::EthCall,
+            Self::EthGetLogs,
+            Self::EthBlockNumber,
+            Self::EthGetTransactionReceipt,
+            Self::EthGasPrice,
+            Self::EthGetCode,
+            Self::EthChainId,
         ]
     }
 
@@ -199,6 +262,12 @@ pub enum Web3Denied {
     OverCap,
     /// The response was secret-shaped — WITHHELD before it surfaced (IV-W3R5).
     SecretShapedResult,
+    /// The requested chain name is not in the owner-configured registry (ONCHAIN PIVOT C-1) — the
+    /// agent may read ONLY chains the owner configured (nothing to dial otherwise).
+    ChainNotConfigured,
+    /// The method's family does not match the requested chain's family (e.g. an `eth_*` method on a
+    /// `solana`-family chain) — fail-closed, never dialed.
+    MethodChainMismatch,
 }
 
 impl Web3Denied {
@@ -219,6 +288,8 @@ impl Web3Denied {
             Self::HttpStatus => "web3.transport.http_status",
             Self::OverCap => "web3.transport.over_cap",
             Self::SecretShapedResult => "web3.result.withheld_secret",
+            Self::ChainNotConfigured => "web3.chain.not_configured",
+            Self::MethodChainMismatch => "web3.chain.method_mismatch",
         }
     }
 }
@@ -521,48 +592,154 @@ fn redact_passes(text: &str) -> bool {
     )
 }
 
-/// The SHARED web3-read pipeline (IV-W3R1..IV-W3R9) — the one place the `daemon
-/// web3-read` verb runs an RPC read. It REQUIRES an [`EgressCapability`] witness (the
-/// owner-arm proof at the type level — this fn is UNREACHABLE without one, IV-W3R7).
-/// Order:
+/// One owner-configured chain the agent may READ (ONCHAIN PIVOT C-1): a stable `name` (the token
+/// the agent / CLI selects), its `family` (`solana` / `sui` / `evm` — a method runs only on a
+/// matching family), and the SSRF-walled `endpoint`. Built ONLY from owner config; the agent
+/// supplies a chain NAME, never a URL (the SSRF posture, IV-W3R3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Web3ChainEntry {
+    name: String,
+    family: String,
+    endpoint: String,
+}
+
+impl Web3ChainEntry {
+    /// Build an entry from owner config. Name + family are lowercased for case-insensitive
+    /// lookup; the endpoint is kept verbatim (the wall runs in [`render_web3_read`]).
+    #[must_use]
+    pub fn new(name: &str, family: &str, endpoint: &str) -> Self {
+        Self {
+            name: name.trim().to_ascii_lowercase(),
+            family: family.trim().to_ascii_lowercase(),
+            endpoint: endpoint.trim().to_string(),
+        }
+    }
+    /// The chain name (lowercased).
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// The chain family (`solana` / `sui` / `evm`).
+    #[must_use]
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+    /// The configured endpoint (pre-classify; the SSRF wall runs in render).
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+/// The owner-configured multi-chain READ registry (ONCHAIN PIVOT C-1). Maps a chain NAME to its
+/// family + SSRF-walled endpoint. The agent may read ONLY the chains the owner configured here —
+/// this is the bound (the agent supplies a chain name, never a URL).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Web3ChainRegistry {
+    entries: Vec<Web3ChainEntry>,
+}
+
+impl Web3ChainRegistry {
+    /// Build from owner-config entries. An entry with an empty field is dropped, and a later
+    /// duplicate of a name is ignored (first wins) — fail-closed, deterministic.
+    #[must_use]
+    pub fn from_entries(entries: Vec<Web3ChainEntry>) -> Self {
+        let mut deduped: Vec<Web3ChainEntry> = Vec::new();
+        for e in entries {
+            if e.name.is_empty() || e.family.is_empty() || e.endpoint.is_empty() {
+                continue;
+            }
+            if deduped.iter().any(|d| d.name == e.name) {
+                continue;
+            }
+            deduped.push(e);
+        }
+        Self { entries: deduped }
+    }
+    /// Look up a chain by name (case-insensitive). `None` ⇒ not owner-configured.
+    #[must_use]
+    pub fn lookup(&self, chain: &str) -> Option<&Web3ChainEntry> {
+        let c = chain.trim().to_ascii_lowercase();
+        self.entries.iter().find(|e| e.name == c)
+    }
+    /// The configured chain names (for the honest usage render). NEVER the endpoints.
+    #[must_use]
+    pub fn chain_names(&self) -> String {
+        self.entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    /// Whether any chain is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The SHARED multi-chain web3-read pipeline (IV-W3R1..IV-W3R9; ONCHAIN PIVOT C-1) — the one place
+/// a web3 RPC read runs. It is a typed READ: it requires a [`ReadCapability`] witness (handed out
+/// freely — chain reads are READ-class, like `web_fetch`), so the agent can read chains
+/// AUTONOMOUSLY via the loop tool, but ONLY the chains the owner configured (the registry is the
+/// bound; the agent supplies a chain NAME, never a URL — IV-W3R3). Order:
 ///
-/// 1. endpoint presence — `None` ⇒ `NoEndpointConfigured` (the owner set nothing).
-/// 2. [`classify_rpc_endpoint`] — the SSRF wall on the CONFIGURED endpoint (deny ⇒
-///    typed render). There is no arbitrary-URL argument (IV-W3R3).
-/// 3. `redact(params)` — the OUTBOUND params pass the canonical secret gate BEFORE the
-///    send; a secret-shaped param ⇒ WITHHELD (IV-W3R4). This is the SI-2 choke for the
-///    POST body (the method is a fixed read-only literal).
-/// 4. `port.call` — the secret-zero POST (`None` ⇒ `TransportNotCompiled`).
-/// 5. `redact(response)` — the UNTRUSTED result passes the secret gate; a secret-shaped
-///    result ⇒ WITHHELD (IV-W3R5).
-/// 6. metadata + redacted-result render — chain / method / host / status + the bounded
-///    redacted result; the full URL (which may embed an owner API key) is NEVER shown.
+/// 1. registry lookup — the requested `chain` must be owner-configured (`None` ⇒
+///    `ChainNotConfigured`).
+/// 2. family match — the method's family must match the chain's family (an `eth_*` method only on
+///    an `evm` chain), else `MethodChainMismatch`.
+/// 3. [`classify_rpc_endpoint`] — the SSRF wall on the configured endpoint (deny ⇒ typed render).
+/// 4. `redact(params)` — the OUTBOUND params pass the canonical secret gate BEFORE the send; a
+///    secret-shaped param ⇒ WITHHELD (IV-W3R4). The method is a fixed read-only literal.
+/// 5. `port.call` — the secret-zero POST (`None` ⇒ `TransportNotCompiled`).
+/// 6. `redact(response)` + metadata render — a secret-shaped result ⇒ WITHHELD (IV-W3R5); the
+///    full URL (which may embed an owner API key) is NEVER shown.
 #[must_use]
 pub fn render_web3_read(
-    _cap: &EgressCapability,
+    _read: &ReadCapability,
     port: Option<&dyn Web3RpcPort>,
-    configured_endpoint: Option<&str>,
+    registry: &Web3ChainRegistry,
+    chain: &str,
     method: Web3RpcMethod,
     params_json: &str,
 ) -> Web3RpcRender {
-    // 1. the owner-configured endpoint (no arbitrary URL — config only, IV-W3R3).
-    let Some(endpoint) = configured_endpoint.map(str::trim).filter(|e| !e.is_empty()) else {
+    // 1. the requested chain must be owner-configured (the bound; no arbitrary URL, IV-W3R3).
+    let Some(entry) = registry.lookup(chain) else {
+        let names = registry.chain_names();
         return Web3RpcRender {
-            rendered:
-                "web3 read: no RPC endpoint configured (set web3_rpc_endpoint in config first)"
-                    .to_string(),
-            class_label: Web3Denied::NoEndpointConfigured.class_label(),
+            rendered: format!(
+                "web3 read: chain '{}' not configured (owner-configured chains: {})",
+                chain.trim(),
+                if names.is_empty() { "none" } else { &names }
+            ),
+            class_label: Web3Denied::ChainNotConfigured.class_label(),
             ok: false,
         };
     };
-    // 2. SSRF wall on the configured endpoint.
-    let safe = match classify_rpc_endpoint(endpoint) {
+    // 2. the method's family must match the chain's family (an eth_* method only on evm).
+    if method.chain() != entry.family() {
+        return Web3RpcRender {
+            rendered: format!(
+                "web3 read denied ({}): method {} is {}-family, chain '{}' is {}-family",
+                Web3Denied::MethodChainMismatch.class_label(),
+                method.wire_str(),
+                method.chain(),
+                entry.name(),
+                entry.family(),
+            ),
+            class_label: Web3Denied::MethodChainMismatch.class_label(),
+            ok: false,
+        };
+    }
+    // 3. SSRF wall on the configured endpoint.
+    let safe = match classify_rpc_endpoint(entry.endpoint()) {
         Ok(safe) => safe,
         Err(deny) => {
             return Web3RpcRender {
                 rendered: format!(
-                    "web3 read denied ({}): configured endpoint",
-                    deny.class_label()
+                    "web3 read denied ({}): configured endpoint for '{}'",
+                    deny.class_label(),
+                    entry.name()
                 ),
                 class_label: deny.class_label(),
                 ok: false,
@@ -634,6 +811,82 @@ pub fn render_web3_read(
     }
 }
 
+/// The bulk-read result cap (chars) for the DATA path — larger than the DISPLAY
+/// [`WEB3_RESULT_CHARS`] so a caller can PARSE a multi-account `getProgramAccounts` result, still
+/// bounded well under the transport's [`WEB3_RPC_BODY_CAP_BYTES`] (the redact wall + the byte cap
+/// remain the security bound on untrusted-RPC bytes).
+pub const WEB3_BULK_RESULT_CHARS: usize = 65_536;
+
+/// The raw, redacted, bounded result of a web3 READ — the DATA path (no display prefix).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Web3RpcRawRead {
+    /// The redacted RAW JSON body (capped at the caller's `max_chars`), or `None` on ANY
+    /// deny / withhold (fail-closed — never a fabricated body).
+    pub body: Option<String>,
+    /// A stable, secret-free class label.
+    pub class_label: &'static str,
+    /// Whether the read succeeded.
+    pub ok: bool,
+}
+
+/// The RAW redacted body of a permitted web3 READ (K-0b: the bounded-bulk-read DATA path; the
+/// sibling of the DISPLAY [`render_web3_read`], which `render_web3_read` is NOT modified by). It runs
+/// the SAME pipeline through the SAME shared security primitives — `registry.lookup` → method/chain
+/// family match → `classify_rpc_endpoint` SSRF wall → `redact_passes` on the OUTBOUND params AND the
+/// UNTRUSTED result → `port.call` — but returns the redacted RAW JSON body (no `"web3 read … result:"`
+/// prefix) capped at `max_chars`, so a caller can `serde_json`-parse a bulk `getProgramAccounts`.
+/// READ-class (`&ReadCapability`); `ok=false` + no body on not-configured / family-mismatch /
+/// SSRF-deny / withheld-secret / not-compiled / transport-deny.
+#[must_use]
+pub fn web3_read_raw(
+    _read: &ReadCapability,
+    port: Option<&dyn Web3RpcPort>,
+    registry: &Web3ChainRegistry,
+    chain: &str,
+    method: Web3RpcMethod,
+    params_json: &str,
+    max_chars: usize,
+) -> Web3RpcRawRead {
+    let deny = |class_label: &'static str| Web3RpcRawRead {
+        body: None,
+        class_label,
+        ok: false,
+    };
+    // 1. owner-configured chain only (no arbitrary URL). 2. method/chain family match.
+    let Some(entry) = registry.lookup(chain) else {
+        return deny(Web3Denied::ChainNotConfigured.class_label());
+    };
+    if method.chain() != entry.family() {
+        return deny(Web3Denied::MethodChainMismatch.class_label());
+    }
+    // 3. SSRF wall on the configured endpoint, BEFORE any dial.
+    let safe = match classify_rpc_endpoint(entry.endpoint()) {
+        Ok(safe) => safe,
+        Err(deny_kind) => return deny(deny_kind.class_label()),
+    };
+    // 4. outbound params pass redact() BEFORE the send (secret-shaped ⇒ withheld, never sent).
+    if !redact_passes(params_json) {
+        return deny(Web3Denied::SecretShapedParams.class_label());
+    }
+    // 5. the secret-zero call. `None` port (default build) ⇒ honest not-compiled.
+    let Some(port) = port else {
+        return deny(Web3Denied::TransportNotCompiled.class_label());
+    };
+    let response = match port.call(&safe, method, params_json) {
+        Ok(response) => response,
+        Err(deny_kind) => return deny(deny_kind.class_label()),
+    };
+    // 6. redact the UNTRUSTED result BEFORE it surfaces (withheld wholesale if secret-shaped).
+    if !redact_passes(&response.body) {
+        return deny(Web3Denied::SecretShapedResult.class_label());
+    }
+    Web3RpcRawRead {
+        body: Some(response.body.chars().take(max_chars).collect()),
+        class_label: "web3.read.ok",
+        ok: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,7 +898,11 @@ mod tests {
         for m in Web3RpcMethod::all() {
             assert_eq!(Web3RpcMethod::parse(m.token()), Some(m), "{}", m.token());
             assert!(!m.wire_str().is_empty());
-            assert!(m.chain() == "solana" || m.chain() == "sui");
+            assert!(
+                matches!(m.chain(), "solana" | "sui" | "evm"),
+                "{}",
+                m.chain()
+            );
         }
         // a WRITE method name is NOT a token ⇒ None (the enum has no write variant).
         for write in [
@@ -737,17 +994,22 @@ mod tests {
             body: body.to_string(),
         }
     }
+    /// A one-chain registry naming `solana` (solana-family) at `endpoint` (C-1 test helper).
+    fn sol_reg(endpoint: &str) -> Web3ChainRegistry {
+        Web3ChainRegistry::from_entries(vec![Web3ChainEntry::new("solana", "solana", endpoint)])
+    }
 
     #[test]
     fn glue_benign_read_is_ok() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         let port = mock(Ok(ok_response(
             "{\"jsonrpc\":\"2.0\",\"result\":{\"value\":12345},\"id\":1}",
         )));
         let out = render_web3_read(
-            &cap,
+            &read,
             Some(&port),
-            Some("https://api.testnet.solana.com"),
+            &sol_reg("https://api.testnet.solana.com"),
+            "solana",
             Web3RpcMethod::SolGetBalance,
             "[\"SoMeBase58Addr\"]",
         );
@@ -761,19 +1023,29 @@ mod tests {
     }
 
     #[test]
-    fn glue_no_endpoint_is_honest_deny() {
-        let cap = crate::commands::authority::test_egress_capability();
+    fn glue_unconfigured_chain_is_honest_deny() {
+        let read = ReadCapability::granted();
         let port = mock(Ok(ok_response("{}")));
-        for ep in [None, Some(""), Some("   ")] {
-            let out = render_web3_read(&cap, Some(&port), ep, Web3RpcMethod::SolGetSlot, "[]");
+        // an empty registry, and a populated registry missing the requested chain, both deny.
+        let empty = Web3ChainRegistry::default();
+        let other = sol_reg("https://api.testnet.solana.com");
+        for (reg, chain) in [(&empty, "solana"), (&other, "ethereum")] {
+            let out = render_web3_read(
+                &read,
+                Some(&port),
+                reg,
+                chain,
+                Web3RpcMethod::SolGetSlot,
+                "[]",
+            );
             assert!(!out.ok);
-            assert_eq!(out.class_label, "web3.endpoint.not_configured");
+            assert_eq!(out.class_label, "web3.chain.not_configured");
         }
     }
 
     #[test]
     fn glue_ssrf_endpoint_never_reaches_transport() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         // a port that PANICS if called proves the SSRF deny short-circuits.
         struct NeverPort;
         impl Web3RpcPort for NeverPort {
@@ -792,9 +1064,10 @@ mod tests {
             ("https://localhost:8899", "web3.endpoint.localhost_name"),
         ] {
             let out = render_web3_read(
-                &cap,
+                &read,
                 Some(&NeverPort),
-                Some(ep),
+                &sol_reg(ep),
+                "solana",
                 Web3RpcMethod::SolGetBalance,
                 "[]",
             );
@@ -805,7 +1078,7 @@ mod tests {
 
     #[test]
     fn glue_secret_shaped_params_withheld_before_send() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         struct NeverPort;
         impl Web3RpcPort for NeverPort {
             fn call(
@@ -819,9 +1092,10 @@ mod tests {
         }
         // a secret-shaped params blob trips looks_like_secret on `private_key`.
         let out = render_web3_read(
-            &cap,
+            &read,
             Some(&NeverPort),
-            Some("https://api.testnet.solana.com"),
+            &sol_reg("https://api.testnet.solana.com"),
+            "solana",
             Web3RpcMethod::SolGetAccountInfo,
             "[\"x\", {\"private_key\": \"do-not-leak-this-secret-blob-value\"}]",
         );
@@ -832,14 +1106,15 @@ mod tests {
 
     #[test]
     fn glue_secret_shaped_result_withheld() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         let port = mock(Ok(ok_response(
             "node config: private_key = leaked-secret-material-do-not-surface",
         )));
         let out = render_web3_read(
-            &cap,
+            &read,
             Some(&port),
-            Some("https://api.testnet.solana.com"),
+            &sol_reg("https://api.testnet.solana.com"),
+            "solana",
             Web3RpcMethod::SolGetHealth,
             "[]",
         );
@@ -850,11 +1125,12 @@ mod tests {
 
     #[test]
     fn glue_none_port_is_honest_not_compiled() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         let out = render_web3_read(
-            &cap,
+            &read,
             None,
-            Some("https://api.testnet.solana.com"),
+            &sol_reg("https://api.testnet.solana.com"),
+            "solana",
             Web3RpcMethod::SolGetSlot,
             "[]",
         );
@@ -865,7 +1141,7 @@ mod tests {
 
     #[test]
     fn glue_transport_denies_pass_through() {
-        let cap = crate::commands::authority::test_egress_capability();
+        let read = ReadCapability::granted();
         for (resp, label) in [
             (Err(Web3Denied::HttpStatus), "web3.transport.http_status"),
             (Err(Web3Denied::Unreachable), "web3.transport.unreachable"),
@@ -873,9 +1149,10 @@ mod tests {
         ] {
             let port = mock(resp);
             let out = render_web3_read(
-                &cap,
+                &read,
                 Some(&port),
-                Some("https://api.testnet.solana.com"),
+                &sol_reg("https://api.testnet.solana.com"),
+                "solana",
                 Web3RpcMethod::SolGetSlot,
                 "[]",
             );
@@ -911,5 +1188,94 @@ mod tests {
             "web3-egress build wires a live transport"
         );
         assert!(Web3RpcSeam::inert().port().is_none());
+    }
+
+    #[test]
+    fn evm_read_runs_on_an_evm_chain() {
+        let read = ReadCapability::granted();
+        let port = mock(Ok(ok_response(
+            "{\"jsonrpc\":\"2.0\",\"result\":\"0x1bc16d674ec80000\",\"id\":1}",
+        )));
+        let reg = Web3ChainRegistry::from_entries(vec![Web3ChainEntry::new(
+            "ethereum",
+            "evm",
+            "https://eth.testnet.example",
+        )]);
+        let out = render_web3_read(
+            &read,
+            Some(&port),
+            &reg,
+            "ethereum",
+            Web3RpcMethod::EthGetBalance,
+            "[\"0xabc\", \"latest\"]",
+        );
+        assert!(out.ok, "{}", out.rendered);
+        assert!(out.rendered.contains("evm/eth_getBalance"));
+    }
+
+    #[test]
+    fn method_family_must_match_chain_family() {
+        let read = ReadCapability::granted();
+        struct NeverPort;
+        impl Web3RpcPort for NeverPort {
+            fn call(
+                &self,
+                _s: &SafeRpcUrl,
+                _m: Web3RpcMethod,
+                _p: &str,
+            ) -> Result<Web3RpcResponse, Web3Denied> {
+                unreachable!("a family mismatch must never reach the transport")
+            }
+        }
+        // an EVM method against a solana-family chain ⇒ MethodChainMismatch, never dialed.
+        let out = render_web3_read(
+            &read,
+            Some(&NeverPort),
+            &sol_reg("https://api.testnet.solana.com"),
+            "solana",
+            Web3RpcMethod::EthGetBalance,
+            "[]",
+        );
+        assert!(!out.ok);
+        assert_eq!(out.class_label, "web3.chain.method_mismatch");
+    }
+
+    #[test]
+    fn registry_routes_each_chain_to_its_own_endpoint() {
+        let reg = Web3ChainRegistry::from_entries(vec![
+            Web3ChainEntry::new("ethereum", "evm", "https://eth.example"),
+            Web3ChainEntry::new("base", "evm", "https://base.example"),
+            // a later duplicate of `ethereum` is ignored (first wins).
+            Web3ChainEntry::new("ethereum", "evm", "https://override.example"),
+            // an entry with an empty field is dropped.
+            Web3ChainEntry::new("", "evm", "https://empty.example"),
+        ]);
+        assert!(matches!(reg.lookup("ethereum"), Some(e) if e.endpoint() == "https://eth.example"));
+        // case-insensitive lookup.
+        assert!(matches!(reg.lookup("BASE"), Some(e) if e.endpoint() == "https://base.example"));
+        assert!(reg.lookup("arbitrum").is_none());
+        assert_eq!(reg.chain_names(), "ethereum base");
+    }
+
+    #[test]
+    fn no_chain_write_method_is_representable() {
+        // the read enum has NO write variant — parse() of any write name is None (a chain WRITE
+        // cannot be issued through this path; structural, IV-W3R1).
+        for write in [
+            "eth_sendRawTransaction",
+            "eth_sendTransaction",
+            "sendTransaction",
+            "sui_executeTransactionBlock",
+        ] {
+            assert!(Web3RpcMethod::parse(write).is_none(), "{write}");
+        }
+        assert_eq!(
+            Web3RpcMethod::parse("eth_balance"),
+            Some(Web3RpcMethod::EthGetBalance)
+        );
+        assert_eq!(
+            Web3RpcMethod::parse("eth_call"),
+            Some(Web3RpcMethod::EthCall)
+        );
     }
 }

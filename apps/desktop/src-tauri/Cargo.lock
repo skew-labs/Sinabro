@@ -4655,6 +4655,8 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm-siv",
  "crossterm 0.29.0",
+ "curve25519-dalek",
+ "ed25519-dalek",
  "getrandom 0.2.17",
  "libc",
  "mnemos-a-core",
@@ -4676,6 +4678,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "toml 0.8.2",
+ "zeroize",
 ]
 
 [[package]]

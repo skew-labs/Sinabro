@@ -690,6 +690,67 @@ impl RedactedChatReply {
     }
 }
 
+/// K-5e — a Skew trade PROPOSAL surfaced as the 7-field Telegram approval card (the owner sees
+/// the deterministic K-1 oracle's verdict on their phone). It SURFACES the verdict + the bounds;
+/// it AUTHORIZES NOTHING (IV-FG11): the card is delivered ONLY through the SOLE redact wall
+/// [`RedactedChatReply::build`] (a secret-shaped field ⇒ the WHOLE card is WITHHELD), the owner
+/// replies `approve <id16>` / `deny <id16>` routed through the EXISTING
+/// [`RemoteApprovalCoordinator::ingest_update`] (⑪), and the REAL grant is the owner's
+/// typed-phrase ceremony — never this card. There is NO sign / mint / broadcast / custody symbol
+/// here. Devnet; mainnet = a further owner arm; custody/funds reach value ONLY via the K-2 path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TradeCard {
+    /// The 16-hex pending-action id the owner approves/denies (binds the reply to THIS proposal).
+    pub action_id16: String,
+    /// The proposed action (e.g. `open-account` / `deposit 1000000`).
+    pub action: String,
+    /// The target chain (devnet; mainnet = a further owner arm).
+    pub network: String,
+    /// The target protocol (`skew`).
+    pub protocol: String,
+    /// The DETERMINISTIC K-1 oracle verdict (`AFFORDABLE & IN-BOUNDS` / `DENIED(reason)`).
+    pub oracle_verdict: String,
+    /// The re-derived worst-case escrow for this trade (settlement atoms).
+    pub escrow_minor: u128,
+    /// The total budget (atoms) — escrow ≤ budget is the provable-max-loss bound.
+    pub budget_minor: u128,
+}
+
+impl TradeCard {
+    /// The 7-field card text (pure composition — surfaces the verdict, carries NO secret and NO
+    /// authorization). The owner reads it and replies approve/deny; the card itself moves nothing.
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!(
+            "skew trade proposal (devnet)\n\
+             action:   {}\n\
+             network:  {}\n\
+             protocol: {}\n\
+             oracle:   {}\n\
+             escrow:   {} atoms\n\
+             budget:   {} atoms (escrow <= budget = provable max loss)\n\
+             reply: approve {}  /  deny {}  — the card authorizes nothing; the owner arm is the ceremony",
+            self.action,
+            self.network,
+            self.protocol,
+            self.oracle_verdict,
+            self.escrow_minor,
+            self.budget_minor,
+            self.action_id16,
+            self.action_id16,
+        )
+    }
+
+    /// Deliver the card through the SOLE redact wall [`RedactedChatReply::build`] — a secret-shaped
+    /// field ⇒ the WHOLE card is WITHHELD (`None`, IV-RC3 / IV-FG11). The card authorizes nothing;
+    /// the owner's approve/deny routes through the EXISTING `ingest_update`, and the real grant is
+    /// the owner ceremony. NO sign / mint / broadcast / custody constructor is reachable here.
+    #[must_use]
+    pub fn into_redacted_reply(&self) -> Option<RedactedChatReply> {
+        RedactedChatReply::build(&self.render())
+    }
+}
+
 /// A source of RAW inbound owner-or-not updates for ONE chat poll window
 /// (mirroring [`InboundPollSource`], but returning the UN-classified
 /// [`InboundUpdate`]s so `serve_chat_cycle` owns the classify). The production
@@ -1933,6 +1994,64 @@ mod tests {
         assert!(
             *replied.lock().unwrap(),
             "the chat cycle replied under the real spawn pump"
+        );
+    }
+
+    // ── K-5e: the Telegram trade card (the 7-field approval card; surfaces the oracle, authorizes nothing) ──
+    #[test]
+    fn trade_card_renders_seven_fields_and_routes_through_the_redact_wall() {
+        let card = TradeCard {
+            action_id16: "a1b2c3d4e5f60718".to_string(),
+            action: "open-account".to_string(),
+            network: "solana-devnet".to_string(),
+            protocol: "skew".to_string(),
+            oracle_verdict: "AFFORDABLE & IN-BOUNDS".to_string(),
+            escrow_minor: 0,
+            budget_minor: 1_000_000_000,
+        };
+        let text = card.render();
+        // the 7-field envelope + the oracle verdict + the approve/deny id16 (the surface, IV-FG11).
+        for needle in [
+            "action:",
+            "network:",
+            "protocol:",
+            "oracle:",
+            "escrow:",
+            "budget:",
+            "AFFORDABLE & IN-BOUNDS",
+            "approve a1b2c3d4e5f60718",
+            "deny a1b2c3d4e5f60718",
+            "the card authorizes nothing",
+        ] {
+            assert!(text.contains(needle), "trade card missing `{needle}`");
+        }
+        // secret-free ⇒ delivered ONLY through the SOLE redact wall, carrying the card verbatim.
+        let reply = card
+            .into_redacted_reply()
+            .expect("a secret-free card builds through the redact wall");
+        assert_eq!(
+            reply.text(),
+            text,
+            "the redacted reply carries the card text verbatim"
+        );
+    }
+
+    #[test]
+    fn trade_card_with_a_secret_shaped_field_is_withheld_whole() {
+        // a secret-shaped field (here the verdict) ⇒ the WHOLE card is WITHHELD by the SAME
+        // redact wall every chat reply passes (IV-RC3 / IV-FG11) — never partially echoed.
+        let card = TradeCard {
+            action_id16: "00112233aabbccdd".to_string(),
+            action: "deposit 1000000".to_string(),
+            network: "solana-devnet".to_string(),
+            protocol: "skew".to_string(),
+            oracle_verdict: CHAT_SECRET.to_string(),
+            escrow_minor: 1_000_000,
+            budget_minor: 1_000_000_000,
+        };
+        assert!(
+            card.into_redacted_reply().is_none(),
+            "a secret-shaped trade card is withheld whole, never sent"
         );
     }
 }

@@ -62,10 +62,23 @@ use mnemos_m_agent::{
 /// the m-agent [`ToolLoop`] cap.
 pub const AGENT_LOOP_MAX_ITER: u8 = 5;
 
-/// Per-invocation token cap (input + output across all turns) — feeds the
-/// m-agent [`DailyTokenBudget`]. Exceeding it stops the loop before any
-/// further transport call.
+/// Per-invocation token cap (input + output across all turns) for the BOUNDED
+/// AUTONOMOUS loop (the daemon runner) — feeds the m-agent [`DailyTokenBudget`].
+/// Exceeding it stops the loop before any further transport call. The INTERACTIVE
+/// chat uses [`CHAT_TOKEN_CAP`] instead (P0 #1).
 pub const AGENT_LOOP_TOKEN_CAP: u32 = 20_000;
+
+/// INTERACTIVE CHAT token cap (input + output across all turns) — P0 #1, owner
+/// 2026-06-30 ("토큰 풀어"). The interactive `provider consult` (desktop / CLI chat)
+/// runs with a MUCH larger budget than the bounded autonomous loop so a conversation
+/// with long context / pasted material does NOT die at 20k. The AUTONOMOUS daemon loop
+/// KEEPS [`AGENT_LOOP_TOKEN_CAP`] (bounded autonomy — unchanged). Still bounded (no
+/// runaway): one consult, not a whole session.
+pub const CHAT_TOKEN_CAP: u32 = 256_000;
+
+/// INTERACTIVE CHAT iteration cap — a bit more agentic headroom than the autonomous
+/// [`AGENT_LOOP_MAX_ITER`] (the READ wall [`AGENT_LOOP_MAX_READS`] is unchanged).
+pub const CHAT_MAX_ITER: u8 = 8;
 
 /// IV5's K: at most this many SUCCESSFUL content reads enter the context.
 /// Deliberately below [`AGENT_LOOP_MAX_ITER`] so the read wall is reachable
@@ -94,7 +107,8 @@ query), a local source tree \
 diagnostics (lsp diagnostics), read-only tools on a configured local MCP \
 server (mcp), the local git repo (git status/diff/log/show/blame), a \
 workspace package's tests (test run), a regex search across the workspace \
-source (search), and a semantic codebase index (codebase) before answering. \
+source (search), a semantic codebase index (codebase), and the Skew capability catalog \
+(skew capabilities) before answering. \
 Reply with EXACTLY ONE line in one of these forms and nothing else:\n\
 TOOL: memory index\n\
 TOOL: memory read <id>\n\
@@ -111,12 +125,17 @@ TOOL: git <subcommand> [args]\n\
 TOOL: test run <pkg>\n\
 TOOL: search <regex>\n\
 TOOL: codebase <query>\n\
+TOOL: skew capabilities\n\
 ANSWER: <your final answer>\n\
 Rules: each tool result is appended to your next user message; you have at \
-most a few turns and a few reads; ONLY the fifteen read-only tools above exist \
+most a few turns and a few reads; ONLY the sixteen read-only tools above exist \
 — proposing any other tool or side effect (write/exec/delete) is denied and \
 ends the loop; when you have enough context, reply with ANSWER. Every turn, \
 reply with TOOL: ... or ANSWER: ... only.\n\
+SKEW CAPABILITIES lists the full Skew Solana derivatives surface (perp / OTC / \
+options / digital / spread / straddle / secondary market / permissionless \
+listing / keeper) that Sinabro knows — a pure READ (money 0). Trading any of \
+them is a separate owner-armed bounded action, NEVER originated from this loop.\n\
 WEB FETCH is a gated public READ: https only (http / an IP address / \
 localhost / a chain-RPC host are denied), no login or header is sent, \
 redirects are not followed, the page is redacted and quote-limited, and a web \
@@ -568,6 +587,12 @@ enum ParsedTurn<'a> {
     /// index (local embeddings — they never leave the box; each chunk redacted). The 15th
     /// typed-READ tool. Field: the natural-language / identifier query.
     ToolCodebase(&'a str),
+    /// `TOOL: skew capabilities` (K-0a-3) — read the Skew capability catalog (the
+    /// `skew_catalog` single source of truth) mid-reasoning: a PURE static READ (no key,
+    /// no network, money 0) so the agent KNOWS the full Skew Solana surface (perp / OTC /
+    /// options / secondary market / permissionless listing / keeper). Trading is NOT a loop
+    /// tool — it is a separate owner-armed bounded action (K-2). The 16th typed-READ tool.
+    ToolSkewCapabilities,
     /// A `TOOL:` line outside the closed set (denied, IV6).
     ToolUnknown(&'a str),
     /// Anything else: the final answer (`ANSWER:` prefix stripped if given).
@@ -796,6 +821,14 @@ fn parse_turn(text: &str) -> ParsedTurn<'_> {
             if !query.is_empty() {
                 return ParsedTurn::ToolCodebase(query);
             }
+        }
+        // K-0a-3 `skew capabilities` — the agent reads the Skew capability catalog (the
+        // `skew_catalog` single source of truth) mid-reasoning. A pure static READ. Any
+        // OTHER `skew …` (`skew capability <name>`, `skew trade …`, a bare `skew`) falls
+        // through to ToolUnknown (denied; the loop can READ the surface but NEVER originate
+        // a trade — trading is a separate owner-armed bounded action, K-2).
+        if lower == "skew capabilities" {
+            return ParsedTurn::ToolSkewCapabilities;
         }
         return ParsedTurn::ToolUnknown(first);
     }
@@ -1060,6 +1093,29 @@ fn frontier_audit_detect_result(_read: ReadCapability, path: &str) -> (String, b
     let rendered = crate::audit::detect::report_lines(&report).join("\n");
     (
         truncate_char_safe(&rendered, AGENT_LOOP_TOOL_RESULT_CAP_BYTES),
+        true,
+    )
+}
+
+/// `skew capabilities` for a FRONTIER turn (K-0a-3): the agent reads the Skew capability
+/// catalog (the [`crate::skew_catalog`] single source of truth) mid-reasoning — a PURE static
+/// READ (no key, no network, money 0). The rendered catalog is redact-belted before it enters
+/// the prompt (SI-2, defense-in-depth though the catalog holds no secrets) and truncated to the
+/// shared tool-result cap. Always a successful read (consumes one K).
+fn frontier_skew_capabilities_result(_read: ReadCapability) -> (String, bool) {
+    let rendered = crate::skew_catalog::render_catalog();
+    let fragments = [rendered.as_str()];
+    let safe = match redact(&RedactionRequest {
+        fragments: &fragments,
+        candidate_memory_ids: &[],
+        deleted_ids: &[],
+        include_private_memory: false,
+    }) {
+        Ok(r) if r.secret_fragments_denied_u32() == 0 => rendered,
+        _ => "skew capabilities: withheld (a line was secret-shaped)".to_string(),
+    };
+    (
+        truncate_char_safe(&safe, AGENT_LOOP_TOOL_RESULT_CAP_BYTES),
         true,
     )
 }
@@ -1722,6 +1778,7 @@ pub fn run_agent_loop_streaming(
             | ParsedTurn::ToolContextIndex(_)
             | ParsedTurn::ToolWalrusIndex
             | ParsedTurn::ToolWalrusFetch(_)
+            | ParsedTurn::ToolSkewCapabilities
                 if budget_exceeded =>
             {
                 return AgentLoopOutcome {
@@ -1898,6 +1955,36 @@ pub fn run_agent_loop_streaming(
                         trail.push("walrus-index".to_string());
                     } else {
                         trail.push("walrus-index-denied".to_string());
+                    }
+                    results.push(result);
+                }
+            }
+            ParsedTurn::ToolSkewCapabilities => {
+                // K-0a-3: the agent reads the Skew capability catalog (the `skew_catalog`
+                // single source of truth) mid-reasoning. Shares the K-read wall; the
+                // redact-belted catalog enters the prompt. A pure static READ (money 0);
+                // trading is NEVER originated here (a separate owner-armed bounded action).
+                let key = "skew-capabilities".to_string();
+                if executed_tool_keys.contains(&key) {
+                    health.record(TrajectorySignal::SemanticLoop);
+                    trail.push("repeat skew-capabilities".to_string());
+                    results.push(
+                        "skew capabilities: repeated tool call (the result is already above)"
+                            .to_string(),
+                    );
+                } else if reads_u8 >= AGENT_LOOP_MAX_READS {
+                    trail.push("skew-capabilities-cap".to_string());
+                    results.push(format!(
+                        "skew capabilities: denied (read cap K={AGENT_LOOP_MAX_READS} reached)"
+                    ));
+                } else {
+                    executed_tool_keys.push(key);
+                    let (result, consumed) = frontier_skew_capabilities_result(read);
+                    if consumed {
+                        reads_u8 = reads_u8.saturating_add(1);
+                        trail.push("skew-capabilities".to_string());
+                    } else {
+                        trail.push("skew-capabilities-denied".to_string());
                     }
                     results.push(result);
                 }
@@ -2814,6 +2901,73 @@ mod tests {
             outcome.tool_trail
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// K-0a-3: `TOOL: skew capabilities` is a gated PURE READ — the agent reads the Skew
+    /// capability catalog mid-reasoning (consumes one K) and the loop CONTINUES to ANSWER.
+    #[test]
+    fn skew_capabilities_tool_is_gated_read_consumes_k_and_continues() {
+        let records = fixture_records();
+        let contents: [(MemoryId, &[u8]); 0] = [];
+        let policy = TombstonePolicy::new();
+        let state = MemoryToolState {
+            records: &records,
+            contents: &contents,
+            policy: &policy,
+        };
+        let replies = std::cell::RefCell::new(vec![
+            "TOOL: skew capabilities".to_string(),
+            "ANSWER: perp, OTC, options, secondary market, permissionless listing".to_string(),
+        ]);
+        let mut transport = FnTransport(|_s: &str, _user: &str| {
+            let next = replies.borrow_mut().remove(0);
+            Ok(AgentTurn {
+                answer_text: next,
+                input_tokens_u64: 10,
+                output_tokens_u64: 5,
+                cached_tokens_u64: 0,
+            })
+        });
+        let outcome = run_agent_loop_with(
+            &mut transport,
+            &state,
+            "sys",
+            "what can you do on skew?",
+            AGENT_LOOP_MAX_ITER,
+            AGENT_LOOP_TOKEN_CAP,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(outcome.stop, AgentLoopStop::Completed);
+        assert_eq!(
+            outcome.reads_u8, 1,
+            "a skew capabilities read consumes one K"
+        );
+        assert!(
+            outcome.tool_trail.iter().any(|t| t.starts_with("skew")),
+            "{:?}",
+            outcome.tool_trail
+        );
+    }
+
+    /// K-0a-3: `skew capabilities` parses to the READ tool; any OTHER `skew …` (a trade,
+    /// a bare `skew`) is NOT a loop tool ⇒ ToolUnknown — the loop READS the Skew surface
+    /// but NEVER originates a trade (a separate owner-armed bounded action, K-2).
+    #[test]
+    fn skew_capabilities_parses_and_other_skew_denied() {
+        assert_eq!(
+            parse_turn("TOOL: skew capabilities"),
+            ParsedTurn::ToolSkewCapabilities
+        );
+        assert!(matches!(
+            parse_turn("TOOL: skew trade BONK 100"),
+            ParsedTurn::ToolUnknown(_)
+        ));
+        assert!(matches!(
+            parse_turn("TOOL: skew"),
+            ParsedTurn::ToolUnknown(_)
+        ));
     }
 
     /// E11-4-2: `TOOL: context index` (bare) parses to the roots view; a path is

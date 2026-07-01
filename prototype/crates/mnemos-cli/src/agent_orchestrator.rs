@@ -25,8 +25,8 @@
 //! the already-gated loop driver.
 
 use crate::agent_loop::{
-    AGENT_LOOP_MAX_ITER, AGENT_LOOP_TOKEN_CAP, AgentLoopOutcome, AgentTransport, FnTransport,
-    MemoryToolState, run_agent_loop_with,
+    AGENT_LOOP_MAX_ITER, AGENT_LOOP_TOKEN_CAP, AgentLoopOutcome, AgentTransport,
+    AgentTransportError, FnTransport, MemoryToolState, run_agent_loop_with,
 };
 use crate::provider::executor_route::{
     ExecutorRoutingTable, SubTask, parse_subtask_envelope, select_executor_route,
@@ -45,6 +45,13 @@ pub enum OrchestratorStop {
     DecomposeFailed,
     /// The sub-tasks were implemented but the frontier synthesis produced no answer.
     SynthesisEmpty,
+    /// The decomposed plan exceeded [`ORCHESTRATE_MAX_SUBTASKS`] — fail-closed; a
+    /// runaway plan never fans out unbounded work (K-5, IV-FG1).
+    PlanTooLarge,
+    /// The sub-tasks' `deps` form a cycle / name an unknown id / duplicate an id
+    /// ([`crate::provider::executor_route::topological_waves`] returned `None`) —
+    /// fail-closed; never a guessed order or a deadlock (K-5, IV-FG5).
+    DepCycle,
 }
 
 /// One routed + implemented sub-task: the decomposed `SubTask`, the `model_id` the
@@ -361,6 +368,342 @@ pub fn run_orchestrated_consult(
         PlanPhase::Ready { plan, subtasks } => run_orchestrated_from_subtasks(
             frontier,
             local_turn,
+            verify_oracle,
+            table,
+            state,
+            impl_system,
+            synth_system,
+            task,
+            plan,
+            subtasks,
+            max_iter_u8,
+            token_cap_u32,
+        ),
+    }
+}
+
+// ===========================================================================
+// K-5 — the PARALLEL worker fleet (the C-4/C-6 advance): the IMPLEMENT phase
+// fans out across BOUNDED std-thread workers by the `deps`-DAG topological
+// waves, each worker's output STILL gated by the SAME deterministic verify
+// oracle (the model is NEVER an arbiter — drift-0). See
+// `ops/evidence/stage_g/agent_loop/FLEET_GUI_THREAT_MODEL.md` (㉑ IV-FG1..6).
+// ===========================================================================
+
+/// The hard cap on how many sub-tasks ONE decomposed plan may fan out into — a
+/// runaway / adversarial frontier plan must not spawn unbounded work (IV-FG1). A
+/// plan that decomposes into more stops typed (`PlanTooLarge`); NOTHING runs.
+pub const ORCHESTRATE_MAX_SUBTASKS: usize = 32;
+
+/// The per-wave concurrency cap — within a topological wave at most this many
+/// workers run at once (intersected with the host's `available_parallelism`,
+/// floor 1). The fan-out is therefore BOUNDED: a wave of M sub-tasks runs in
+/// chunks of ≤ this many threads, never M threads at once (IV-FG1).
+pub const WAVE_FANOUT_CAP: usize = 8;
+
+/// One worker's PRE-verify result (the routed target + the local brain's bounded
+/// loop outcome) BEFORE the deterministic oracle runs. The oracle is applied
+/// SERIALLY, in id-order, after every wave joins (drift-0; IV-FG2/FG3).
+struct WorkerImpl {
+    idx: usize,
+    port: u16,
+    model_id: String,
+    outcome: AgentLoopOutcome,
+}
+
+/// Drive the bounded loop with an ALWAYS-erroring transport ⇒ a typed
+/// `TransportFailed` (no answer) outcome BUILT BY THE LOOP ITSELF (no hand-rolled
+/// outcome, no panic). Used when a worker's transport fails to build, or a worker
+/// thread is lost (the fail-closed fallback — a no-answer outcome ⇒ the oracle
+/// yields `NotApplicable` ⇒ it never admits a Write).
+fn loop_with_failed_transport(
+    state: MemoryToolState<'_>,
+    impl_system: &str,
+    goal: &str,
+    max_iter: u8,
+    token_cap: u32,
+) -> AgentLoopOutcome {
+    let mut err = FnTransport(|_system: &str, _user: &str| {
+        Err(AgentTransportError {
+            class_label: "worker transport unavailable".to_string(),
+        })
+    });
+    run_agent_loop_with(
+        &mut err,
+        &state,
+        impl_system,
+        goal,
+        max_iter,
+        token_cap,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Run ONE sub-task's IMPLEMENT loop on a FRESH per-worker transport (owned,
+/// `Send`). Pure routing (L2) + the byte-untouched loop driver; NO oracle here
+/// (that is the serial post-join step). A failed transport build degrades to a
+/// typed no-answer outcome — never a panic, never an `unwrap`.
+#[allow(clippy::too_many_arguments)]
+fn run_one_worker<TF>(
+    idx: usize,
+    subtask: &SubTask,
+    table: &ExecutorRoutingTable,
+    state: MemoryToolState<'_>,
+    transport_factory: &TF,
+    impl_system: &str,
+    max_iter: u8,
+    token_cap: u32,
+) -> WorkerImpl
+where
+    TF: Fn(u16, &str) -> Option<Box<dyn AgentTransport + Send>>,
+{
+    let route = select_executor_route(&subtask.kind, table);
+    let port = route.port;
+    let model_id = route.model_id.clone();
+    let outcome = match transport_factory(port, &model_id) {
+        Some(mut tx) => run_agent_loop_with(
+            &mut *tx,
+            &state,
+            impl_system,
+            &subtask.goal,
+            max_iter,
+            token_cap,
+            None,
+            None,
+            None,
+        ),
+        None => loop_with_failed_transport(state, impl_system, &subtask.goal, max_iter, token_cap),
+    };
+    WorkerImpl {
+        idx,
+        port,
+        model_id,
+        outcome,
+    }
+}
+
+/// The fail-closed fallback `WorkerImpl` for a lost worker thread (a `join` error
+/// — unreachable in practice since `run_one_worker` returns typed, but handled
+/// WITHOUT `unwrap`).
+fn failed_worker_impl(
+    idx: usize,
+    subtask: &SubTask,
+    table: &ExecutorRoutingTable,
+    state: MemoryToolState<'_>,
+    impl_system: &str,
+    max_iter: u8,
+    token_cap: u32,
+) -> WorkerImpl {
+    let route = select_executor_route(&subtask.kind, table);
+    WorkerImpl {
+        idx,
+        port: route.port,
+        model_id: route.model_id.clone(),
+        outcome: loop_with_failed_transport(state, impl_system, &subtask.goal, max_iter, token_cap),
+    }
+}
+
+/// IMPLEMENT + SYNTHESIZE over an ALREADY-DECOMPOSED sub-task list, fanning the
+/// IMPLEMENT phase out across BOUNDED std-thread workers by the `deps`-DAG
+/// topological WAVES — the PARALLEL sibling of [`run_orchestrated_from_subtasks`].
+/// `transport_factory(port, model_id)` builds a FRESH `Send` transport per worker
+/// (the existing `&mut FnMut` single-thread closure cannot cross threads); the
+/// frontier (PLAN already done; SYNTH here) and the deterministic `verify_oracle`
+/// run SERIALLY. DRIFT-0: results are collected in sub-task id-order (NOT
+/// completion order), the oracle is pure, and workers only READ the shared
+/// (`Copy`) `MemoryToolState` ⇒ the output is IDENTICAL to the sequential path
+/// (the parity test). Fail-closed: > [`ORCHESTRATE_MAX_SUBTASKS`] ⇒ `PlanTooLarge`;
+/// a cyclic / unknown / duplicate `deps` graph ⇒ `DepCycle`; NOTHING runs.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn run_orchestrated_from_subtasks_parallel<TF, OF>(
+    frontier: &mut dyn AgentTransport,
+    transport_factory: &TF,
+    verify_oracle: &mut OF,
+    table: &ExecutorRoutingTable,
+    state: &MemoryToolState<'_>,
+    impl_system: &str,
+    synth_system: &str,
+    task: &str,
+    plan: String,
+    subtasks: Vec<SubTask>,
+    max_iter_u8: u8,
+    token_cap_u32: u32,
+) -> OrchestratedOutcome
+where
+    TF: Fn(u16, &str) -> Option<Box<dyn AgentTransport + Send>> + Sync,
+    OF: FnMut(&SubTask, &AgentLoopOutcome) -> VerificationEvidence,
+{
+    let (max_iter, token_cap) = orchestrate_caps(max_iter_u8, token_cap_u32);
+    if subtasks.is_empty() {
+        return OrchestratedOutcome {
+            plan: Some(plan),
+            subtasks: Vec::new(),
+            synthesis: None,
+            stop: OrchestratorStop::DecomposeFailed,
+        };
+    }
+    // IV-FG1: a runaway plan never fans out unbounded work.
+    if subtasks.len() > ORCHESTRATE_MAX_SUBTASKS {
+        return OrchestratedOutcome {
+            plan: Some(plan),
+            subtasks: Vec::new(),
+            synthesis: None,
+            stop: OrchestratorStop::PlanTooLarge,
+        };
+    }
+    // IV-FG5: validate the deps DAG fail-closed ⇒ deterministic topological waves.
+    let Some(waves) = crate::provider::executor_route::topological_waves(&subtasks) else {
+        return OrchestratedOutcome {
+            plan: Some(plan),
+            subtasks: Vec::new(),
+            synthesis: None,
+            stop: OrchestratorStop::DepCycle,
+        };
+    };
+    // IV-FG1: per-wave concurrency cap ∩ the host's parallelism (≥1).
+    let max_concurrency = WAVE_FANOUT_CAP
+        .min(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+        .max(1);
+    let state_copy = *state;
+    // 3. IMPLEMENT: each wave runs its workers CONCURRENTLY (bounded chunks); a
+    //    later wave starts only after its prerequisite waves have JOINED (deps
+    //    ordering). `std::thread::scope` joins every worker before returning — no
+    //    zombie thread outlives the call (IV-FG4; std-thread, no tokio, no crate).
+    let mut impls: Vec<WorkerImpl> = Vec::with_capacity(subtasks.len());
+    for wave in &waves {
+        for chunk in wave.chunks(max_concurrency) {
+            let chunk_impls: Vec<WorkerImpl> = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|&idx| {
+                        let subtask = &subtasks[idx];
+                        let handle = scope.spawn(move || {
+                            run_one_worker(
+                                idx,
+                                subtask,
+                                table,
+                                state_copy,
+                                transport_factory,
+                                impl_system,
+                                max_iter,
+                                token_cap,
+                            )
+                        });
+                        (idx, handle)
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(idx, handle)| match handle.join() {
+                        Ok(worker) => worker,
+                        Err(_) => failed_worker_impl(
+                            idx,
+                            &subtasks[idx],
+                            table,
+                            state_copy,
+                            impl_system,
+                            max_iter,
+                            token_cap,
+                        ),
+                    })
+                    .collect()
+            });
+            impls.extend(chunk_impls);
+        }
+    }
+    // DRIFT-0: collect in sub-task id/plan order (NOT thread-completion order).
+    impls.sort_by_key(|w| w.idx);
+    // 3b. VERIFY: the deterministic oracle runs SERIALLY, in id-order, after all
+    //     waves joined (IV-FG2; the oracle is pure ⇒ order-independent; the model
+    //     is never an arbiter). Re-pair each impl with its owned sub-task (both in
+    //     0..n index order ⇒ a positional zip is correct).
+    let mut routed: Vec<RoutedImpl> = Vec::with_capacity(impls.len());
+    for (subtask, worker) in subtasks.into_iter().zip(impls.into_iter()) {
+        let evidence = verify_oracle(&subtask, &worker.outcome);
+        let receipt = verify(classify(&subtask.kind), &evidence);
+        routed.push(RoutedImpl {
+            subtask,
+            port: worker.port,
+            model_id: worker.model_id,
+            outcome: worker.outcome,
+            receipt,
+        });
+    }
+    // 4. SYNTHESIZE (frontier reasoning brain; serial).
+    let synth_input = build_synthesis_input(task, &routed);
+    let synth_outcome = run_agent_loop_with(
+        frontier,
+        state,
+        synth_system,
+        &synth_input,
+        max_iter,
+        token_cap,
+        None,
+        None,
+        None,
+    );
+    let synthesis = synth_outcome.answer.clone();
+    let stop = if synthesis.is_some() {
+        OrchestratorStop::Synthesized
+    } else {
+        OrchestratorStop::SynthesisEmpty
+    };
+    OrchestratedOutcome {
+        plan: Some(plan),
+        subtasks: routed,
+        synthesis,
+        stop,
+    }
+}
+
+/// The PARALLEL two-model orchestration loop: frontier PLAN → deterministic
+/// DECOMPOSE → per-sub-task ROUTE + local IMPLEMENT fanned out across the
+/// `deps`-DAG topological waves (bounded, oracle-gated, drift-0) → frontier
+/// SYNTHESIZE. The parallel sibling of [`run_orchestrated_consult`]; same gate
+/// stack, same typed stops, plus `PlanTooLarge` / `DepCycle`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn run_orchestrated_consult_parallel<TF, OF>(
+    frontier: &mut dyn AgentTransport,
+    transport_factory: &TF,
+    verify_oracle: &mut OF,
+    table: &ExecutorRoutingTable,
+    state: &MemoryToolState<'_>,
+    plan_system: &str,
+    impl_system: &str,
+    synth_system: &str,
+    task: &str,
+    max_iter_u8: u8,
+    token_cap_u32: u32,
+) -> OrchestratedOutcome
+where
+    TF: Fn(u16, &str) -> Option<Box<dyn AgentTransport + Send>> + Sync,
+    OF: FnMut(&SubTask, &AgentLoopOutcome) -> VerificationEvidence,
+{
+    match run_orchestrated_plan_only(
+        frontier,
+        state,
+        plan_system,
+        task,
+        max_iter_u8,
+        token_cap_u32,
+    ) {
+        PlanPhase::PlanEmpty => OrchestratedOutcome {
+            plan: None,
+            subtasks: Vec::new(),
+            synthesis: None,
+            stop: OrchestratorStop::PlanEmpty,
+        },
+        PlanPhase::DecomposeFailed { plan } => OrchestratedOutcome {
+            plan: Some(plan),
+            subtasks: Vec::new(),
+            synthesis: None,
+            stop: OrchestratorStop::DecomposeFailed,
+        },
+        PlanPhase::Ready { plan, subtasks } => run_orchestrated_from_subtasks_parallel(
+            frontier,
+            transport_factory,
             verify_oracle,
             table,
             state,
@@ -870,5 +1213,215 @@ mod tests {
         );
         assert_eq!(out.routed_ports(), vec![11500, 11501]);
         assert_eq!(out.routed_model_ids(), vec!["sui_lora", "sol_lora"]);
+    }
+
+    // ---- K-5 PARALLEL fan-out (bounded, oracle-gated, drift-0, fail-closed) ----
+
+    /// A `Sync` factory that builds a FRESH echo transport per `(port, model_id)`
+    /// — the parallel sibling of the sequential `local_turn` closure.
+    fn echo_factory() -> impl Fn(u16, &str) -> Option<Box<dyn AgentTransport + Send>> + Sync {
+        |_port: u16, model_id: &str| {
+            let mid = model_id.to_string();
+            Some(Box::new(FnTransport(move |_s: &str, _u: &str| {
+                Ok(AgentTurn {
+                    answer_text: format!("ANSWER: via {mid}"),
+                    input_tokens_u64: 1,
+                    output_tokens_u64: 1,
+                    cached_tokens_u64: 0,
+                })
+            })) as Box<dyn AgentTransport + Send>)
+        }
+    }
+
+    /// K-5 DRIFT-0 PARITY (IV-FG3): the PARALLEL fan-out produces the IDENTICAL
+    /// outcome as the SEQUENTIAL path (same routed model_ids / ports / synthesis)
+    /// — concurrency changes only timing, never the result. A plan with `deps`
+    /// (1 → 2 → {3}) so the parallel path actually reorders execution into waves,
+    /// yet collects in id-order ⇒ byte-identical to the deps-ignoring sequential.
+    #[test]
+    fn parallel_matches_sequential_drift0() {
+        let policy = TombstonePolicy::new();
+        let state = empty_state(&policy);
+        let table = default_routing_table();
+        let plan = "SUBTASK 1 sui_move - build it\nSUBTASK 2 solana_anchor 1 port it\nSUBTASK 3 audit 1,2 review it";
+
+        // Sequential (the existing `&mut FnMut` path).
+        let mut f_seq = ScriptedFrontier {
+            replies: vec![plan, "ANSWER: synthesized"],
+            calls: 0,
+        };
+        let mut seq_turn = |_p: u16,
+                            model_id: &str,
+                            _s: &str,
+                            _u: &str|
+         -> Result<AgentTurn, AgentTransportError> {
+            Ok(AgentTurn {
+                answer_text: format!("ANSWER: via {model_id}"),
+                input_tokens_u64: 1,
+                output_tokens_u64: 1,
+                cached_tokens_u64: 0,
+            })
+        };
+        let mut no_oracle_seq = |_: &SubTask, _: &AgentLoopOutcome| VerificationEvidence::Absent;
+        let seq = run_orchestrated_consult(
+            &mut f_seq,
+            &mut seq_turn,
+            &mut no_oracle_seq,
+            &table,
+            &state,
+            "p",
+            "i",
+            "s",
+            "task",
+            0,
+            0,
+        );
+
+        // Parallel (the `Sync` factory path).
+        let mut f_par = ScriptedFrontier {
+            replies: vec![plan, "ANSWER: synthesized"],
+            calls: 0,
+        };
+        let factory = echo_factory();
+        let mut no_oracle_par = |_: &SubTask, _: &AgentLoopOutcome| VerificationEvidence::Absent;
+        let par = run_orchestrated_consult_parallel(
+            &mut f_par,
+            &factory,
+            &mut no_oracle_par,
+            &table,
+            &state,
+            "p",
+            "i",
+            "s",
+            "task",
+            0,
+            0,
+        );
+
+        assert_eq!(par.stop, OrchestratorStop::Synthesized);
+        assert_eq!(par.subtasks.len(), 3);
+        assert_eq!(
+            par.routed_model_ids(),
+            seq.routed_model_ids(),
+            "parallel routes == sequential routes (drift-0)"
+        );
+        assert_eq!(par.routed_ports(), seq.routed_ports());
+        assert_eq!(par.implemented_count(), seq.implemented_count());
+        assert_eq!(par.synthesis, seq.synthesis);
+    }
+
+    /// K-5 fail-closed (IV-FG5): a cyclic `deps` graph stops typed (`DepCycle`) —
+    /// NOTHING runs, no deadlock.
+    #[test]
+    fn parallel_fails_closed_on_dep_cycle() {
+        let policy = TombstonePolicy::new();
+        let state = empty_state(&policy);
+        let table = default_routing_table();
+        // 1 depends on 2, 2 depends on 1 (a cycle).
+        let mut frontier = ScriptedFrontier {
+            replies: vec!["SUBTASK 1 sui_move 2 a\nSUBTASK 2 audit 1 b", "ANSWER: x"],
+            calls: 0,
+        };
+        let factory = echo_factory();
+        let mut no_oracle = |_: &SubTask, _: &AgentLoopOutcome| VerificationEvidence::Absent;
+        let out = run_orchestrated_consult_parallel(
+            &mut frontier,
+            &factory,
+            &mut no_oracle,
+            &table,
+            &state,
+            "p",
+            "i",
+            "s",
+            "task",
+            0,
+            0,
+        );
+        assert_eq!(out.stop, OrchestratorStop::DepCycle);
+        assert!(out.subtasks.is_empty(), "nothing runs on a cyclic plan");
+        assert_eq!(frontier.calls, 1, "only the PLAN turn ran (no synth)");
+    }
+
+    /// K-5 bounded fan-out + joins (IV-FG1/FG4): 10 INDEPENDENT sub-tasks (>
+    /// `WAVE_FANOUT_CAP`) all run in one wave across BOUNDED chunks and ALL
+    /// implement + JOIN (no hang, no zombie). The Absent oracle gates each ⇒ none
+    /// admits a write (IV-FG2).
+    #[test]
+    fn parallel_independent_wave_all_implement_and_join() {
+        let policy = TombstonePolicy::new();
+        let state = empty_state(&policy);
+        let table = default_routing_table();
+        let plan = "SUBTASK 1 audit - a\nSUBTASK 2 audit - b\nSUBTASK 3 audit - c\nSUBTASK 4 audit - d\nSUBTASK 5 audit - e\nSUBTASK 6 audit - f\nSUBTASK 7 audit - g\nSUBTASK 8 audit - h\nSUBTASK 9 audit - i\nSUBTASK 10 audit - j";
+        let mut frontier = ScriptedFrontier {
+            replies: vec![plan, "ANSWER: done"],
+            calls: 0,
+        };
+        let factory = echo_factory();
+        let mut no_oracle = |_: &SubTask, _: &AgentLoopOutcome| VerificationEvidence::Absent;
+        let out = run_orchestrated_consult_parallel(
+            &mut frontier,
+            &factory,
+            &mut no_oracle,
+            &table,
+            &state,
+            "p",
+            "i",
+            "s",
+            "task",
+            0,
+            0,
+        );
+        assert_eq!(out.stop, OrchestratorStop::Synthesized);
+        assert_eq!(out.subtasks.len(), 10);
+        assert_eq!(
+            out.implemented_count(),
+            10,
+            "every worker in the wave implemented + joined"
+        );
+        assert_eq!(
+            out.write_admitted_count(),
+            0,
+            "Absent oracle admits no write (model is not an arbiter)"
+        );
+    }
+
+    /// K-5 fail-closed (IV-FG1): a plan that decomposes into more than
+    /// `ORCHESTRATE_MAX_SUBTASKS` stops typed (`PlanTooLarge`) — the fan-out never
+    /// spawns unbounded work. Tested on the from-subtasks entry directly.
+    #[test]
+    fn parallel_fails_closed_on_too_many_subtasks() {
+        let policy = TombstonePolicy::new();
+        let state = empty_state(&policy);
+        let table = default_routing_table();
+        let mut plan_text = String::new();
+        for i in 1..=(ORCHESTRATE_MAX_SUBTASKS + 1) {
+            plan_text.push_str(&format!("SUBTASK {i} audit - t{i}\n"));
+        }
+        let subtasks =
+            crate::provider::executor_route::parse_subtask_envelope(&plan_text).expect("parses");
+        assert_eq!(subtasks.len(), ORCHESTRATE_MAX_SUBTASKS + 1);
+        let mut frontier = ScriptedFrontier {
+            replies: vec!["ANSWER: x"],
+            calls: 0,
+        };
+        let factory = echo_factory();
+        let mut no_oracle = |_: &SubTask, _: &AgentLoopOutcome| VerificationEvidence::Absent;
+        let out = run_orchestrated_from_subtasks_parallel(
+            &mut frontier,
+            &factory,
+            &mut no_oracle,
+            &table,
+            &state,
+            "i",
+            "s",
+            "task",
+            "PLAN".to_string(),
+            subtasks,
+            0,
+            0,
+        );
+        assert_eq!(out.stop, OrchestratorStop::PlanTooLarge);
+        assert!(out.subtasks.is_empty());
+        assert_eq!(frontier.calls, 0, "no synth turn when nothing ran");
     }
 }

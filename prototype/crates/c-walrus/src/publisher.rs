@@ -113,6 +113,16 @@ pub enum PublishPayloadClass {
     /// leaks no plaintext (owner-directed 2026-06-13: "모든 메모리, 암호문으로"). ADMITTED
     /// to the publisher; the plaintext classes above stay rejected (secret-zero holds).
     EncryptedUserMemory = 7,
+    /// A PUBLIC agent-registry artifact (D-3, owner-directed 2026-07-01: a GitHub-style
+    /// PUBLIC repo — "공개 비공개 둘다 유저가 설정할수있게"). PLAINTEXT, deliberately admitted
+    /// so ANY agent can content-hash-verify it without a key. Unlike the plaintext classes
+    /// above, this is admitted ONLY because its SOLE constructor — the registry
+    /// public-publish chokepoint (`dispatch.rs`) — runs a **mandatory fail-closed
+    /// secret-scan** (`secrets::scan_inline_secret`) first, so a secret-shaped artifact is
+    /// never published. The safety is that confinement (nothing else builds this class),
+    /// NOT the wall. The mainnet self-host `put_blob` stays conservative (rejects this via
+    /// its `_` arm): public plaintext is testnet-only until a further owner decision.
+    PublicRegistryArtifact = 8,
 }
 
 impl PublishPayloadClass {
@@ -134,6 +144,7 @@ impl PublishPayloadClass {
             Self::SecretLike => "secret_like",
             Self::PrivateProvenance => "private_provenance",
             Self::EncryptedUserMemory => "encrypted_user_memory",
+            Self::PublicRegistryArtifact => "public_registry_artifact",
         }
     }
 }
@@ -265,8 +276,13 @@ impl<'a> PublisherPutRequest<'a> {
             // E14-W: ciphertext of user memory is ADMITTED (the AEAD key never leaves
             // the local machine, so no plaintext leaks). PLAINTEXT classes (RealUserMemory
             // / prompt / tool / secret / provenance) stay rejected — secret-zero holds.
+            // D-3: PublicRegistryArtifact is deliberately admitted (owner-directed public
+            // registry); it is PLAINTEXT but its SOLE constructor (the registry
+            // public-publish chokepoint) secret-scans it fail-closed first, so no secret
+            // leaves. The safety is that construction confinement, not this arm.
             PublishPayloadClass::SyntheticPublicFixture
-            | PublishPayloadClass::EncryptedUserMemory => Ok(Self {
+            | PublishPayloadClass::EncryptedUserMemory
+            | PublishPayloadClass::PublicRegistryArtifact => Ok(Self {
                 endpoint,
                 epochs,
                 payload,
@@ -1245,6 +1261,8 @@ mod tests {
         assert_eq!(PublishPayloadClass::ToolOutput.tag(), 4);
         assert_eq!(PublishPayloadClass::SecretLike.tag(), 5);
         assert_eq!(PublishPayloadClass::PrivateProvenance.tag(), 6);
+        assert_eq!(PublishPayloadClass::EncryptedUserMemory.tag(), 7);
+        assert_eq!(PublishPayloadClass::PublicRegistryArtifact.tag(), 8);
     }
 
     #[test]

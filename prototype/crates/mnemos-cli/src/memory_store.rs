@@ -236,8 +236,32 @@ impl MemoryCipher {
     }
 }
 
+// TEST-ONLY data-dir override for hermetic dispatch tests. Thread-local so it is
+// race-free under the parallel test harness (each test runs on its own thread),
+// and `#[cfg(test)]` so it is COMPILED OUT of the shipped binary entirely. When
+// set, `data_dir` returns this path instead of `$HOME/.mnemos`, giving a test a
+// guaranteed-isolated store without mutating the process-global `HOME`.
+#[cfg(test)]
+thread_local! {
+    static TEST_DATA_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set (or clear with `None`) the current thread's test-only data-dir override
+/// (`TEST_DATA_DIR_OVERRIDE`); `#[cfg(test)]` ⇒ absent from production.
+#[cfg(test)]
+pub(crate) fn set_test_data_dir(dir: Option<PathBuf>) {
+    TEST_DATA_DIR_OVERRIDE.with(|cell| *cell.borrow_mut() = dir);
+}
+
 /// The data dir: `$HOME/.mnemos` (KM-1). Fail-closed if `$HOME` is unset.
 pub fn data_dir() -> Result<PathBuf, KeyError> {
+    #[cfg(test)]
+    {
+        if let Some(dir) = TEST_DATA_DIR_OVERRIDE.with(|cell| cell.borrow().clone()) {
+            return Ok(dir);
+        }
+    }
     let home = std::env::var_os("HOME").ok_or(KeyError::NoHome)?;
     if home.is_empty() {
         return Err(KeyError::NoHome);
@@ -593,6 +617,38 @@ impl PersistedStore {
     pub fn open_index(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError> {
         self.cipher
             .open_with_aad(sealed, crate::memory_walrus::WALRUS_INDEX_AAD)
+    }
+
+    /// K-3: seal a Skew history-time-series WINDOW with the LOCAL AEAD key, bound to the
+    /// history AAD (so a window blob can never be opened as a `.mc` record / index / settings).
+    /// The sealed bytes are the local storage-of-record AND the Walrus sub-blob (secret-zero —
+    /// only a LOCAL open reveals the series; the plaintext window never leaves the box).
+    pub fn seal_skew_history(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
+        self.cipher
+            .seal_with_aad(plaintext, crate::skew_history::SKEW_HISTORY_AAD)
+    }
+
+    /// K-3: open a sealed Skew history window back to its plaintext bytes (AEAD tag + history-AAD
+    /// verified). `Err` (fail-closed) on wrong key / tampered / wrong-AAD blob.
+    pub fn open_skew_history(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError> {
+        self.cipher
+            .open_with_aad(sealed, crate::skew_history::SKEW_HISTORY_AAD)
+    }
+
+    /// K-4: seal a CERTIFIED strategy corpus entry (the canonical strategy TOML as a pattern memory)
+    /// with the LOCAL AEAD key, bound to the strategy-corpus AAD (so a corpus blob can never be opened
+    /// as a `.mc` record / index / history window). The certified corpus is the agent's OWN encrypted
+    /// data; only a LOCAL open reveals the plaintext.
+    pub fn seal_strategy_corpus(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
+        self.cipher
+            .seal_with_aad(plaintext, crate::skew_strategy::STRATEGY_CORPUS_AAD)
+    }
+
+    /// K-4: open a sealed strategy corpus entry back to its plaintext bytes (AEAD tag + corpus-AAD
+    /// verified). `Err` (fail-closed) on wrong key / tampered / wrong-AAD blob.
+    pub fn open_strategy_corpus(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError> {
+        self.cipher
+            .open_with_aad(sealed, crate::skew_strategy::STRATEGY_CORPUS_AAD)
     }
 
     /// [6] Settings-sync: seal a (secret-screened) config TOML with the LOCAL AEAD key,

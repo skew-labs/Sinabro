@@ -172,7 +172,7 @@ impl NotifyRuleCompiler {
 #[must_use]
 pub fn severity_order(alerts: &[CompiledAlert]) -> Vec<CompiledAlert> {
     let mut v = alerts.to_vec();
-    v.sort_by(|a, b| b.severity.cmp(&a.severity));
+    v.sort_by_key(|a| std::cmp::Reverse(a.severity));
     v
 }
 

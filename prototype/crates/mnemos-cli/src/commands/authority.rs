@@ -9,10 +9,15 @@
 //!   [`MutateGrant`]); the model cannot mint it from nothing (no zero-witness
 //!   ctor, no struct literal — a forge is a COMPILE error). The unarmed
 //!   per-action path is unchanged (the existing `EgressApproval` at the transport).
-//! - **CUSTODY** — funds / wallet / chain / mainnet. PD-6 HARD-LOCK as a TYPE:
-//!   [`CustodyCapability`] is an UNINHABITED enum, so a value can NEVER be
-//!   constructed by anyone, in any build. Custody is unlocked only by a SEPARATE
-//!   go-live gate that introduces a constructor under its own security review.
+//! - **CUSTODY (blanket)** — unbounded funds / wallet / chain / mainnet. PD-6
+//!   HARD-LOCK as a TYPE: [`CustodyCapability`] is an UNINHABITED enum, so UNBOUNDED
+//!   custody can NEVER be constructed by anyone, in any build — FOREVER.
+//! - **CHAIN-TX (user-BOUNDED)** — ONCHAIN PIVOT C-0: [`ChainTxCapability`] is the
+//!   BOUNDED unlock — authority for ONE on-chain tx WITHIN an owner-armed
+//!   [`CustodyGrant`] bound (per-tx / total-budget / chain+protocol allowlist / TTL /
+//!   rate / revoke). Armed · bounded · revocable like EGRESS/MUTATE; minted ONLY from a
+//!   VALID grant + a within-bounds tx. Blanket custody stays uninhabited; only the
+//!   user's bound opens (never blanket).
 //!
 //! The invariant (PD-2): a capability is mintable ONLY by (a) the type system
 //! (READ) or (b) a valid owner-armed grant (EGRESS/MUTATE). CUSTODY has no
@@ -20,8 +25,8 @@
 //! or constructing any of them from nothing — does not compile (proven E0d-4).
 
 use super::grant::{
-    AutonomyAuthorization, DownloadGrant, EgressGrant, MutateGrant, authorize_download,
-    authorize_egress, authorize_mutate,
+    AutonomyAuthorization, ChainTxRequest, CustodyAuthorization, CustodyGrant, DownloadGrant,
+    EgressGrant, MutateGrant, authorize_download, authorize_egress, authorize_mutate,
 };
 
 /// READ authority — always granted (PD-3). No approval, no grant, no witness;
@@ -172,12 +177,64 @@ pub fn local_egress_capability(grant: &EgressGrant) -> Option<EgressCapability> 
     EgressCapability::from_grant(grant, 0, 0)
 }
 
-/// CUSTODY authority — funds / wallet / chain / mainnet. PD-6 HARD-LOCK AS A TYPE:
+/// Autonomous user-BOUNDED CHAIN-TX authority for ONE on-chain transaction within an
+/// owner-armed [`CustodyGrant`] bound (ONCHAIN PIVOT C-0). Type-distinct from every other
+/// capability. PRIVATE field; the ONLY constructor is [`from_grant`](Self::from_grant), which
+/// requires a VALID owner-armed [`CustodyGrant`] AND a tx within ALL its bounds (per-tx /
+/// total-budget / chain+protocol allowlist / TTL / rate / unrevoked). The model cannot mint
+/// chain-tx authority from nothing. This is the BOUNDED unlock — it does NOT inhabit the blanket
+/// [`CustodyCapability`] (still uninhabited): unbounded custody stays impossible.
+///
+/// A from-nothing / struct-literal mint does NOT compile (private field):
+/// ```compile_fail
+/// let _forged = sinabro::commands::authority::ChainTxCapability(());
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainTxCapability(());
+
+impl ChainTxCapability {
+    /// Bounded chain-tx authority from a VALID armed custody grant at `now`, given the txs
+    /// already fired + the amount already spent + the proposed `tx`. `None` (fail-closed)
+    /// unless the grant authorizes THIS tx within ALL its bounds.
+    #[must_use]
+    pub fn from_grant(
+        grant: &CustodyGrant,
+        now_epoch_ms: u64,
+        actions_used_u32: u32,
+        spent_minor: u128,
+        tx: &ChainTxRequest,
+    ) -> Option<Self> {
+        match grant.authorize(now_epoch_ms, actions_used_u32, spent_minor, tx) {
+            CustodyAuthorization::Authorized => Some(Self(())),
+            CustodyAuthorization::Denied(_) => None,
+        }
+    }
+}
+
+/// Owner-path (ONCHAIN PIVOT C-0): derive a CHAIN-TX capability from an owner-armed custody
+/// grant for a SYNCHRONOUS single tx, evaluated at the live `(now, used, spent)` against the
+/// proposed `tx`. `None` (fail-closed) unless within bounds. Kept in `authority.rs` so the e0d
+/// no-self-escalation grep keeps `ChainTxCapability::from_grant` to its allowlisted home — the
+/// property ("a capability exists only from a valid owner-armed grant") is PRESERVED, not relaxed.
+#[must_use]
+pub fn local_chain_tx_capability(
+    grant: &CustodyGrant,
+    now_epoch_ms: u64,
+    actions_used_u32: u32,
+    spent_minor: u128,
+    tx: &ChainTxRequest,
+) -> Option<ChainTxCapability> {
+    ChainTxCapability::from_grant(grant, now_epoch_ms, actions_used_u32, spent_minor, tx)
+}
+
+/// CUSTODY (blanket) authority — UNBOUNDED funds / wallet / chain / mainnet. PD-6 HARD-LOCK AS A TYPE:
 /// an UNINHABITED enum (zero variants), so a value can NEVER be constructed — by
 /// the model, the owner, or the type system — in ANY build. Any function that
-/// requires a `CustodyCapability` is therefore uncallable. Custody is unlocked
-/// only by a SEPARATE go-live gate that introduces a constructor under its own
-/// security review; never here, never autonomously.
+/// requires a `CustodyCapability` is therefore uncallable. ONCHAIN PIVOT C-0: the
+/// BOUNDED on-chain unlock is the DISTINCT [`ChainTxCapability`] (gated by an
+/// owner-armed [`CustodyGrant`] — per-tx / budget / allowlist / TTL); blanket
+/// `CustodyCapability` gains NO constructor — UNBOUNDED custody is impossible forever,
+/// never here, never autonomously.
 ///
 /// Constructing one does NOT compile (no variant, no constructor exists):
 /// ```compile_fail
@@ -387,6 +444,61 @@ mod tests {
             },
         )
         .expect("arm")
+    }
+
+    fn custody_grant(
+        per_tx: u128,
+        budget: u128,
+        expiry: u64,
+    ) -> crate::commands::grant::CustodyGrant {
+        use crate::commands::grant::{CUSTODY_ARM_PHRASE, CustodyBounds, CustodyGrant};
+        let mut p = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+        let c = OwnerArmCeremony::complete(&mut p, CUSTODY_ARM_PHRASE, GrantTier::Custody, AUDIT)
+            .expect("custody ceremony");
+        CustodyGrant::arm(
+            c,
+            CustodyBounds {
+                base: GrantBounds {
+                    max_actions_u32: 3,
+                    expires_at_epoch_ms: expiry,
+                },
+                per_tx_max_minor: per_tx,
+                total_budget_minor: budget,
+                chain_allowlist: vec!["ethereum".to_string()],
+                protocol_allowlist: vec!["uniswap".to_string()],
+            },
+        )
+        .expect("custody arm")
+    }
+
+    /// ONCHAIN PIVOT C-0: a ChainTxCapability exists ONLY from a valid custody grant + a
+    /// within-bounds tx — and the blanket CustodyCapability stays uninhabited.
+    #[test]
+    fn chain_tx_capability_only_from_a_valid_grant_within_bounds() {
+        use crate::commands::grant::ChainTxRequest;
+        let g = custody_grant(100, 250, 1000);
+        let ok = ChainTxRequest {
+            chain: "ethereum".to_string(),
+            protocol: "uniswap".to_string(),
+            amount_minor: 100,
+        };
+        // within all bounds ⇒ Some
+        assert!(ChainTxCapability::from_grant(&g, 1, 0, 0, &ok).is_some());
+        assert!(local_chain_tx_capability(&g, 1, 0, 0, &ok).is_some());
+        // over per-tx / over-budget / off-allowlist / expired / revoked ⇒ None (fail-closed)
+        let over = ChainTxRequest {
+            amount_minor: 101,
+            ..ok.clone()
+        };
+        assert!(ChainTxCapability::from_grant(&g, 1, 0, 0, &over).is_none());
+        assert!(ChainTxCapability::from_grant(&g, 1, 0, 200, &ok).is_none()); // 200+100>250
+        let bad_chain = ChainTxRequest {
+            chain: "solana".to_string(),
+            ..ok.clone()
+        };
+        assert!(ChainTxCapability::from_grant(&g, 1, 0, 0, &bad_chain).is_none());
+        assert!(ChainTxCapability::from_grant(&g, 1000, 0, 0, &ok).is_none()); // expired
+        assert!(ChainTxCapability::from_grant(&g.clone().revoke(), 1, 0, 0, &ok).is_none());
     }
 
     #[test]

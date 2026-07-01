@@ -316,10 +316,7 @@ impl ChainedAuditLog {
         let mut ordered: Vec<AuditEntry> = Vec::with_capacity(total_records);
         let mut cursor = GENESIS_LINK;
         // Walk genesis→tail following the unique successor at each step.
-        loop {
-            let Some(successors) = by_prev.get(&cursor) else {
-                break;
-            };
+        while let Some(successors) = by_prev.get(&cursor) {
             let Some(next) = successors.first() else {
                 break;
             };

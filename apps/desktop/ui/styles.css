@@ -132,6 +132,17 @@ input, textarea { font-family: inherit; }
 
 /* 3-pane body + splitters (CENTER = 1fr absorbs the remainder) */
 .body { display: grid; grid-template-columns: var(--w-agent) 6px minmax(0, 1fr) 6px var(--w-files); min-height: 0; background: var(--bg); }
+/* pane focus toggles (topbar) — hide the left (chat) or right (files) pane so the center
+   fills the window; persisted + INDEPENDENT of Settings (opening Settings never re-shows a
+   hidden pane — the owner: full-screen Settings must not snap the side panes back on).
+   Suppressed during the first-run hero welcome (which owns its own single-column grid). */
+.body.hide-agent:not(.hero-mode) { grid-template-columns: 0 0 minmax(0, 1fr) 6px var(--w-files); }
+.body.hide-files:not(.hero-mode) { grid-template-columns: var(--w-agent) 6px minmax(0, 1fr) 0 0; }
+.body.hide-agent.hide-files:not(.hero-mode) { grid-template-columns: 0 0 minmax(0, 1fr) 0 0; }
+.body.hide-agent .pane-agent, .body.hide-files .pane-files,
+.body.hide-agent [data-split="agent"], .body.hide-files [data-split="files"] { pointer-events: none; }
+.body.hide-agent [data-split="agent"]::after, .body.hide-files [data-split="files"]::after { display: none; }
+.panetog.on { color: var(--accent); background: var(--accent-soft); }
 .splitter { position: relative; z-index: 5; cursor: col-resize; background: transparent; }
 .splitter::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: var(--border); transition: background var(--t) var(--ease); }
 .splitter:hover::after, .splitter.dragging::after { background: var(--accent); }
@@ -522,6 +533,28 @@ input, textarea { font-family: inherit; }
 .receipts-details > summary::before { content: "▸ "; color: var(--faint); }
 .receipts-details[open] > summary::before { content: "▾ "; }
 .receipts-body { margin-top: 6px; }
+
+/* ── chat answer: answer-first & clean (owner: "just answer what I ask, no clutter").
+   The consult card drops its box + pills; the answer reads as natural PROSE (UI font,
+   not the techy monospace); route + tool-trail + verification receipts collapse into
+   one quiet line underneath — nothing hidden, just no longer shouting. ── */
+.card-consult { background: transparent; border: none; box-shadow: none; }
+.card-consult > .card-body { padding: 4px 2px 2px; font-family: var(--font-ui); font-size: 14px; color: var(--text); }
+.card-consult .card-answer { font-family: var(--font-ui); font-size: 14px; line-height: 1.66; color: var(--text); }
+.card-consult .card-answer .answer-line { white-space: pre-wrap; word-break: break-word; }
+.card-consult .card-answer .answer-line:empty { min-height: 0.55em; }
+
+.answer-meta { margin-top: 13px; }
+.answer-meta > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: baseline; gap: 8px; padding: 2px 0; user-select: none; }
+.answer-meta > summary::-webkit-details-marker { display: none; }
+.answer-meta .am-bits { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1px; color: var(--faint); }
+.answer-meta .am-toggle { font-size: 10.5px; color: var(--muted); opacity: 0.72; transition: color var(--t) var(--ease), opacity var(--t) var(--ease); }
+.answer-meta .am-toggle::after { content: " ›"; }
+.answer-meta[open] .am-toggle::after { content: " ⌄"; }
+.answer-meta > summary:hover .am-toggle { color: var(--text-2); opacity: 1; }
+.answer-meta > summary:hover .am-bits { color: var(--muted); }
+.answer-meta-body { margin-top: 11px; padding-top: 12px; border-top: 1px solid var(--border); animation: cardIn var(--t-2) var(--ease) both; }
+.answer-meta-body .receipts-body { margin-top: 8px; }
 
 /* ═══════════════ P2 — Agent Activity Timeline ═══════════════════════════════
    The loop's AUTONOMOUS tool trail, lifted out of the folded receipts into a

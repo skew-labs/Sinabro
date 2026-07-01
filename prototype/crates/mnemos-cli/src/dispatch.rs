@@ -293,6 +293,13 @@ fn risk_for(ns: CliNamespace, verb: &str) -> CommandRisk {
             "test" => CommandRisk::LocalWrite,
             _ => CommandRisk::ReadOnly,
         },
+        // D-3: the agent registry gains an owner-armed Walrus egress (`publish`) + an
+        // autonomous content-hash-verified `fetch` — both Network; scan/list stay ReadOnly.
+        // This is why `namespace_gate(Registry)` is `Gated` (not `Free`).
+        CliNamespace::Registry => match v.as_str() {
+            "publish" | "fetch" => CommandRisk::Network,
+            _ => CommandRisk::ReadOnly,
+        },
         // All remaining namespaces are status/view-only at every wired verb.
         _ => CommandRisk::ReadOnly,
     }
@@ -363,12 +370,15 @@ fn namespace_gate(ns: CliNamespace) -> CapabilityGate {
         | CliNamespace::Session
         | CliNamespace::Admin
         | CliNamespace::Notify
+        // D-3: the registry gained a Network egress (`publish`) + `fetch`, so it is no
+        // longer all-ReadOnly — GATED (owner-armed publish; scan/list/fetch = the READ
+        // side under the same gated namespace badge).
+        | CliNamespace::Registry
         | CliNamespace::Federation => Gated,
         // FREE — every wired verb is `ReadOnly` (autonomous READ).
         CliNamespace::Agent
         | CliNamespace::Model
         | CliNamespace::Identity
-        | CliNamespace::Registry
         | CliNamespace::Trace
         | CliNamespace::Eval
         | CliNamespace::Measure
@@ -412,6 +422,9 @@ const RECOGNIZED_VERBS: &[&str] = &[
     "scan",
     "detect",
     "reconcile",
+    "elicit",
+    "classify",
+    "summary",
     "route",
     "cache",
     "endpoint",
@@ -449,6 +462,7 @@ const RECOGNIZED_VERBS: &[&str] = &[
     "tune",
     "checkpoint",
     "publish",
+    "fetch",
     "upgrade",
     "write",
     "execute",
@@ -508,6 +522,7 @@ const RECOGNIZED_VERBS: &[&str] = &[
     "attest-0g",
     "finetune-0g",
     "mint-expert-0g",
+    "mint-oracle",
     "walrus-index",
     "walrus-fetch",
     "consult",
@@ -546,6 +561,11 @@ const RECOGNIZED_VERBS: &[&str] = &[
     // <task>`) — frontier PLAN -> route -> local IMPLEMENT -> frontier SYNTHESIZE.
     // Live only under a local-serving feature; else the generic locked surface.
     "orchestrate",
+    // K-6: the honest dynamic-LoRA status (`provider lora-status`) — the certified
+    // corpus→adapter MANIFEST (P-HALL) + the SERVED set + the per-kind resolution
+    // (requested adapter -> wire model, served/degraded). READ-class, money 0; the
+    // SAME core render the GUI Tauri command consumes. Always-compiled.
+    "lora-status",
     // A① (CURSOR PARITY keystone-1): the owner/GUI language-server READ
     // (`context lsp-diagnostics <path>`) — a sandboxed rust-analyzer/move-analyzer
     // run returning COMPILER TRUTH (READ-class; honest-degrade if the server is
@@ -954,15 +974,21 @@ fn backup_walrus_error(out: &mut impl Write, envelope_hex: &str, label: &str) ->
     .map(|()| true)
 }
 
-/// E14-W2 shared glue: PUT one AEAD-ciphertext blob (class `EncryptedUserMemory`) to the
-/// Walrus testnet publisher (no funds), then VERIFY the publisher's reported blob-id
-/// against the REAL RS2 oracle (self-report ban). `Some(blob_id_text)` on success, else
-/// `None` (fail-closed — a wrong/unverified id is never trusted).
+/// PUT `bytes` to the Walrus testnet publisher under `class`, then VERIFY the publisher's
+/// reported blob-id against the REAL RS2 oracle (`verify_reported_testnet_blob_id` — the
+/// self-report ban: a wrong/unverified id is `None`, never trusted). Class-parameterized so
+/// the encrypted-memory path (`EncryptedUserMemory` ciphertext) and the D-3 public-registry
+/// path (`PublicRegistryArtifact` plaintext, secret-scanned by its caller) share ONE verified
+/// PUT chokepoint. The `class` is admitted by the c-walrus wall (`PublisherPutRequest::new`)
+/// and the b-memory policy (`stage_b_publish_allowed`); anything else fails closed inside
+/// `WalrusPutPlan::plan`. `verify_reported_testnet_blob_id` re-derives over the ACTUAL PUT
+/// bytes, so it proves the id for both ciphertext and plaintext.
 #[cfg(feature = "put-fixture-net")]
-fn walrus_put_verified(
+fn walrus_put_verified_class(
     pub_t: &mut mnemos_c_walrus::reqwest_transport::ReqwestPublisher,
     epochs: mnemos_c_walrus::publisher::EpochCount,
-    ciphertext: &[u8],
+    bytes: &[u8],
+    class: mnemos_c_walrus::publisher::PublishPayloadClass,
 ) -> Option<String> {
     use mnemos_b_memory::{
         StageBTraceEvidence, StageBTraceLink, WalrusPutPlan, WalrusTestnetEndpoint,
@@ -971,25 +997,46 @@ fn walrus_put_verified(
         PublishPayloadClass, PublisherResponseDecision, publish_blob_with_transport,
     };
     use mnemos_c_walrus::verify_reported_testnet_blob_id;
+    // SI-2 / IV-D3-11 secret-zero AT THE SEND SITE: a PUBLIC plaintext class
+    // (`PublicRegistryArtifact`) must pass the MANDATORY fail-closed secret-scan HERE, so a
+    // secret-shaped byte can never leave even if a caller forgot to pre-scan. A private class
+    // is AEAD ciphertext (the 32-byte key never leaves the machine) — a stronger guarantee than
+    // redaction, and binary ciphertext is not redact()-able text.
+    if matches!(class, PublishPayloadClass::PublicRegistryArtifact)
+        && crate::secrets::scan_inline_secret(&String::from_utf8_lossy(bytes))
+    {
+        return None;
+    }
     let ev = StageBTraceEvidence::from_trace(StageBTraceLink::new(0x6713_0002, 0x6713, 0))?;
-    let plan = WalrusPutPlan::plan(
-        WalrusTestnetEndpoint::testnet(),
-        epochs,
-        ciphertext,
-        PublishPayloadClass::EncryptedUserMemory,
-        ev,
-    )
-    .ok()?;
+    let plan =
+        WalrusPutPlan::plan(WalrusTestnetEndpoint::testnet(), epochs, bytes, class, ev).ok()?;
     let run = publish_blob_with_transport(pub_t, &plan.request, 0x6713_0002, 1).ok()?;
     match run.decision {
         PublisherResponseDecision::Accepted {
             reported_blob_id, ..
         } => {
-            verify_reported_testnet_blob_id(ciphertext, &reported_blob_id).ok()?;
+            verify_reported_testnet_blob_id(bytes, &reported_blob_id).ok()?;
             Some(reported_blob_id.as_str().to_string())
         }
         _ => None,
     }
+}
+
+/// E14-W2 shared glue: PUT one AEAD-ciphertext blob (class `EncryptedUserMemory`) to the
+/// Walrus testnet publisher (no funds) + verify the reported blob-id. A thin wrapper over
+/// [`walrus_put_verified_class`] (unchanged behaviour for the memory-backup callers).
+#[cfg(feature = "put-fixture-net")]
+fn walrus_put_verified(
+    pub_t: &mut mnemos_c_walrus::reqwest_transport::ReqwestPublisher,
+    epochs: mnemos_c_walrus::publisher::EpochCount,
+    ciphertext: &[u8],
+) -> Option<String> {
+    walrus_put_verified_class(
+        pub_t,
+        epochs,
+        ciphertext,
+        mnemos_c_walrus::publisher::PublishPayloadClass::EncryptedUserMemory,
+    )
 }
 
 /// E14-W2 shared glue: GET a blob from the Walrus testnet aggregator by a STORED blob-id
@@ -2034,7 +2081,7 @@ fn walrus_fetch_lines(rest: &[String]) -> (RenderTruth, Vec<String>) {
                 "memory walrus-fetch id={memory_id}: fetched from Walrus sub-store + decrypted locally"
             ),
             format!("detail: {detail}"),
-            "custody/funds HARD-LOCKED (PD-6); ciphertext-only on the wire".to_string(),
+            "ciphertext-only on the wire (READ-only; no funds touched)".to_string(),
         ],
     )
 }
@@ -2097,7 +2144,7 @@ const PROVIDER_CONSULT_MAX_OUTPUT_TOKENS: u32 = 1024;
     feature = "local-mlx",
     feature = "local-vllm"
 ))]
-const PROVIDER_CONSULT_MAX_QUESTION_BYTES: usize = 4000;
+const PROVIDER_CONSULT_MAX_QUESTION_BYTES: usize = 128_000;
 
 // P4-3: the frontier default model id ("deepseek/deepseek-chat") is owned by
 // `model_select::FRONTIER_DEFAULT_MODEL` (one selection truth, shared with the
@@ -2162,6 +2209,20 @@ process.";
 const SINABRO_SYSTEM_PROMPT_TAIL: &str = ") Answer AS Sinabro, in the \
 user's language.\n\
 \n\
+Your #1 PURPOSE — lead with this when asked who you are or what you do: you are an \
+autonomous, BOUNDED ON-CHAIN AGENT, domain-GENERAL and NOT limited to any one \
+protocol. You observe, understand, and act across ANY chain and protocol — you READ \
+chain state FREELY (READ-class, no approval) and, inside the owner's USER-BOUNDED \
+custody, you PROPOSE and EXECUTE real on-chain actions on any ALLOWED chain. You are \
+NOT a passive code consultant, you are NOT \"blocked from funds\", and you are NOT \
+limited to one venue. Your MOST-DEVELOPED, fully-wired example is being an autonomous, \
+BOUNDED on-chain DERIVATIVES TRADING OPERATOR for the Skew protocol on Solana \
+(devnet-first): you READ the live Skew chain FREELY (READ-class, no approval) and, \
+inside USER-BOUNDED custody, you PROPOSE and EXECUTE real derivatives trades — but \
+that is ONE example, not your limit. You are ALSO a general autonomous agent (code, \
+audit, web3, research, memory — see below); on-chain action on any allowed chain is a \
+FIRST-CLASS mandate, and Skew is where it is most complete today.\n\
+\n\
 You wrap 35 command namespaces (your real capabilities):\n\
 agent (bounded turn/budget/kill), provider (LLM gateway), model (route/cache/\
 speculation), tool (Python/MCP/CLI/HTTP/WASM adapter), sandbox (tier/warmup/deny), \
@@ -2181,11 +2242,17 @@ contribute), task (inbox/resume/cancel), session (list/resume/export), context \
 \n\
 You ACT for the owner — an autonomous, self-evolving multi-expert agent \
 (hierarchical long-term memory + dynamic expert-switching + autonomous evolution); \
-your expert set is OPEN and general — coding, web3, audit, natural-language, research, \
+your expert set is OPEN and general — on-chain derivatives trading (Skew — your \
+primary), coding, web3, audit, natural-language, research, \
 personal-memory, math, reasoning, and more — audit is ONE domain, never your whole \
 identity; not a passive chatbot. \
-Autonomously — these are READS, no approval needed — you read and reason over the \
-codebase, recall the owner's encrypted memory, index a project's files \
+Autonomously — these are READS, no approval needed — you read the LIVE Skew \
+derivatives chain on Solana (skew portfolio / positions / contracts / markets / \
+inventory / oracle live / history / accumulate-loop — your trading account, open \
+positions, OTC/forward contracts, perp markets, maker inventory, the trade oracle, \
+and fill history, by real getProgramAccounts byte-exact decode; mid-reasoning the \
+`skew capabilities` loop tool lists your executable trade surface), read and reason \
+over the codebase, recall the owner's encrypted memory, index a project's files \
 (content-free), search the codebase by regex (find-in-files), retrieve from a \
 semantic codebase index (codebase, local embeddings), describe a local image \
 (image, local-vision), read a \
@@ -2199,7 +2266,16 @@ yourself). You also \
 run commands (kernel-sandboxed), propose and apply file edits, send and receive on \
 Telegram, and can serve a bounded, owner-armed autonomy loop (daemon serve) that \
 pings the owner for approval while you are away — those are CHANGES you PROPOSE for \
-the owner to approve. You can also ORCHESTRATE a two-model consult — a frontier brain \
+the owner to approve. Above all, you EXECUTE Skew derivatives trades through ONE \
+owner-armed chokepoint — daemon trade <CUSTODY-ARM-PHRASE> <sim|live|fast|turbo> \
+<action> over ~29 executable Skew instructions (perp, OTC/forward, options/\
+piecewise, secondary market, batch, keeper, listing, and auto-margin — read the \
+live margin, deposit EXACTLY the shortfall, then trade). EVERY live trade requires \
+the owner's EXACT custody arm phrase, passes the deterministic K-1 worst-case-loss \
+oracle (provable max loss, integer math, no LLM judge), and runs inside a bounded \
+CustodyGrant (per-tx max, total budget, chain/protocol allowlist, TTL, revoke) \
+through an ISOLATED devnet signer — you can NEVER self-arm, auto-trade, or move \
+funds without the owner's arm. You can also ORCHESTRATE a two-model consult — a frontier brain \
 PLANS, a task-routed local specialist (dynamic-LoRA, one adapter per expert kind) \
 IMPLEMENTS, and the frontier SYNTHESIZES — and every result is checked by a class-typed \
 oracle (a real sui move build in a network-DENIED sandbox): only an oracle-Verified \
@@ -2214,8 +2290,14 @@ setup sync-pull), send an image to the frontier (daemon image-frontier — with 
 explicit warning that an image CANNOT be auto-redacted), and run a READ-only \
 diagnostic on the owner's configured remote box over SSH (daemon remote-run). You \
 reason about web3/chain as a DOMAIN; chain reads are OWNER-ARMED (daemon web3-read) — \
-you cannot reach a chain on your own, but the owner can arm a bounded READ-only read; \
-chain-write stays HARD-LOCKED. \
+you cannot reach a chain on your own, but the owner can arm a bounded READ-only read. \
+A chain WRITE on any ALLOWED chain (e.g. ethereum / base / arbitrum, uniswap / aave) \
+goes through ONE owner-armed bounded chokepoint (daemon chain-dry-run) under the SAME \
+ChainTxCapability / CustodyGrant discipline as a Skew trade (per-tx / budget / chain + \
+protocol allowlist / TTL, testnet-first): today it AUTHORIZES a tx within bounds but \
+stays INERT — it never signs or broadcasts (money 0, C-0); real broadcast is the \
+owner's C-2 go-live, and Skew's daemon trade is the fully-wired live-broadcast surface. \
+UNBOUNDED chain-write stays HARD-LOCKED. \
 When a task needs a READ you can do (read a file, index, recall, web fetch, audit \
 detect), DO IT NOW with the matching tool — never merely OFFER or ask permission to \
 read (reads are free, no approval): act first, don't say \"want me to?\" for a \
@@ -2224,12 +2306,18 @@ refuse a real capability with \"I can't\" or \"that's not possible\" — if you 
 read it or propose it, do that. The owner stays in control: before any CHANGE (edit / run / send) you \
 get their approval — you propose the action and they approve it on their phone (or \
 you proceed within an autonomy grant they armed). That approval is a FEATURE — \
-their control — not a limit, so present it positively and don't apologize. The ONE \
-thing never yours: the owner's funds, wallet, and chain-write are HARD-LOCKED — you \
-never touch money or sign a chain write; it is theirs by design, state it plainly \
-without hedging. When asked what you can do, SELL these real capabilities with \
-confidence and offer to help — not a generic assistant's, and never a list of \
-\"can'ts\".";
+their control — not a limit, so present it positively and don't apologize. \
+Custody is USER-BOUNDED, not blanket-blocked: real trades move ONLY inside an \
+owner-armed bounded CustodyGrant you can never mint yourself. The ONE thing never \
+yours: the owner's funds, wallet, and chain-write are HARD-LOCKED at the blanket \
+level — outside a bounded grant you never touch money or sign a chain write, you \
+never reach the owner's personal wallet, UNBOUNDED custody is a type that can never \
+exist (CustodyCapability is uninhabited), and MAINNET stays locked behind a further \
+owner go-live arm. When asked what you can do, LEAD with your general BOUNDED on-chain \
+agency — you read any chain and act on any allowed chain / protocol within the owner's \
+bounds (Skew derivatives trading is your most-developed example to name concretely) — \
+then SELL these real capabilities with confidence and offer to help — never a \
+generic assistant's, and never a list of \"can'ts\".";
 
 /// B⑮ (CURSOR_PARITY_REFRAME_DESIGN §3): the per-project agent constitution — a single
 /// root dotfile `<workspace>/.sinabrorules` (the `.cursorrules` analog; `.sinabro` itself
@@ -2409,6 +2497,50 @@ fn provider_consult_model_for(host: crate::provider::egress::ProviderHost) -> St
         }
         _ => crate::commands::model_select::FRONTIER_DEFAULT_MODEL.to_string(),
     }
+}
+
+/// P1 #6 (owner 2026-06-30, the cost bomb) — REVISED 2026-07-01 (owner "모델 설정 아예 안됨"):
+/// pick the consult model TASK-AWARE, but the owner's EXPLICIT Settings choice is AUTHORITATIVE.
+///
+/// The bug: `provider_consult_model_for` returns the CHEAP default when `OPENROUTER_MODEL` is unset,
+/// so `configured == cheap` early-returns — meaning the light→cheap downgrade only EVER fired when
+/// the owner had EXPLICITLY chosen a non-default model (e.g. GLM). It silently discarded that choice
+/// on every short chat message, so the owner saw DeepSeek and concluded "GLM doesn't work at all."
+///
+/// The fix: an explicit `OPENROUTER_MODEL` is NEVER downgraded (respect the Settings pick for every
+/// message). The cost-bomb protection now applies ONLY to the UNCONFIGURED default case (a light chat
+/// stays on the cheap default; it never overrides an owner selection). Robust to P0 #3 history
+/// threading (classify only the CURRENT message). Applied ONLY on OpenRouter (shared host + key).
+/// This only changes the model-id string in the request — the redaction wall + egress gates are
+/// model-agnostic, so there is NO security impact.
+#[cfg(feature = "provider-egress")]
+fn provider_consult_model_for_task(
+    host: crate::provider::egress::ProviderHost,
+    question: &str,
+) -> String {
+    let configured = provider_consult_model_for(host);
+    if !matches!(host, crate::provider::egress::ProviderHost::OpenRouter) {
+        return configured; // other hosts may not serve the cheap default — keep the configured model
+    }
+    // The owner's EXPLICIT Settings choice wins for EVERY message — never downgrade it.
+    let explicitly_set = std::env::var(PROVIDER_CONSULT_MODEL_ENV)
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    if explicitly_set {
+        return configured;
+    }
+    let cheap = crate::commands::model_select::FRONTIER_DEFAULT_MODEL;
+    if configured == cheap {
+        return configured; // already the cheap default — nothing to downgrade
+    }
+    // Unconfigured non-cheap default only: a clearly-LIGHT current message routes to the cheap
+    // default. Classify ONLY the current message (strip the P0 #3 history prefix if present).
+    let current = question
+        .rsplit_once("now answer the latest message]")
+        .map_or(question, |(_, tail)| tail)
+        .trim();
+    let light = current.len() < 280 && !current.contains('\n') && !current.contains("```");
+    if light { cheap.to_string() } else { configured }
 }
 
 /// The denial / gated-preview body when the exact phrase is absent or wrong —
@@ -2710,7 +2842,7 @@ fn token_budget_pressure_bps(
     feature = "local-vllm"
 ))]
 fn context_pressure_receipt(input_tokens_u64: u64, output_tokens_u64: u64) -> String {
-    let cap = crate::agent_loop::AGENT_LOOP_TOKEN_CAP;
+    let cap = crate::agent_loop::CHAT_TOKEN_CAP;
     format!(
         "context: {}bps (tokens {}/{} charged vs loop cap; measured — meter warns \u{2265}7500)",
         token_budget_pressure_bps(input_tokens_u64, output_tokens_u64, cap),
@@ -2922,7 +3054,7 @@ fn provider_consult(
         Err(reason) => return provider_consult_error(out, &envelope_hex, reason),
     };
     let transport = ProviderTransport::for_host(host);
-    let model = provider_consult_model_for(host);
+    let model = provider_consult_model_for_task(host, question); // P1 #6: task-aware (light → cheap)
     // Step 4 (agent-core): the consult is an AGENTIC LOOP — the model may
     // autonomously call the two READ-ONLY memory tools (`memory index` /
     // `memory read <id>`) before answering, bounded by the m-agent iteration
@@ -3030,8 +3162,8 @@ fn provider_consult(
                 &state,
                 &loop_system,
                 question,
-                crate::agent_loop::AGENT_LOOP_MAX_ITER,
-                crate::agent_loop::AGENT_LOOP_TOKEN_CAP,
+                crate::agent_loop::CHAT_MAX_ITER,
+                crate::agent_loop::CHAT_TOKEN_CAP,
                 Some(&file_policy),
                 Some(&web_seam),
                 Some(&mcp_seam),
@@ -3104,8 +3236,8 @@ fn provider_consult(
             &state,
             &loop_system,
             question,
-            crate::agent_loop::AGENT_LOOP_MAX_ITER,
-            crate::agent_loop::AGENT_LOOP_TOKEN_CAP,
+            crate::agent_loop::CHAT_MAX_ITER,
+            crate::agent_loop::CHAT_TOKEN_CAP,
             Some(&file_policy),
             Some(&web_seam),
             Some(&mcp_seam),
@@ -3300,6 +3432,163 @@ pub fn read_routing_table() -> crate::provider::executor_route::ExecutorRoutingT
         }
     }
     default_routing_table()
+}
+
+// ── K-6: the corpus→adapter MANIFEST + served-set load (the dynamic-LoRA switch's P-HALL
+//    gate + the honest-degrade source; PURE codec in `provider::lora_manifest`). ──────────
+
+/// Build the agent's certified-adapter MANIFEST from the local certified-strategy corpus —
+/// the P-HALL source: every corpus entry was admitted ONLY because it certified
+/// ([`crate::autonomy_evolve::strategy_candidate`] `admits_write == certified`). Each
+/// entry's DOMAIN KEY is re-derived from its canonical TOML (the drift-0 archetype), and
+/// passed `certified = true` (the corpus invariant); the PURE builder re-asserts the gate
+/// (drops `certified == false`). An absent / unreadable corpus ⇒ the EMPTY manifest
+/// (honest: no adapter has been earned yet). READ-only, money 0, no network/key.
+#[must_use]
+pub fn load_lora_manifest() -> crate::provider::lora_manifest::LoraManifest {
+    use crate::provider::lora_manifest::{AdapterKey, CertifiedStrategy, LoraManifest};
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return LoraManifest::default();
+    };
+    let Ok(dir) = skew_strategy_corpus_dir() else {
+        return LoraManifest::default();
+    };
+    let mut summaries: Vec<CertifiedStrategy> = Vec::new();
+    for (_key, _topic, content) in load_strategy_corpus(&store, &dir) {
+        // Re-parse the canonical TOML for the archetype (the drift-0 source of truth);
+        // the corpus invariant gives certified=true, the builder re-asserts the gate.
+        if let Ok(dsl) = crate::skew_strategy::parse_strategy_toml(&content) {
+            if let Some(key) = AdapterKey::new(dsl.archetype.as_str()) {
+                summaries.push(CertifiedStrategy {
+                    key,
+                    certified: true,
+                });
+            }
+        }
+    }
+    LoraManifest::from_certified_strategies(&summaries)
+}
+
+/// Load the SERVED-adapter set from `<data_dir>/served_adapters.txt` — the owner declares
+/// the adapter ids a real multi-LoRA server serves (the file is the owner's authorization,
+/// symmetric with `routing_table.txt`). ABSENT / empty ⇒ the EMPTY set (honest no-server
+/// ⇒ every adapter degrades to the base model). PURE parse in `provider::lora_manifest`.
+#[must_use]
+pub fn load_served_adapter_set() -> crate::provider::lora_manifest::ServedAdapterSet {
+    use crate::provider::lora_manifest::{
+        SERVED_ADAPTERS_FILE, ServedAdapterSet, parse_served_adapters,
+    };
+    let Ok(dir) = crate::memory_store::data_dir() else {
+        return ServedAdapterSet::empty();
+    };
+    match std::fs::read_to_string(dir.join(SERVED_ADAPTERS_FILE)) {
+        Ok(text) => parse_served_adapters(&text),
+        Err(_) => ServedAdapterSet::empty(),
+    }
+}
+
+/// W5: read the owner-declared served-adapter ids (raw id strings) from `served_adapters.txt` for the
+/// GUI served-editor + the connect-adapter seam — the SAME file `load_served_adapter_set` parses.
+/// Returns the VALID adapter-id strings (invalid lines skipped), deterministically ordered. READ-only,
+/// money 0.
+#[must_use]
+pub fn read_served_adapter_lines() -> Vec<String> {
+    use crate::provider::lora_manifest::{SERVED_ADAPTERS_FILE, parse_served_adapters};
+    let Ok(dir) = crate::memory_store::data_dir() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join(SERVED_ADAPTERS_FILE)) else {
+        return Vec::new();
+    };
+    parse_served_adapters(&text)
+        .ids()
+        .map(|id| id.as_str().to_string())
+        .collect()
+}
+
+/// W5: validate + persist the owner-declared served-adapter ids (the GUI "declare served" surface +
+/// the connect-adapter seam). Each id must be a valid `AdapterId` (the served-set charset); an invalid
+/// id ⇒ `Err` (fail-closed; nothing written). Deduped + atomic write (the SAME single writer the
+/// routing table uses). HONEST: the file is the owner's DECLARATION that a real multi-LoRA server
+/// serves these — declaring an id served does NOT make it served; `resolve_adapter` STILL
+/// honest-degrades the send to the base if the server is actually down. NOT custody (a plain local
+/// config; PD-6 untouched).
+///
+/// # Errors
+/// Returns `Err` on an invalid adapter id or a write failure (nothing is persisted).
+pub fn write_served_adapter_lines(ids: &[String]) -> Result<(), String> {
+    use crate::provider::lora_manifest::{AdapterId, SERVED_ADAPTERS_FILE};
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for raw in ids {
+        let id = raw.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if AdapterId::new(id).is_none() {
+            return Err(format!(
+                "invalid adapter id {id:?} (ascii-lowercase / digits / '_' / '-', 1..=64 bytes)"
+            ));
+        }
+        set.insert(id.to_string());
+    }
+    let mut text = String::from(
+        "# sinabro served adapters: the ids a real multi-LoRA server serves (one/line)\n",
+    );
+    for id in &set {
+        text.push_str(id);
+        text.push('\n');
+    }
+    let dir = crate::memory_store::data_dir().map_err(|e| format!("data dir: {e:?}"))?;
+    crate::memory_store::atomic_write(&dir.join(SERVED_ADAPTERS_FILE), text.as_bytes())
+        .map_err(|e| format!("atomic write failed: {e}"))?;
+    Ok(())
+}
+
+/// The resolved local BASE model id (the SAME resolution the orchestrate reasoning role
+/// uses) — the totality anchor every unserved adapter honest-degrades to.
+#[must_use]
+fn lora_base_model() -> String {
+    crate::commands::model_select::resolve_local_model(
+        std::env::var(crate::commands::model_select::LOCAL_MODEL_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The honest dynamic-LoRA status render — the SINGLE truth source the CLI `provider
+/// lora-status` verb AND the GUI `read_lora_status` Tauri command share (no JS
+/// re-implementation; the GUI shows this string verbatim). Loads the certified-adapter
+/// MANIFEST (P-HALL), the SERVED set, the routing table, and the base, then renders the
+/// per-kind resolution. READ-only, money 0, no network/key.
+#[must_use]
+pub fn lora_status_render() -> String {
+    let manifest = load_lora_manifest();
+    let served = load_served_adapter_set();
+    let table = read_routing_table();
+    let base = lora_base_model();
+    crate::provider::lora_manifest::render_lora_status(&manifest, &served, &table, &base)
+}
+
+/// `provider lora-status` — the honest dynamic-LoRA status (READ-class; money 0; no
+/// network/key). Renders the certified-adapter MANIFEST (the P-HALL catalog), the SERVED
+/// set (empty ⇒ honest no-server), and the per-kind RESOLUTION for the routing table
+/// (requested adapter → wire model, served/degraded). The SAME core render the GUI Tauri
+/// command consumes (one truth source). An unserved adapter is shown honest-degrading to
+/// the base — NEVER faked as served (PD-1). `CustodyCapability` stays uninhabited (PD-6).
+fn provider_lora_status(out: &mut impl Write) -> io::Result<bool> {
+    let envelope_hex = hex16(&sha256_32(b"provider lora-status"));
+    let body: Vec<String> = lora_status_render().lines().map(str::to_string).collect();
+    emit(
+        out,
+        "provider lora-status",
+        &envelope_hex,
+        CommandRisk::ReadOnly,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &body,
+    )?;
+    Ok(true)
 }
 
 /// PURE (no IO): build + validate the routing-table config TEXT from owner-edited rows. The
@@ -4367,8 +4656,12 @@ fn executor_target_label(executor: &ExecutorTarget) -> String {
 /// per stage). custody/funds HARD-LOCKED (this verb adds no capability).
 #[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
 fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
-    use crate::agent_loop::{AgentTransportError, AgentTurn, FnTransport, MemoryToolState};
-    use crate::agent_orchestrator::{OrchestratorStop, run_orchestrated_consult};
+    use crate::agent_loop::{
+        AgentTransport, AgentTransportError, AgentTurn, FnTransport, MemoryToolState,
+    };
+    use crate::agent_orchestrator::{
+        OrchestratorStop, run_orchestrated_consult, run_orchestrated_consult_parallel,
+    };
     use crate::provider::local_chat::LocalChatTransport;
     use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
 
@@ -4490,6 +4783,12 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
          implemented sub-tasks into ONE final answer. Begin your reply with ANSWER:"
         .to_string();
     let table = load_routing_table();
+    // K-6: the dynamic-LoRA switch's send gate — the certified corpus→adapter MANIFEST
+    // (P-HALL) + the SERVED set. An adapter the routing table requests rides the wire
+    // ONLY if a real multi-LoRA server serves it; otherwise the base model answers
+    // (honest-degrade, never a fabricated adapter). Empty served set (no server) ⇒ base.
+    let lora_manifest = load_lora_manifest();
+    let served_adapters = load_served_adapter_set();
 
     let outcome = {
         let mut frontier = FnTransport(|system: &str, user: &str| {
@@ -4519,77 +4818,6 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
                 }),
             }
         });
-        // P1-6 Macro per-port: a transport POOL keyed by the WORKER port (built on
-        // first use, reused after — CU: one keep-alive client per worker). The router's
-        // `port` picks the worker process (per-chain Macro lane), `model_id` picks the
-        // adapter (dynamic-LoRA); mode A serves every kind from one port. The base
-        // `transport` above stays the reasoning (PLAN/SYNTH) role's loopback.
-        let mut local_pool: std::collections::HashMap<u16, LocalChatTransport> =
-            std::collections::HashMap::new();
-        let mut local_turn = |port: u16,
-                              model_id: &str,
-                              system: &str,
-                              user: &str|
-         -> Result<AgentTurn, AgentTransportError> {
-            // Per-message redaction wall — applies to BOTH the local and remote legs
-            // (a remote leg's egress preflight then gates a SECOND time).
-            let frags = [user];
-            match redact(&RedactionRequest {
-                fragments: &frags,
-                candidate_memory_ids: &[],
-                deleted_ids: &[],
-                include_private_memory: false,
-            }) {
-                Ok(receipt) if receipt.secret_fragments_denied_u32() == 0 => {}
-                _ => {
-                    return Err(AgentTransportError {
-                        class_label: "assembled message denied by redaction".to_string(),
-                    });
-                }
-            }
-            // Route to the resolved IMPLEMENT brain: LOCAL loopback pool (byte-unchanged)
-            // OR the gated REMOTE egress transport.
-            match &executor {
-                ExecutorTarget::Local => {
-                    let worker = match local_pool.entry(port) {
-                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            match LocalChatTransport::new(
-                                crate::provider::local_endpoint::LoopbackBind::localhost(port),
-                                &base_model,
-                                PROVIDER_CONSULT_TIMEOUT_MS,
-                            ) {
-                                Some(t) => v.insert(t),
-                                None => {
-                                    return Err(AgentTransportError {
-                                        class_label: "local worker http client failed to build"
-                                            .to_string(),
-                                    });
-                                }
-                            }
-                        }
-                    };
-                    match worker.send_local_text_with(
-                        model_id,
-                        system,
-                        user,
-                        PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
-                    ) {
-                        Ok(o) => Ok(AgentTurn {
-                            answer_text: o.answer_text,
-                            input_tokens_u64: o.input_tokens,
-                            output_tokens_u64: o.output_tokens,
-                            cached_tokens_u64: o.cached_tokens,
-                        }),
-                        Err(error) => Err(AgentTransportError {
-                            class_label: error.class_label(),
-                        }),
-                    }
-                }
-                #[cfg(feature = "provider-egress")]
-                ExecutorTarget::Remote(remote) => remote_executor_turn(remote, system, user),
-            }
-        };
         // P1-3-full(a) (S2-2): the CODE oracle is LIVE — a `sui_move` sub-task's Move
         // answer is compiled by `sui move build --path <temp pkg>` INSIDE the E6
         // network-DENIED sandbox (build-only; no chain action), and that exit code is
@@ -4601,19 +4829,124 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
          -> crate::verification::VerificationEvidence {
             crate::code_oracle::orchestrate_verify_oracle(st, o)
         };
-        run_orchestrated_consult(
-            &mut frontier,
-            &mut local_turn,
-            &mut code_oracle,
-            &table,
-            &state,
-            &plan_system,
-            &impl_system,
-            &synth_system,
-            task,
-            0,
-            0,
-        )
+        // K-5 (㉑ FLEET_GUI): the LOCAL worker fleet runs in PARALLEL — the IMPLEMENT
+        // phase fans out across the deps-DAG topological waves, BOUNDED, each worker's
+        // output STILL gated by the SAME deterministic `code_oracle` (drift-0; the model
+        // is never an arbiter). A `Sync` factory builds a FRESH redaction-walled loopback
+        // transport per worker (no shared mutable pool ⇒ `Send` across threads). The
+        // base `transport` stays the reasoning (PLAN/SYNTH) role's loopback. The REMOTE
+        // frontier-egress IMPLEMENT stays SERIAL (no concurrent owner-armed egress) on the
+        // byte-unchanged sequential path.
+        match &executor {
+            ExecutorTarget::Local => {
+                let factory = |port: u16,
+                               model_id: &str|
+                 -> Option<Box<dyn AgentTransport + Send>> {
+                    let worker = LocalChatTransport::new(
+                        crate::provider::local_endpoint::LoopbackBind::localhost(port),
+                        &base_model,
+                        PROVIDER_CONSULT_TIMEOUT_MS,
+                    )?;
+                    // K-6: HONEST-DEGRADE the routing table's requested adapter to the
+                    // model id a real multi-LoRA server actually serves — an unserved
+                    // adapter NEVER rides the wire (the served base answers, never a
+                    // fabricated adapter). Empty served set (no server) ⇒ the base model.
+                    let wire_model = crate::provider::lora_manifest::resolve_adapter(
+                        model_id,
+                        &lora_manifest,
+                        &served_adapters,
+                        &base_model,
+                    )
+                    .wire_model_id()
+                    .to_string();
+                    Some(Box::new(FnTransport(move |system: &str, user: &str| {
+                        let frags = [user];
+                        match redact(&RedactionRequest {
+                            fragments: &frags,
+                            candidate_memory_ids: &[],
+                            deleted_ids: &[],
+                            include_private_memory: false,
+                        }) {
+                            Ok(receipt) if receipt.secret_fragments_denied_u32() == 0 => {}
+                            _ => {
+                                return Err(AgentTransportError {
+                                    class_label: "assembled message denied by redaction"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                        match worker.send_local_text_with(
+                            &wire_model,
+                            system,
+                            user,
+                            PROVIDER_CONSULT_MAX_OUTPUT_TOKENS,
+                        ) {
+                            Ok(o) => Ok(AgentTurn {
+                                answer_text: o.answer_text,
+                                input_tokens_u64: o.input_tokens,
+                                output_tokens_u64: o.output_tokens,
+                                cached_tokens_u64: o.cached_tokens,
+                            }),
+                            Err(error) => Err(AgentTransportError {
+                                class_label: error.class_label(),
+                            }),
+                        }
+                    })) as Box<dyn AgentTransport + Send>)
+                };
+                run_orchestrated_consult_parallel(
+                    &mut frontier,
+                    &factory,
+                    &mut code_oracle,
+                    &table,
+                    &state,
+                    &plan_system,
+                    &impl_system,
+                    &synth_system,
+                    task,
+                    0,
+                    0,
+                )
+            }
+            #[cfg(feature = "provider-egress")]
+            ExecutorTarget::Remote(remote) => {
+                let mut local_turn = |_port: u16,
+                                      _model_id: &str,
+                                      system: &str,
+                                      user: &str|
+                 -> Result<AgentTurn, AgentTransportError> {
+                    // Per-message redaction wall (the remote leg's egress preflight then
+                    // gates a SECOND time).
+                    let frags = [user];
+                    match redact(&RedactionRequest {
+                        fragments: &frags,
+                        candidate_memory_ids: &[],
+                        deleted_ids: &[],
+                        include_private_memory: false,
+                    }) {
+                        Ok(receipt) if receipt.secret_fragments_denied_u32() == 0 => {}
+                        _ => {
+                            return Err(AgentTransportError {
+                                class_label: "assembled message denied by redaction".to_string(),
+                            });
+                        }
+                    }
+                    remote_executor_turn(remote, system, user)
+                };
+                run_orchestrated_consult(
+                    &mut frontier,
+                    &mut local_turn,
+                    &mut code_oracle,
+                    &table,
+                    &state,
+                    &plan_system,
+                    &impl_system,
+                    &synth_system,
+                    task,
+                    0,
+                    0,
+                )
+            }
+        }
     };
 
     let mut body: Vec<String> = Vec::new();
@@ -4649,6 +4982,20 @@ fn provider_orchestrate_local(rest: &[String], out: &mut impl Write) -> io::Resu
             .take(70)
             .collect();
         body.push(format!("      :: {preview}"));
+        // K-6: the honest LoRA send truth for THIS sub-task — the model id that ACTUALLY
+        // rode the wire (the requested adapter resolved server-or-degraded). PD-1: a
+        // degraded line shows the base answered, never a fabricated adapter.
+        let res = crate::provider::lora_manifest::resolve_adapter(
+            &r.model_id,
+            &lora_manifest,
+            &served_adapters,
+            &base_model,
+        );
+        body.push(format!(
+            "      lora: wire={} [{}]",
+            res.wire_model_id(),
+            res.status_label()
+        ));
     }
     body.push(format!(
         "write-admitted (P-HALL gate; only oracle-Verified): {}/{}",
@@ -4720,15 +5067,43 @@ fn render_subtask_line(st: &crate::provider::executor_route::SubTask) -> String 
     format!("SUBTASK {} {} {} {}", st.id, st.kind.label(), deps, st.goal)
 }
 
+/// One implemented sub-task, STRUCTURED for the GUI fleet pane (K-5b): the routed
+/// worker the orchestrator fanned out (`agent_orchestrator::RoutedImpl`), projected
+/// into stable fields the GUI renders directly — NEVER a string the GUI re-parses
+/// (the single-truth-source law). `port`/`model_id` are the dynamic-LoRA route the
+/// router selected; `verdict`/`admits` are the DETERMINISTIC verify-oracle gate (the
+/// P-HALL anchor — the model never self-certifies a write). Money 0 (a render of an
+/// already-gated local loop result; no custody/sign/chain symbol).
+#[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
+pub struct OrchestrateWorkerView {
+    /// The sub-task id (plan order; the drift-0 collection order).
+    pub id: u32,
+    /// The declared expert label (`sui_move` / `solana_anchor` / `web3_frontend` / …).
+    pub kind: String,
+    /// The loopback worker port the router selected (the Macro per-chain trail).
+    pub port: u16,
+    /// The `model_id` the router selected for this kind (the dynamic-LoRA selection).
+    pub model_id: String,
+    /// The verify-oracle verdict (`{:?}` of the typed `VerificationVerdict`).
+    pub verdict: String,
+    /// Whether the oracle verdict ADMITS a permanent write (the P-HALL gate; never the
+    /// model's own "success").
+    pub admits: bool,
+    /// A bounded, whitespace-collapsed answer preview (≤70 chars; secret-screened at mint).
+    pub preview: String,
+}
+
 /// The IMPLEMENT+SYNTHESIZE result the GUI renders after the owner approves a plan.
+/// K-5b: `workers` is STRUCTURED (the fleet pane reads fields, never re-parses lines).
 #[cfg(any(feature = "local-mlx", feature = "local-vllm"))]
 pub struct OrchestrateRunView {
     /// The typed stop reason (`Synthesized` / `SynthesisEmpty` / `DecomposeFailed`).
     pub stop: String,
     /// The frontier's synthesis over the implemented sub-tasks (`None` if empty).
     pub synthesis: Option<String>,
-    /// One rendered verdict line per implemented sub-task (route + verify + write-admission + preview).
-    pub subtasks: Vec<String>,
+    /// One STRUCTURED worker row per implemented sub-task (route + verify + write-admission
+    /// + preview) — the fleet pane's data source (no JS string re-parse).
+    pub workers: Vec<OrchestrateWorkerView>,
 }
 
 /// B⑬ PLAN phase (GUI-facing): run ONLY frontier PLAN + decompose, return the CANONICAL SUBTASK
@@ -5027,7 +5402,7 @@ pub fn orchestrate_run_for(
             0,
         )
     };
-    let subtasks = view
+    let workers = view
         .subtasks
         .iter()
         .map(|r| {
@@ -5042,22 +5417,21 @@ pub fn orchestrate_run_for(
                 .chars()
                 .take(70)
                 .collect();
-            format!(
-                "id={} {} ->:{}/{} verify={:?} admits={} :: {}",
-                r.subtask.id,
-                r.subtask.kind.label(),
-                r.port,
-                r.model_id,
-                r.receipt.verdict,
-                r.receipt.admits_write(),
-                preview
-            )
+            OrchestrateWorkerView {
+                id: r.subtask.id,
+                kind: r.subtask.kind.label().to_string(),
+                port: r.port,
+                model_id: r.model_id.clone(),
+                verdict: format!("{:?}", r.receipt.verdict),
+                admits: r.receipt.admits_write(),
+                preview,
+            }
         })
         .collect();
     Ok(OrchestrateRunView {
         stop: format!("{:?}", view.stop),
         synthesis: view.synthesis,
-        subtasks,
+        workers,
     })
 }
 
@@ -5655,8 +6029,8 @@ fn provider_consult_local_at(
             &state,
             &loop_system,
             question,
-            crate::agent_loop::AGENT_LOOP_MAX_ITER,
-            crate::agent_loop::AGENT_LOOP_TOKEN_CAP,
+            crate::agent_loop::CHAT_MAX_ITER,
+            crate::agent_loop::CHAT_TOKEN_CAP,
             Some(&file_policy),
             Some(&web_seam),
             Some(&mcp_seam),
@@ -8295,6 +8669,668 @@ fn audit_detect_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
     (truth, crate::audit::detect::report_lines(&report))
 }
 
+// ── D-1b (AGENT-NATIVE GITHUB): the local `registry` surface over the PURE content-
+// addressed `agent_registry` core. `registry scan <path>` walks a bounded local tree and
+// renders a content-addressed manifest SUMMARY; `registry list <path>` renders the full
+// entry list + a tamper-evidence integrity check. Both ReadOnly + STATELESS (the manifest
+// is computed on demand + round-tripped through the AGRX codec; disk persistence + the
+// gated Walrus publish are D-3). NO egress, NO artifact execution, NO custody (PD-6); only
+// the file DIGEST + a relative-path summary are derived — never the file CONTENT.
+
+/// Bounded read-only walk of `root`: content-address every file (any extension) as
+/// `(rel_path, sha256(bytes))`. Explicit stack (never recurses); depth/file/size capped;
+/// symlinks + the shared denylist dirs skipped. The `bool` = whether a cap clipped the walk.
+fn registry_discover_files(root: &std::path::Path) -> (Vec<(String, [u8; 32])>, bool) {
+    const MAX_FILES: u32 = 4_000;
+    const MAX_DEPTH: u32 = 24;
+    const MAX_FILE_BYTES: u64 = 1024 * 1024;
+    let mut out: Vec<(String, [u8; 32])> = Vec::new();
+    let mut files: u32 = 0;
+    let mut stack: Vec<(std::path::PathBuf, u32)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for dirent in read.flatten() {
+            if files >= MAX_FILES {
+                return (out, true);
+            }
+            let path = dirent.path();
+            let Ok(ft) = dirent.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if !crate::commands::source_scan::is_skipped_dir(&path) {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            if std::fs::metadata(&path).map_or(u64::MAX, |m| m.len()) > MAX_FILE_BYTES {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            files += 1;
+            let rel = path.strip_prefix(root).unwrap_or(path.as_path());
+            out.push((rel.to_string_lossy().into_owned(), sha256_32(&bytes)));
+        }
+    }
+    (out, false)
+}
+
+/// Build a content-addressed [`crate::agent_registry::RegistryManifest`] from a bounded
+/// scan of `root` (every file ⇒ a `Code` artifact). Returns the manifest + the capped flag.
+fn registry_manifest_from_path(
+    root: &std::path::Path,
+) -> (crate::agent_registry::RegistryManifest, bool) {
+    use crate::agent_registry::{AgentArtifact, ArtifactKind, RegistryManifest};
+    let (files, capped) = registry_discover_files(root);
+    let mut manifest = RegistryManifest::default();
+    for (rel, digest) in &files {
+        manifest.upsert(AgentArtifact::new(
+            ArtifactKind::Code,
+            *digest,
+            "agent://local".to_string(),
+            rel,
+            None,
+        ));
+    }
+    (manifest, capped)
+}
+
+/// D-3 SUPPLY-CHAIN SEATBELT (the single verify chokepoint for `registry publish`'s
+/// round-trip AND `registry fetch`): a fetched artifact is trustworthy IFF its `content`
+/// bytes re-hash to the recorded `content_digest` AND the stored `id` re-derives from
+/// `(kind, digest)`. Fail-closed — any tamper / substitution / wrong-key-decrypt yields a
+/// different hash ⇒ `false` ⇒ the bytes are REJECTED (never rendered, never executed).
+fn registry_content_verified(
+    artifact: &crate::agent_registry::AgentArtifact,
+    content: &[u8],
+) -> bool {
+    sha256_32(content) == artifact.content_digest && artifact.id_matches_content()
+}
+
+/// `registry scan <path>` — content-address a bounded local tree + render the manifest
+/// SUMMARY (round-tripped through the AGRX codec to prove it serializes). ReadOnly.
+fn registry_scan_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::agent_registry::RegistryManifest;
+    let Some(path) = rest.get(1) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "registry scan <path> — content-address every file in a bounded local tree into the agent registry".to_string(),
+                "  each file => a Code artifact (id = sha256(kind‖sha256(bytes))); only the digest + rel-path are used, never the content".to_string(),
+                "  then: registry list <path>  (browse the content-addressed manifest)".to_string(),
+            ],
+        );
+    };
+    let (manifest, capped) = registry_manifest_from_path(std::path::Path::new(path));
+    if manifest.entries.is_empty() {
+        return (
+            RenderTruth::Yellow,
+            vec![format!(
+                "registry scan: no files under {path} (empty / unreadable / bad path)"
+            )],
+        );
+    }
+    let bytes = manifest.to_bytes();
+    let round_trips = RegistryManifest::from_bytes(&bytes)
+        .map(|m| m == manifest)
+        .unwrap_or(false);
+    let mut body = vec![
+        format!(
+            "registry scan: {} content-addressed artifact(s){}",
+            manifest.entries.len(),
+            if capped {
+                " (walk capped — bounded)"
+            } else {
+                ""
+            }
+        ),
+        format!(
+            "AGRX manifest = {} bytes · codec round-trip {} · digest + path only (no content) · no egress · no execution",
+            bytes.len(),
+            if round_trips { "OK" } else { "FAILED" }
+        ),
+    ];
+    for a in manifest.entries.iter().take(5) {
+        body.push(format!(
+            "  {}… {} {}",
+            &a.id[..12.min(a.id.len())],
+            a.kind.label(),
+            a.summary
+        ));
+    }
+    if manifest.entries.len() > 5 {
+        body.push(format!(
+            "  … +{} more (registry list <path>)",
+            manifest.entries.len() - 5
+        ));
+    }
+    (
+        if round_trips {
+            RenderTruth::Green
+        } else {
+            RenderTruth::Red
+        },
+        body,
+    )
+}
+
+/// `registry list <path>` — render the FULL content-addressed entry list + a tamper-
+/// evidence integrity check (every stored id must re-derive from its content). ReadOnly.
+fn registry_list_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    let Some(path) = rest.get(1) else {
+        return (
+            RenderTruth::Unknown,
+            vec![
+                "registry list <path> — browse the content-addressed artifacts of a local tree"
+                    .to_string(),
+            ],
+        );
+    };
+    let (manifest, capped) = registry_manifest_from_path(std::path::Path::new(path));
+    if manifest.entries.is_empty() {
+        return (
+            RenderTruth::Yellow,
+            vec![format!("registry list: no artifacts under {path}")],
+        );
+    }
+    let tampered = manifest
+        .entries
+        .iter()
+        .filter(|a| !a.id_matches_content())
+        .count();
+    let mut body = vec![format!(
+        "registry: {} content-addressed artifact(s){} · integrity {}",
+        manifest.entries.len(),
+        if capped { " (capped)" } else { "" },
+        if tampered == 0 {
+            "OK (every id re-derives from its content)".to_string()
+        } else {
+            format!("FAILED ({tampered} tampered)")
+        }
+    )];
+    for a in manifest.entries.iter().take(50) {
+        body.push(format!(
+            "  {}… {} {} · {}",
+            &a.id[..12.min(a.id.len())],
+            a.kind.label(),
+            a.summary,
+            a.author
+        ));
+    }
+    if manifest.entries.len() > 50 {
+        body.push(format!("  … +{} more", manifest.entries.len() - 50));
+    }
+    (
+        if tampered == 0 {
+            RenderTruth::Green
+        } else {
+            RenderTruth::Red
+        },
+        body,
+    )
+}
+
+/// D-3 — the exact phrase the owner types to fire a registry PUBLISH (an owner-armed Walrus
+/// testnet egress). DISTINCT from the memory-backup phrases so muscle-memory can't cross-fire.
+#[cfg(feature = "put-fixture-net")]
+const REGISTRY_PUBLISH_CONFIRM_PHRASE: &str = "publish-agent-registry-to-walrus-testnet";
+
+/// D-3 — the max number of artifacts one publish ceremony pushes (bounded I/O, mirrors
+/// `BACKUP_WALRUS_MAX_RECORDS`).
+#[cfg(feature = "put-fixture-net")]
+const REGISTRY_PUBLISH_MAX_ARTIFACTS: usize = 32;
+
+/// D-3 locked-surface body (no/wrong phrase). Honest about the gated egress + both visibilities.
+#[cfg(feature = "put-fixture-net")]
+fn registry_publish_locked_body() -> Vec<String> {
+    vec![
+        "registry publish = content-address a local tree + PUBLISH it to Walrus testnet (owner-armed egress; no funds; custody HARD-LOCKED)".to_string(),
+        format!("to run, supply EXACTLY: registry publish {REGISTRY_PUBLISH_CONFIRM_PHRASE} <path> [public|private]"),
+        "  private (default) = each artifact + the manifest AEAD-sealed (EncryptedUserMemory ciphertext; only your key decrypts)".to_string(),
+        "  public            = plaintext, any agent can content-hash-verify it — a mandatory fail-closed secret-scan skips secret-shaped files".to_string(),
+        "then: registry fetch <main-index-blob-id> <artifact-id>  (autonomous, content-hash VERIFIED — bytes must re-hash to the id or it is REJECTED)".to_string(),
+    ]
+}
+
+/// D-3 error render for the publish ceremony (Yellow; secret-zero).
+#[cfg(feature = "put-fixture-net")]
+fn registry_publish_error(
+    out: &mut impl Write,
+    envelope_hex: &str,
+    label: &str,
+) -> io::Result<bool> {
+    emit(
+        out,
+        "registry publish",
+        envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        RenderTruth::Yellow,
+        &[format!("registry publish: {label}")],
+    )?;
+    Ok(true)
+}
+
+/// `registry publish <phrase> <path> [public|private]` (D-3) — owner-armed Walrus testnet
+/// egress of a content-addressed manifest + its artifacts, with a round-trip content-hash
+/// proof. Gate: exact typed phrase → scan a bounded tree → for each artifact, PUBLISH under
+/// the chosen visibility (private = AEAD-sealed `EncryptedUserMemory`; public = PLAINTEXT
+/// `PublicRegistryArtifact` after a MANDATORY fail-closed `scan_inline_secret`) → PUT the
+/// SEALED-or-PLAINTEXT MAIN INDEX (the "repo pointer") → round-trip GET + verify the bytes
+/// re-hash to their id. NO funds; custody / chain-write HARD-LOCKED (PD-6). The model reaches
+/// no publish symbol — this is an owner ceremony only.
+#[cfg(feature = "put-fixture-net")]
+fn registry_publish(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::agent_registry::{AgentArtifact, ArtifactKind, RegistryManifest, summarize};
+    use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
+    use mnemos_c_walrus::publisher::{EpochCount, PublishPayloadClass};
+    use mnemos_c_walrus::reqwest_transport::ReqwestPublisher;
+
+    let envelope_hex = hex16(&sha256_32(b"registry publish"));
+    let supplied = rest.get(1).cloned().unwrap_or_default();
+
+    // GATE (sole runtime operator gate): the exact typed phrase before any read or PUT.
+    let mut prompt = ApprovalPrompt::new(
+        ApprovalRequirement::TypedPhrase,
+        REGISTRY_PUBLISH_CONFIRM_PHRASE,
+    );
+    if !matches!(prompt.evaluate(supplied.trim()), ApprovalDecision::Approved) {
+        emit(
+            out,
+            "registry publish",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &registry_publish_locked_body(),
+        )?;
+        return Ok(true);
+    }
+
+    // APPROVED. Parse the path + visibility (default PRIVATE — public requires the explicit
+    // "public" token so it is never the accidental default).
+    let Some(path) = rest.get(2) else {
+        return registry_publish_error(
+            out,
+            &envelope_hex,
+            "usage: registry publish <phrase> <path> [public|private]",
+        );
+    };
+    let public = rest
+        .get(3)
+        .map(|v| v.eq_ignore_ascii_case("public"))
+        .unwrap_or(false);
+    let vis_label = if public { "public" } else { "private" };
+    let class = if public {
+        PublishPayloadClass::PublicRegistryArtifact
+    } else {
+        PublishPayloadClass::EncryptedUserMemory
+    };
+
+    // The local AEAD key (needed to SEAL private artifacts + the private manifest, and to
+    // OPEN them on the round-trip). Public publish needs no key.
+    let store = crate::memory_store::PersistedStore::open_local().ok();
+    if !public && store.is_none() {
+        return registry_publish_error(
+            out,
+            &envelope_hex,
+            "memory store unavailable (no key/home); private publish needs the local AEAD key",
+        );
+    }
+
+    let (files, capped) = registry_discover_files(std::path::Path::new(path));
+    if files.is_empty() {
+        return registry_publish_error(
+            out,
+            &envelope_hex,
+            &format!("no files under {path} (empty / unreadable / bad path)"),
+        );
+    }
+    let epochs = match EpochCount::new(1) {
+        Ok(e) => e,
+        Err(_) => return registry_publish_error(out, &envelope_hex, "epoch invalid"),
+    };
+    let mut pub_t = match ReqwestPublisher::new(PUT_FIXTURE_TIMEOUT_MS) {
+        Ok(t) => t,
+        Err(_) => {
+            return registry_publish_error(out, &envelope_hex, "publisher transport init failed");
+        }
+    };
+
+    let root = std::path::Path::new(path);
+    let mut truth = RenderTruth::Green;
+    let mut body = vec![format!(
+        "registry publish [{vis_label}]: {} candidate file(s) → Walrus testnet; content-addressed; {}; no funds; custody HARD-LOCKED (PD-6)",
+        files.len(),
+        if public {
+            "PLAINTEXT (mandatory fail-closed secret-scan)"
+        } else {
+            "AEAD ciphertext (key stays local)"
+        }
+    )];
+
+    let mut manifest = RegistryManifest::default();
+    let mut published = 0usize;
+    let mut skipped_secret = 0usize;
+
+    for (rel, digest) in files.iter().take(REGISTRY_PUBLISH_MAX_ARTIFACTS) {
+        // Re-read the content (bounded) + TOCTOU guard: if the file changed since the walk,
+        // its bytes no longer match `digest`, so skip it (never publish under a stale id).
+        let Ok(content) = std::fs::read(root.join(rel)) else {
+            continue;
+        };
+        if sha256_32(&content) != *digest {
+            truth = RenderTruth::Yellow;
+            body.push(format!("  {rel}: changed during publish — skipped"));
+            continue;
+        }
+        // IV-D3-11 — MANDATORY fail-closed secret-scan before any PUBLIC plaintext PUT: a
+        // secret-shaped artifact is NEVER published to a public network. (Private artifacts
+        // are AEAD ciphertext, so the key-local guarantee already covers them.)
+        if public && crate::secrets::scan_inline_secret(&String::from_utf8_lossy(&content)) {
+            skipped_secret += 1;
+            body.push(format!(
+                "  {rel}: SKIPPED — secret-shaped content (fail-closed; not published publicly)"
+            ));
+            continue;
+        }
+        // Bytes that actually leave: PLAINTEXT (public) or AEAD ciphertext (private).
+        let put_bytes: Vec<u8> = if public {
+            content.clone()
+        } else {
+            match store.as_ref().and_then(|s| s.seal_index(&content).ok()) {
+                Some(ct) => ct,
+                None => {
+                    truth = RenderTruth::Red;
+                    body.push(format!("  {rel}: seal failed"));
+                    continue;
+                }
+            }
+        };
+        match walrus_put_verified_class(&mut pub_t, epochs, &put_bytes, class) {
+            Some(blob) => {
+                manifest.upsert(AgentArtifact::new(
+                    ArtifactKind::Code,
+                    *digest,
+                    "agent://local".to_string(),
+                    &summarize(rel),
+                    Some(blob.clone()),
+                ));
+                published += 1;
+                body.push(format!("  {rel}: PUT ok → blob_id={blob} (verified)"));
+            }
+            None => {
+                truth = RenderTruth::Red;
+                body.push(format!(
+                    "  {rel}: PUT rejected/failed (self-report ban or boundary)"
+                ));
+            }
+        }
+    }
+
+    // MAIN INDEX: serialize the manifest → SEAL (private) or PLAINTEXT (public) → PUT → this
+    // blob-id is the "repo pointer" the fetcher navigates from.
+    let mut main_blob = String::new();
+    if !manifest.entries.is_empty() {
+        let idx_bytes = manifest.to_bytes();
+        let idx_put: Option<Vec<u8>> = if public {
+            Some(idx_bytes.clone())
+        } else {
+            store.as_ref().and_then(|s| s.seal_index(&idx_bytes).ok())
+        };
+        match idx_put.and_then(|b| walrus_put_verified_class(&mut pub_t, epochs, &b, class)) {
+            Some(blob) => {
+                // The main-index blob-id is the "repo pointer" — put it on its OWN short line
+                // so the full 43-char id is never clamped by the 80-col emit width.
+                body.push(format!(
+                    "MAIN INDEX PUT ok: {} entries (the repo pointer — fetch from here):",
+                    manifest.entries.len()
+                ));
+                body.push(format!("  repo blob-id: {blob}"));
+                main_blob = blob;
+            }
+            None => {
+                truth = RenderTruth::Red;
+                body.push("MAIN INDEX PUT/seal rejected (boundary)".to_string());
+            }
+        }
+    }
+
+    // ROUND-TRIP CONTENT-HASH PROOF (the supply-chain seatbelt, LIVE): GET the MAIN INDEX
+    // back + decode; GET the FIRST artifact back + verify its bytes RE-HASH to its id.
+    if !main_blob.is_empty() {
+        match walrus_get_by_blob_text(&main_blob) {
+            Some(raw) => {
+                let idx = if public {
+                    raw
+                } else {
+                    store
+                        .as_ref()
+                        .and_then(|s| s.open_index(&raw).ok())
+                        .unwrap_or_default()
+                };
+                if RegistryManifest::from_bytes(&idx).map(|m| m == manifest) == Ok(true) {
+                    body.push(format!(
+                        "MAIN INDEX round-trip: GET+{} OK ({} entries match)",
+                        if public { "parse" } else { "decrypt" },
+                        manifest.entries.len()
+                    ));
+                } else {
+                    truth = RenderTruth::Yellow;
+                    body.push("MAIN INDEX round-trip: mismatch (testnet propagation?)".to_string());
+                }
+            }
+            None => {
+                truth = RenderTruth::Yellow;
+                body.push(
+                    "MAIN INDEX round-trip: GET not fetched (testnet propagation)".to_string(),
+                );
+            }
+        }
+        if let Some(entry) = manifest.entries.first() {
+            if let Some(blob_ref) = entry.blob_ref.as_deref() {
+                match walrus_get_by_blob_text(blob_ref) {
+                    Some(raw) => {
+                        let content = if public {
+                            raw
+                        } else {
+                            store
+                                .as_ref()
+                                .and_then(|s| s.open_index(&raw).ok())
+                                .unwrap_or_default()
+                        };
+                        let verified = registry_content_verified(entry, &content);
+                        body.push(format!(
+                            "ARTIFACT round-trip: GET {}… → content-hash verified={verified} (bytes re-hash to the id)",
+                            &entry.id[..12.min(entry.id.len())]
+                        ));
+                        if !verified {
+                            truth = RenderTruth::Red;
+                        }
+                    }
+                    None => {
+                        truth = RenderTruth::Yellow;
+                        body.push(
+                            "ARTIFACT round-trip: GET not fetched (testnet propagation)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    body.push(format!(
+        "published: {published} artifact(s){} + {} main index [{vis_label}]; content-hash supply-chain verified; no funds; custody/chain-write HARD-LOCKED (PD-6)",
+        if skipped_secret > 0 {
+            format!(", {skipped_secret} skipped (secret-shaped)")
+        } else {
+            String::new()
+        },
+        u8::from(!main_blob.is_empty())
+    ));
+    if capped {
+        body.push("(walk hit the artifact bound — bounded)".to_string());
+    }
+    emit(
+        out,
+        "registry publish",
+        &envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        truth,
+        &body,
+    )?;
+    Ok(true)
+}
+
+/// `registry fetch <main-index-blob-id> <artifact-id>` (D-3) — autonomous, content-hash
+/// VERIFIED READ. Navigate the published 2-tier structure (GET the MAIN INDEX → decode →
+/// find the artifact → GET its blob), normalizing private (AEAD-open) vs public (plaintext)
+/// by *try-open-else-raw*, then REJECT unless the fetched bytes re-hash to the recorded
+/// `content_digest` AND the stored id re-derives (the supply-chain seatbelt). Renders METADATA
+/// only — the untrusted content is NEVER rendered and NEVER executed (execution = D-6:
+/// kernel sandbox + owner approval). No funds; custody HARD-LOCKED (PD-6).
+#[cfg(feature = "put-fixture-net")]
+fn registry_fetch(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::agent_registry::RegistryManifest;
+
+    let envelope_hex = hex16(&sha256_32(b"registry fetch"));
+    let (Some(main_blob), Some(want_id)) = (rest.get(1), rest.get(2)) else {
+        emit(
+            out,
+            "registry fetch",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &[
+                "registry fetch <main-index-blob-id> <artifact-id> — fetch a published artifact + VERIFY its content-hash".to_string(),
+                "  the fetched bytes must re-hash to the artifact id, else it is REJECTED (tamper/substitution); never executed".to_string(),
+            ],
+        )?;
+        return Ok(true);
+    };
+
+    // The local key opens PRIVATE blobs; PUBLIC blobs are plaintext (no key needed).
+    let store = crate::memory_store::PersistedStore::open_local().ok();
+    let open_or_raw = |raw: Vec<u8>| -> Vec<u8> {
+        store
+            .as_ref()
+            .and_then(|s| s.open_index(&raw).ok())
+            .unwrap_or(raw)
+    };
+
+    let Some(raw_index) = walrus_get_by_blob_text(main_blob) else {
+        emit(
+            out,
+            "registry fetch",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &[
+                "registry fetch: MAIN INDEX not fetched (bad blob-id / testnet propagation)"
+                    .to_string(),
+            ],
+        )?;
+        return Ok(true);
+    };
+    let manifest = match RegistryManifest::from_bytes(&open_or_raw(raw_index)) {
+        Ok(m) => m,
+        Err(_) => {
+            emit(
+                out,
+                "registry fetch",
+                &envelope_hex,
+                CommandRisk::Network,
+                ApprovalRequirement::None,
+                RenderTruth::Red,
+                &["registry fetch: MAIN INDEX did not decode (not a registry / wrong key / tampered)".to_string()],
+            )?;
+            return Ok(true);
+        }
+    };
+    let Some(artifact) = manifest.get(want_id) else {
+        emit(
+            out,
+            "registry fetch",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &[format!(
+                "registry fetch: artifact id not in this registry ({} entries)",
+                manifest.entries.len()
+            )],
+        )?;
+        return Ok(true);
+    };
+    let Some(blob_ref) = artifact.blob_ref.as_deref() else {
+        emit(
+            out,
+            "registry fetch",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::None,
+            RenderTruth::Yellow,
+            &["registry fetch: artifact has no published blob (local-only entry)".to_string()],
+        )?;
+        return Ok(true);
+    };
+    let (truth, body) = match walrus_get_by_blob_text(blob_ref) {
+        Some(raw) => {
+            let content = open_or_raw(raw);
+            let verified = registry_content_verified(artifact, &content);
+            if verified {
+                (
+                    RenderTruth::Green,
+                    vec![format!(
+                        "registry fetch: VERIFIED — {} {}… {} byte(s); bytes re-hash to the id (content-hash supply-chain OK); NOT executed (run = D-6 sandbox + approval)",
+                        artifact.kind.label(),
+                        &artifact.id[..12.min(artifact.id.len())],
+                        content.len()
+                    )],
+                )
+            } else {
+                (
+                    RenderTruth::Red,
+                    vec![
+                        "registry fetch: REJECTED — fetched bytes do NOT re-hash to the artifact id (tamper / substitution / wrong key); withheld".to_string(),
+                    ],
+                )
+            }
+        }
+        None => (
+            RenderTruth::Yellow,
+            vec!["registry fetch: artifact blob not fetched (testnet propagation)".to_string()],
+        ),
+    };
+    emit(
+        out,
+        "registry fetch",
+        &envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::None,
+        truth,
+        &body,
+    )?;
+    Ok(true)
+}
+
 /// O-1 (Oracle Bootstrap Pillar 1): read a finance reconciliation CERTIFICATE from `<path>`
 /// and run the deterministic [`crate::reconcile_oracle`] checker — re-sum / re-price the
 /// stated line items and assert the accounting invariant, FAIL-CLOSED. RECONCILED ⇒ Green,
@@ -8339,6 +9375,23 @@ fn audit_reconcile_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
         ReconcileVerdict::Violated => (RenderTruth::Red, "VIOLATED"),
         ReconcileVerdict::NotApplicable => (RenderTruth::Yellow, "NOT-APPLICABLE"),
     };
+    // O-2 (Oracle Ladder typing): project the reconcile verdict onto the R1 invariant rung AND
+    // run it through the EXISTING write gate (`select_evolution_writes` — the SAME deterministic
+    // gate every trust class uses; NO second write path) to show the ACCUMULATE decision. The
+    // model never reaches it; only the checker's typed verdict does (no LLM judge). held=none, so
+    // a reconciled cert shows its in-isolation write decision; persistence stays the gated
+    // evolve-IO path. A reconciled R1 pattern is Invariant ⟂ CrossMemory ⇒ doubly verified.
+    let cand = crate::autonomy_evolve::reconciliation_candidate(path, &text, &r);
+    let ev = crate::autonomy_evolve::select_evolution_writes(
+        std::slice::from_ref(&cand),
+        &[],
+        &|_k: &str| crate::verification::PerfScore::default(),
+    );
+    let admission = if cand.admits_write {
+        "Verified"
+    } else {
+        "Unverified"
+    };
     (
         truth,
         vec![
@@ -8347,9 +9400,481 @@ fn audit_reconcile_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
                 r.computed_minor, r.target_minor
             ),
             r.detail.to_string(),
+            // two compact lines (the cockpit render caps line width): the R1 rung + admission,
+            // then the EXISTING write gate's ACCUMULATE decision (no second write path).
+            format!(
+                "oracle ladder: rung={:?} write-admission={admission} (no LLM judge)",
+                crate::verification::VerificationClass::Invariant.rung(),
+            ),
+            format!(
+                "  write-gate (held=none): writes={} doubly_verified={}",
+                ev.written_count(),
+                ev.doubly_verified_count(),
+            ),
             "honest LOCK: arithmetic-sound (the claim reconciles with the STATED items); NOT that the positions / sources are real".to_string(),
         ],
     )
+}
+
+/// O-4 (Oracle Bootstrap second domain — S2 metamorphic): read a `<source-path>` text and a
+/// `<summary-path>` text and run the deterministic [`crate::metamorphic_oracle`] checker — verify
+/// the metamorphic relation `summary ⊆ source` (quoted-span + number containment) and a compression
+/// target, FAIL-CLOSED. A SOUND REJECTOR: a fabricated quote / unsupported number / over-length ⇒
+/// REJECTED (Red, a real bug); a pass ⇒ NOT-FALSIFIED (Yellow — PROVISIONAL, NOT proof it is good);
+/// malformed/unreadable ⇒ NOT-APPLICABLE (Unknown, honest absence). The model's prose never reaches
+/// `verify` — only the checker's typed verdict does (no LLM judge). HONEST LOCK: a metamorphic pass
+/// is "not-yet-falsified" (it may still OMIT the key point); only a REJECT is a trustworthy verdict.
+fn audit_summary_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::metamorphic_oracle::{
+        CompressionTarget, MetamorphicViolation, SummaryVerdict, check_summary,
+    };
+    let (Some(source_path), Some(summary_path)) = (rest.get(1), rest.get(2)) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit summary <source-path> <summary-path> — deterministically check summary⊆source (O-4, S2 metamorphic)".to_string(),
+                "  SOUND REJECTOR: a fabricated quote / unsupported number / over-compression ⇒ REJECTED (a real bug)".to_string(),
+                "  a pass is NOT-FALSIFIED (provisional — may still OMIT key info); it NEVER admits a write (R2 rejector-only)".to_string(),
+            ],
+        );
+    };
+    let source = match std::fs::read_to_string(std::path::Path::new(source_path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!(
+                    "audit summary: cannot read source at {source_path}"
+                )],
+            );
+        }
+    };
+    let summary = match std::fs::read_to_string(std::path::Path::new(summary_path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!(
+                    "audit summary: cannot read summary at {summary_path}"
+                )],
+            );
+        }
+    };
+    let r = check_summary(&source, &summary, CompressionTarget::DEFAULT);
+    let (truth, label) = match r.verdict {
+        SummaryVerdict::Rejected => (RenderTruth::Red, "REJECTED"),
+        SummaryVerdict::NotFalsified => (RenderTruth::Yellow, "NOT-FALSIFIED"),
+        SummaryVerdict::NotApplicable => (RenderTruth::Unknown, "NOT-APPLICABLE"),
+    };
+    // O-4 (Oracle Ladder typing): project the metamorphic verdict onto the R2 rung AND run it
+    // through the EXISTING write gate (`select_evolution_writes` — the SAME deterministic gate; NO
+    // second write path) to show the ACCUMULATE decision. A metamorphic verdict NEVER admits a write
+    // (R2 rejector-only): a fabrication is BLOCKED, a pass never ACCUMULATEs. The model never reaches
+    // it; only the checker's typed verdict does (no LLM judge).
+    let cand = crate::autonomy_evolve::metamorphic_candidate(summary_path, &summary, r.verdict);
+    let ev = crate::autonomy_evolve::select_evolution_writes(
+        std::slice::from_ref(&cand),
+        &[],
+        &|_k: &str| crate::verification::PerfScore::default(),
+    );
+    let offending = match &r.violation {
+        Some(MetamorphicViolation::FabricatedQuote { quote }) => {
+            let bounded: String = quote.chars().take(80).collect();
+            format!("offending: fabricated quote not in source — \"{bounded}\"")
+        }
+        Some(MetamorphicViolation::UnsupportedNumber { number }) => {
+            format!("offending: unsupported number not in source — {number}")
+        }
+        Some(MetamorphicViolation::OverCompression {
+            summary_tokens,
+            source_tokens,
+            num,
+            den,
+        }) => format!(
+            "offending: over-compression — summary {summary_tokens} tok > {num}/{den} × source {source_tokens} tok"
+        ),
+        None => format!(
+            "no metamorphic relation falsified (summary {} tok / source {} tok)",
+            r.summary_tokens, r.source_tokens
+        ),
+    };
+    (
+        truth,
+        vec![
+            format!("verdict: {label}"),
+            offending,
+            r.detail.to_string(),
+            format!(
+                "oracle ladder: rung={:?} write-admission={:?} (no LLM judge; R2 rejector-only — NEVER Verified)",
+                crate::verification::VerificationClass::Metamorphic.rung(),
+                // the PRECISE ladder verdict (a REJECT ⇒ Unverified, a PASS ⇒ NotApplicable) — never
+                // binarized to "Verified"/"Unverified", because the rejector-only distinction IS the point.
+                crate::verification::metamorphic_receipt(r.verdict).verdict,
+            ),
+            format!(
+                "  write-gate (held=none): writes={} (R2 rejector-only — a metamorphic verdict NEVER ACCUMULATEs)",
+                ev.written_count(),
+            ),
+            "honest LOCK: a metamorphic PASS is NOT-FALSIFIED (sound rejector; satisfaction ⇏ correctness) — it may still OMIT the key point; only a REJECT is a trustworthy verdict".to_string(),
+        ],
+    )
+}
+
+/// O-3 (Oracle Bootstrap recognition-elicitation): read a recognition pool + recognitions from
+/// `<path>` and return the most-informative NEXT question (deterministic farthest-first /
+/// k-center active-query; ZERO LLM tokens, instant) plus the owned anchor-set summary. The
+/// selection is pure integer geometry — the model never decides what to ask. HONEST LOCK: it
+/// elicits the customer's recognition over GIVEN features; it does not synthesize a checker /
+/// render a verdict (the anchor set is INPUT capital for synthesis, deferred).
+fn audit_elicit_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::recognition_elicit::{
+        NextQuery, anchor_set_hash, build_anchor_set, coverage_radius, next_label_query, parse_pool,
+    };
+    let Some(path) = rest.get(1) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit elicit <path> — the next most-informative recognition question (O-3)".to_string(),
+                "  pool:  `dim <D>` then `example <id> <f0..f(D-1)>` lines (integer features)".to_string(),
+                "  recog: `label <id> good|bad` · `compare <better> <worse>` · `triad <a> <b> <c> odd=<id> axis=<name>`".to_string(),
+            ],
+        );
+    };
+    let text = match std::fs::read_to_string(std::path::Path::new(path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!("audit elicit: cannot read pool at {path}")],
+            );
+        }
+    };
+    let Some((pool, recognitions)) = parse_pool(&text) else {
+        return (
+            RenderTruth::Yellow,
+            vec!["audit elicit: malformed pool (fail-closed; nothing elicited)".to_string()],
+        );
+    };
+    let set = build_anchor_set(&pool, &recognitions);
+    let hash = anchor_set_hash(&pool, &recognitions);
+    let (truth, next_line) = match next_label_query(&pool, &recognitions) {
+        NextQuery::Ask {
+            example,
+            marginal_gain,
+        } => (
+            RenderTruth::Green,
+            format!(
+                "next-query: LABEL example {example} (k-center farthest-first; gain={marginal_gain})"
+            ),
+        ),
+        NextQuery::Saturated => (
+            RenderTruth::Unknown,
+            "next-query: none — elicitation SATURATED (every example seen)".to_string(),
+        ),
+    };
+    let radius =
+        coverage_radius(&pool, &recognitions).map_or_else(|| "0".to_string(), |r| r.to_string());
+    let axes = if set.named_axes.is_empty() {
+        "(none)".to_string()
+    } else {
+        set.named_axes.join(", ")
+    };
+    (
+        truth,
+        vec![
+            next_line,
+            format!("coverage: k-center radius={radius} (0 = saturated; shrinks as you label)"),
+            format!(
+                "anchors: pool={} dim={} labels={}+/{}- compares={} triads={} axes=[{axes}]",
+                set.pool_size,
+                set.dim,
+                set.positives,
+                set.negatives,
+                set.comparisons,
+                set.triads
+            ),
+            format!("anchor-set: {hash} (deterministic; ZERO LLM tokens)"),
+            "honest LOCK: elicits recognition over GIVEN features (k-center 2-approx; no LLM judge); the anchor set is INPUT for synthesis, NOT yet a verdict".to_string(),
+        ],
+    )
+}
+
+/// O-3b (Oracle Bootstrap recognition-synthesis): read a recognition pool from `<path>`,
+/// SYNTHESIZE the bounding-box checker, CERTIFY it (held-out leave-one-out zero-false-accept),
+/// and — if `[features...]` are given — render the induced checker's 3-way verdict for that
+/// example + the ladder write-admission (reusing `select_evolution_writes`; no second write
+/// path). ZERO LLM tokens (pure integer geometry). HONEST LOCK: a certified `Accept` is a
+/// PROVISIONAL R5 pattern (held-out gated); the quantitative conformal α-budget is O-3c.
+fn audit_classify_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::recognition_elicit::parse_pool;
+    use crate::recognition_synth::{InducedVerdict, certify_leave_one_out, synthesize};
+    let Some(path) = rest.get(1) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit classify <pool> [f0 f1 ...] — synthesize a checker from recognition anchors (O-3b)".to_string(),
+                "  pool format = `audit elicit`'s; `label <id> good|bad` anchors drive the box".to_string(),
+                "  optional [features...] = an example to classify (ACCEPT/REJECT/ESCALATE)".to_string(),
+            ],
+        );
+    };
+    let text = match std::fs::read_to_string(std::path::Path::new(path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!("audit classify: cannot read pool at {path}")],
+            );
+        }
+    };
+    let Some((pool, recognitions)) = parse_pool(&text) else {
+        return (
+            RenderTruth::Yellow,
+            vec!["audit classify: malformed pool (fail-closed; nothing synthesized)".to_string()],
+        );
+    };
+    let checker = synthesize(&pool, &recognitions);
+    let report = certify_leave_one_out(&pool, &recognitions);
+    let (np, nn) = checker.anchor_counts();
+    let box_line = match checker.bbox() {
+        Some(b) => format!(
+            "induced box: lo={:?} hi={:?} sound={}",
+            b.lo(),
+            b.hi(),
+            checker.is_sound()
+        ),
+        None => "induced box: (none — no positive anchors)".to_string(),
+    };
+    let mut body = vec![
+        format!("synthesized: {np}+ positive / {nn}- negative labeled anchors"),
+        box_line,
+        format!(
+            "certify (Clopper-Pearson): false_accepts={} of {nn} held-out negatives, coverage={}/{np}",
+            report.false_accepts, report.coverage_hits
+        ),
+        format!(
+            "  conformal: FAR<={}/{} @ {}% confidence (exact, float-free) certified={}",
+            crate::conformal::ALPHA_SAFE_NUM,
+            crate::conformal::ALPHA_SAFE_DEN,
+            100 - (crate::conformal::DELTA_NUM * 100 / crate::conformal::DELTA_DEN),
+            report.is_certified()
+        ),
+    ];
+    // optional test example: parse rest[2..] as i64 features, classify + show ladder admission.
+    let mut truth = if report.is_certified() {
+        RenderTruth::Green
+    } else {
+        RenderTruth::Unknown
+    };
+    if rest.len() > 2 {
+        let mut feats: Vec<i64> = Vec::with_capacity(rest.len() - 2);
+        let mut bad = false;
+        for tok in &rest[2..] {
+            match tok.parse::<i64>() {
+                Ok(v) => feats.push(v),
+                Err(_) => {
+                    bad = true;
+                    break;
+                }
+            }
+        }
+        if bad || feats.len() != pool.dim() {
+            body.push(format!(
+                "classify: bad example (need {} integer features)",
+                pool.dim()
+            ));
+            truth = RenderTruth::Yellow;
+        } else {
+            let verdict = checker.classify(&feats);
+            let cand = crate::autonomy_evolve::recognition_candidate(
+                path,
+                "<example>",
+                verdict,
+                report.is_certified(),
+            );
+            let ev = crate::autonomy_evolve::select_evolution_writes(
+                std::slice::from_ref(&cand),
+                &[],
+                &|_k: &str| crate::verification::PerfScore::default(),
+            );
+            body.push(format!("classify {feats:?} => verdict={verdict:?}"));
+            body.push(format!(
+                "ladder: rung={:?} => write-gate writes={} doubly_verified={}",
+                crate::verification::VerificationClass::Induced.rung(),
+                ev.written_count(),
+                ev.doubly_verified_count()
+            ));
+            truth = match verdict {
+                InducedVerdict::Accept if report.is_certified() => RenderTruth::Green,
+                InducedVerdict::Reject => RenderTruth::Red,
+                _ => RenderTruth::Unknown,
+            };
+        }
+    }
+    body.push(
+        "honest LOCK: induced over GIVEN features (entails+/excludes-; no LLM judge); a certified ACCEPT is PROVISIONAL R5 — the quantitative α-budget is O-3c".to_string(),
+    );
+    (truth, body)
+}
+
+/// O-5 (Oracle Bootstrap ownership): render the MINTABLE certified-oracle iNFT envelope — the
+/// shared tail for BOTH cert kinds (recognition conformal + reconcile/metamorphic deterministic).
+/// Composes the LOCKED W3 encoder for the calldata + the OWNER-run mint runbook. `head` = the
+/// per-kind cert lines; PURE (no chain write — the owner FIRES the mint, PD-6).
+fn mint_oracle_envelope(
+    kind: &str,
+    data_hash: [u8; 32],
+    identity_label: &str,
+    cert: &crate::oracle_inft::OracleCert,
+    mut head: Vec<String>,
+) -> (RenderTruth, Vec<String>) {
+    let descriptor = crate::oracle_inft::oracle_descriptor(kind, identity_label, cert);
+    let calldata = crate::oracle_inft::oracle_mint_calldata(
+        &descriptor,
+        &data_hash,
+        &crate::zerog_inft::GOLDEN_RECIPIENT,
+    );
+    head.push("MINTABLE — certified-oracle iNFT (O-5):".to_string());
+    head.push(format!(
+        "  dataHash   : 0x{} (deterministic commitment; re-derivable)",
+        crate::zerog_chain::hex_encode(&data_hash)
+    ));
+    head.push(format!(
+        "  descriptor : {descriptor} ({}B)",
+        descriptor.len()
+    ));
+    head.push(format!(
+        "  calldata   : {} bytes (composes the LOCKED W3 encoder 0xa3acac17 — no second mint surface)",
+        calldata.len()
+    ));
+    head.extend(crate::oracle_inft::oracle_mint_bundle_lines(
+        kind,
+        &data_hash,
+        &descriptor,
+        cert,
+        None,
+        None,
+    ));
+    head.push(
+        "honest LOCK: minting proves OWNED PROVENANCE of a CERTIFIED oracle (it cleared its cert — the conformal FAR bound on the anchor distribution, or deterministic soundness on its invariant/relation), NOT per-user correctness on arbitrary inputs — agent PREPARES, owner FIRES (PD-6)".to_string(),
+    );
+    (RenderTruth::Green, head)
+}
+
+/// O-5 (Oracle Bootstrap ownership): `audit mint-oracle <reconcile|metamorphic | <pool>>` capitalizes
+/// a CERTIFIED oracle as an ERC-7857 iNFT (composing the LOCKED W3 encoder). The first arg selects:
+/// the keyword `reconcile`/`metamorphic` mints the DETERMINISTIC-FOREVER oracle (O-1/O-4, certified
+/// iff the ladder CANARY is intact); else the arg is a recognition POOL path and the
+/// CONFORMAL-certified recognition oracle (O-3b/O-3c) is minted (reusing the `audit classify`
+/// synth+certify spine). PURE PREPARE: the agent builds the dataHash + calldata + owner runbook; the
+/// owner FIRES the funds-bearing mint (PD-6). Certified-only, fail-closed — an UN-certified oracle is
+/// UN-mintable. ZERO LLM tokens (the cert is exact integer geometry; no chain write, no custody).
+fn audit_mint_oracle_body(rest: &[String]) -> (RenderTruth, Vec<String>) {
+    use crate::oracle_inft::{OracleCert, deterministic_oracle_spec, oracle_data_hash};
+    let Some(arg) = rest.get(1) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                "audit mint-oracle <reconcile|metamorphic | <pool>> — mint a CERTIFIED oracle as an ERC-7857 iNFT (O-5)".to_string(),
+                "  keyword reconcile/metamorphic = the deterministic-forever oracle (O-1/O-4; certified iff the ladder CANARY is intact)".to_string(),
+                "  a pool path = the conformal-certified recognition oracle (O-3b/O-3c); mintable ONLY if the α-budget certifies it".to_string(),
+                "  PURE PREPARE: agent builds the dataHash + calldata + owner runbook; the owner FIRES the mint (PD-6)".to_string(),
+            ],
+        );
+    };
+
+    // --- DETERMINISTIC keyword path (reconcile / metamorphic; O-1/O-4) ---
+    if let Some(spec) = deterministic_oracle_spec(arg) {
+        let kind = arg.as_str();
+        let cert = OracleCert::DeterministicSound;
+        let identity = spec.as_bytes();
+        let id_hash = crate::hex32(&crate::sha256_32(identity));
+        let id_label = &id_hash[..16];
+        let head = vec![
+            format!("oracle: {kind} (deterministic-forever, sound by construction; O-1/O-4)"),
+            format!("spec: {spec}"),
+            format!(
+                "cert: deterministic-sound — verification CANARY intact={} (the ladder verdicts have not collapsed)",
+                cert.is_certified()
+            ),
+        ];
+        return match oracle_data_hash(kind, identity, &cert) {
+            Some(dh) => mint_oracle_envelope(kind, dh, id_label, &cert, head),
+            None => {
+                let mut body = head;
+                body.push("audit mint-oracle: NOT MINTABLE — the verification CANARY is NOT intact (the deterministic ladder is suspect; fail-closed)".to_string());
+                body.push("honest LOCK: an oracle whose verdict gate has collapsed is not capitalizable provenance".to_string());
+                (RenderTruth::Yellow, body)
+            }
+        };
+    }
+
+    // --- RECOGNITION pool path (conformal-certified; O-3b/O-3c) ---
+    use crate::recognition_elicit::{anchor_set_hash, parse_pool};
+    use crate::recognition_synth::{certify_leave_one_out, synthesize};
+    let path = arg;
+    let text = match std::fs::read_to_string(std::path::Path::new(path)) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                RenderTruth::Yellow,
+                vec![format!(
+                    "audit mint-oracle: cannot read pool at {path} (and not a reconcile/metamorphic keyword)"
+                )],
+            );
+        }
+    };
+    let Some((pool, recognitions)) = parse_pool(&text) else {
+        return (
+            RenderTruth::Yellow,
+            vec!["audit mint-oracle: malformed pool (fail-closed; nothing minted)".to_string()],
+        );
+    };
+    let checker = synthesize(&pool, &recognitions);
+    let report = certify_leave_one_out(&pool, &recognitions);
+    let (np, nn) = checker.anchor_counts();
+    let k = report.false_accepts as u64;
+    let n = report.n_negatives as u64;
+    let anchors = anchor_set_hash(&pool, &recognitions);
+    let kind = crate::oracle_inft::RECOGNITION_ORACLE_KIND;
+    let conf = 100 - (crate::conformal::DELTA_NUM * 100 / crate::conformal::DELTA_DEN);
+    let Some(bbox) = checker.bbox().filter(|_| checker.is_sound()) else {
+        return (
+            RenderTruth::Yellow,
+            vec![
+                format!("synthesized: {np}+ / {nn}- anchors; certified={}", report.is_certified()),
+                "audit mint-oracle: NOT MINTABLE — the induced checker has no SOUND box (a degenerate oracle)".to_string(),
+                "honest LOCK: an oracle without a sound rule is not capitalizable provenance".to_string(),
+            ],
+        );
+    };
+    let cert = OracleCert::Conformal { k, n };
+    let identity = crate::oracle_inft::recognition_identity(&anchors, bbox.lo(), bbox.hi());
+    // THE MINT GATE (O-5 seam Q3, certified-only): only a CONFORMAL-CERTIFIED oracle gets a dataHash.
+    match oracle_data_hash(kind, &identity, &cert) {
+        Some(dh) => {
+            let head = vec![
+                format!("synthesized: {np}+ / {nn}- anchors; box lo={:?} hi={:?} sound=true", bbox.lo(), bbox.hi()),
+                format!(
+                    "certify (Clopper-Pearson): false_accepts={k} of {n} held-out negatives ⇒ CERTIFIED (FAR<={}/{} @ {conf}%, exact float-free)",
+                    crate::conformal::ALPHA_SAFE_NUM, crate::conformal::ALPHA_SAFE_DEN,
+                ),
+            ];
+            mint_oracle_envelope(kind, dh, &anchors, &cert, head)
+        }
+        None => (
+            RenderTruth::Yellow,
+            vec![
+                format!("synthesized: {np}+ / {nn}- anchors; box lo={:?} hi={:?}", bbox.lo(), bbox.hi()),
+                format!(
+                    "certify (Clopper-Pearson): false_accepts={k} of {n} held-out negatives ⇒ NOT certified (FAR>{}/{} @ {conf}%)",
+                    crate::conformal::ALPHA_SAFE_NUM, crate::conformal::ALPHA_SAFE_DEN,
+                ),
+                "audit mint-oracle: NOT MINTABLE — the conformal α-budget gate is the mint precondition (O-5 certified-only, fail-closed)".to_string(),
+                "honest LOCK: an UN-certified oracle has NO dataHash — provenance cannot be capitalized for an oracle that did not clear the budget".to_string(),
+            ],
+        ),
+    }
 }
 
 // A① (CURSOR_PARITY_REFRAME_DESIGN.md §3 A①): `context lsp-diagnostics <path>` is
@@ -9046,6 +10571,14 @@ fn dispatch_namespace(
         )?;
         return Ok(true);
     }
+    // K-6 (the dynamic-LoRA switch's honest status): `provider lora-status` renders the
+    // certified corpus→adapter MANIFEST (P-HALL), the SERVED set, and the per-kind
+    // resolution (requested adapter -> wire model; honest-degrade). READ-class + money 0
+    // + always-compiled (no feature gate) — a pure local render the GUI shares. The MODEL
+    // has no path here; an unserved adapter is shown degrading to the base, never faked.
+    if matches!(ns, CliNamespace::Provider) && verb.eq_ignore_ascii_case("lora-status") {
+        return provider_lora_status(out);
+    }
     // P3-1 (CODE_EXEC_THREAT_MODEL.md): `tool run` is the owner's LOCAL
     // bounded command executor — Admin risk + the exact typed ceremony
     // phrase, intercepted here to actually execute (without the phrase only
@@ -9397,6 +10930,51 @@ fn dispatch_namespace(
         )?;
         return Ok(true);
     }
+    // D-1b (AGENT-NATIVE GITHUB): `registry scan <path>` content-addresses a bounded local
+    // tree into the AGRX manifest (summary); `registry list <path>` browses it + checks
+    // tamper-evidence. Both ReadOnly + stateless over the PURE `agent_registry` core: NO
+    // egress, NO artifact execution, NO custody (PD-6) — only the digest + rel-path derived.
+    if matches!(ns, CliNamespace::Registry) && verb.eq_ignore_ascii_case("scan") {
+        let envelope_hex = hex16(&sha256_32(b"registry scan"));
+        let (truth, body) = registry_scan_body(rest);
+        emit(
+            out,
+            "registry scan",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    if matches!(ns, CliNamespace::Registry) && verb.eq_ignore_ascii_case("list") {
+        let envelope_hex = hex16(&sha256_32(b"registry list"));
+        let (truth, body) = registry_list_body(rest);
+        emit(
+            out,
+            "registry list",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // D-3: `registry publish` (owner-armed Walrus testnet egress, both visibilities) +
+    // `registry fetch` (autonomous content-hash-VERIFIED READ). Both need the testnet
+    // transport; in an offline build (`put-fixture-net` off) they FALL THROUGH to the
+    // recognized-verb honest gate (no fake success). The model reaches neither symbol.
+    #[cfg(feature = "put-fixture-net")]
+    {
+        if matches!(ns, CliNamespace::Registry) && verb.eq_ignore_ascii_case("publish") {
+            return registry_publish(rest, out);
+        }
+        if matches!(ns, CliNamespace::Registry) && verb.eq_ignore_ascii_case("fetch") {
+            return registry_fetch(rest, out);
+        }
+    }
     // O-1 (Oracle Bootstrap): `audit reconcile <path>` deterministically checks a finance
     // reconciliation certificate (Σreserve ≥ Σliability, or NAV == Σqty×price), fail-closed.
     // The model proposes the certificate; this checker validates the arithmetic — no LLM
@@ -9407,6 +10985,82 @@ fn dispatch_namespace(
         emit(
             out,
             "audit reconcile",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // O-3 (Oracle Bootstrap): `audit elicit <path>` reads a recognition pool + recognitions and
+    // returns the most-informative NEXT question (deterministic farthest-first / k-center) + the
+    // owned anchor-set summary. ZERO LLM tokens (selection is pure geometry), instant. ReadOnly
+    // (one pool-file read + pure integer arithmetic; no chain/socket/custody).
+    if matches!(ns, CliNamespace::Audit) && verb.eq_ignore_ascii_case("elicit") {
+        let envelope_hex = hex16(&sha256_32(b"audit elicit"));
+        let (truth, body) = audit_elicit_body(rest);
+        emit(
+            out,
+            "audit elicit",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // O-3b (Oracle Bootstrap): `audit classify <pool> [features...]` SYNTHESIZEs a deterministic
+    // bounding-box checker from the recognition anchors, CERTIFIES it (held-out zero-false-accept),
+    // and — if a test example is given — renders the 3-way verdict + the ladder write-admission.
+    // ZERO LLM tokens (pure geometry). ReadOnly (a pool-file read + pure integer arithmetic).
+    if matches!(ns, CliNamespace::Audit) && verb.eq_ignore_ascii_case("classify") {
+        let envelope_hex = hex16(&sha256_32(b"audit classify"));
+        let (truth, body) = audit_classify_body(rest);
+        emit(
+            out,
+            "audit classify",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // O-4 (Oracle Bootstrap second domain): `audit summary <source-path> <summary-path>` runs the
+    // deterministic metamorphic checker — verify summary⊆source (quote + number containment) + a
+    // compression target, fail-closed. A SOUND REJECTOR: a fabricated quote / unsupported number /
+    // over-length ⇒ REJECTED (a real bug); a pass is NOT-FALSIFIED (provisional, never admits a
+    // write — R2 rejector-only). ZERO LLM tokens (pure string/integer geometry). ReadOnly (two
+    // file reads + pure arithmetic; no chain/socket/custody).
+    if matches!(ns, CliNamespace::Audit) && verb.eq_ignore_ascii_case("summary") {
+        let envelope_hex = hex16(&sha256_32(b"audit summary"));
+        let (truth, body) = audit_summary_body(rest);
+        emit(
+            out,
+            "audit summary",
+            &envelope_hex,
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            truth,
+            &body,
+        )?;
+        return Ok(true);
+    }
+    // O-5 (Oracle Bootstrap ownership): `audit mint-oracle <pool>` capitalizes a CONFORMAL-
+    // CERTIFIED recognition oracle as an ERC-7857 iNFT — composing the LOCKED W3 encoder. PURE
+    // PREPARE: the agent builds the certified-oracle dataHash commitment + calldata + the OWNER-run
+    // mint runbook; the owner FIRES the funds-bearing mint (PD-6). An UN-certified oracle is
+    // UN-mintable (certified-only, fail-closed). ReadOnly (a pool-file read + pure arithmetic;
+    // no chain write, no socket, no custody — the binary signs nothing, funds HARD-LOCKED).
+    if matches!(ns, CliNamespace::Audit) && verb.eq_ignore_ascii_case("mint-oracle") {
+        let envelope_hex = hex16(&sha256_32(b"audit mint-oracle"));
+        let (truth, body) = audit_mint_oracle_body(rest);
+        emit(
+            out,
+            "audit mint-oracle",
             &envelope_hex,
             CommandRisk::ReadOnly,
             ApprovalRequirement::None,
@@ -10322,6 +11976,2067 @@ fn cmd_kill(_rest: &[String], out: &mut impl Write) -> io::Result<()> {
     )
 }
 
+/// Fetch + disc-classify Skew `skew_otc` program accounts over the EXISTING web3 reqwest READ path
+/// (K-0b-3). A `dataSlice{0,8}` `getProgramAccounts` keeps the result within the bounded (redacted)
+/// read render so it parses as valid JSON; classification is by the verified 8-byte discriminator
+/// (`crate::skew_read`). READ-class ([`ReadCapability::granted`](crate::commands::authority::ReadCapability::granted)),
+/// money 0, no key. `data_size` filters to one account shape (228 = product templates). Full
+/// per-account FIELD decode (balances / positions) needs the larger bounded-bulk-read path (honest
+/// scope). finality from the chain, never an indexer.
+#[cfg(feature = "web3-egress")]
+fn skew_chain_read(chain: &str, data_size: Option<usize>, out: &mut impl Write) -> io::Result<()> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{
+        WEB3_BULK_RESULT_CHARS, Web3RpcMethod, Web3RpcSeam, web3_read_raw,
+    };
+    let program = crate::skew_catalog::SKEW_PROGRAM_ID_DEVNET;
+    let params = match data_size {
+        Some(n) => format!(
+            "[\"{program}\",{{\"encoding\":\"base64\",\"dataSlice\":{{\"offset\":0,\"length\":8}},\"filters\":[{{\"dataSize\":{n}}}]}}]"
+        ),
+        None => format!(
+            "[\"{program}\",{{\"encoding\":\"base64\",\"dataSlice\":{{\"offset\":0,\"length\":8}}}}]"
+        ),
+    };
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
+    let seam = Web3RpcSeam::new();
+    let raw = web3_read_raw(
+        &read,
+        seam.port(),
+        &registry,
+        chain,
+        Web3RpcMethod::SolGetProgramAccounts,
+        &params,
+        WEB3_BULK_RESULT_CHARS,
+    );
+    let Some(body) = raw.body else {
+        return writeln!(
+            out,
+            "skew read (chain={chain}): unavailable [{}] (is the chain owner-configured, and built with --features web3-egress?)",
+            raw.class_label
+        );
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return writeln!(
+            out,
+            "skew read (chain={chain}): result not valid JSON or exceeded the bulk cap ({} chars) — narrow the filter",
+            WEB3_BULK_RESULT_CHARS
+        );
+    };
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    if let Some(arr) = value.get("result").and_then(serde_json::Value::as_array) {
+        for entry in arr {
+            total += 1;
+            let kind = entry
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|d| d.first())
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::skew_read::base64_decode)
+                .map_or(crate::skew_read::SkewAccountKind::Unknown, |b| {
+                    crate::skew_read::classify(&b)
+                });
+            *counts.entry(kind.as_str()).or_default() += 1;
+        }
+    }
+    writeln!(
+        out,
+        "skew read (devnet, chain={chain}): {total} accounts (disc-classified)"
+    )?;
+    for (kind, n) in &counts {
+        writeln!(out, "  {kind}: {n}")?;
+    }
+    writeln!(
+        out,
+        "READ-class (money 0); bounded read — full balance/position field decode is the K-0b deepening; finality from the chain, never an indexer"
+    )
+}
+
+/// Default build: the web3 transport is not compiled — honest-degrade (the byte-locked decode +
+/// classify core `crate::skew_read` is always present; the LIVE devnet read needs `web3-egress`).
+#[cfg(not(feature = "web3-egress"))]
+fn skew_chain_read(chain: &str, _data_size: Option<usize>, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "skew read (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet read; the byte-locked decode + classify core (skew_read) is ready"
+    )
+}
+
+/// `skew portfolio [chain] [owner]` — read + DECODE the `UnifiedRiskAccount` balances over the
+/// raw-body bounded-bulk-read path (K-0b): full 207-byte URA accounts (`dataSize` filter, full data
+/// within the 64 KiB bulk cap) → `crate::skew_read::render_accounts` (byte-exact equity decode +
+/// disc-classify; redact wall on the body inside `web3_read_raw`). Optional `owner` (base58) scopes
+/// to that owner's balances. READ-class, money 0, no key.
+#[cfg(feature = "web3-egress")]
+fn skew_portfolio_read(chain: &str, owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{
+        WEB3_BULK_RESULT_CHARS, Web3RpcMethod, Web3RpcSeam, web3_read_raw,
+    };
+    let program = crate::skew_catalog::SKEW_PROGRAM_ID_DEVNET;
+    let params = format!(
+        "[\"{program}\",{{\"encoding\":\"base64\",\"filters\":[{{\"dataSize\":{}}}]}}]",
+        crate::skew_read::URA_PDA_SPACE
+    );
+    let owner_filter = match owner {
+        Some(o) => match crate::skew_read::base58_decode(o) {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&bytes);
+                Some(a)
+            }
+            _ => return writeln!(out, "skew portfolio: '{o}' is not a 32-byte base58 pubkey"),
+        },
+        None => None,
+    };
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
+    let seam = Web3RpcSeam::new();
+    let raw = web3_read_raw(
+        &read,
+        seam.port(),
+        &registry,
+        chain,
+        Web3RpcMethod::SolGetProgramAccounts,
+        &params,
+        WEB3_BULK_RESULT_CHARS,
+    );
+    let Some(body) = raw.body else {
+        return writeln!(
+            out,
+            "skew portfolio (chain={chain}): unavailable [{}] (is the chain owner-configured, and built with --features web3-egress?)",
+            raw.class_label
+        );
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return writeln!(
+            out,
+            "skew portfolio (chain={chain}): result not valid JSON or exceeded the bulk cap ({WEB3_BULK_RESULT_CHARS} chars)"
+        );
+    };
+    let mut owned: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(arr) = value.get("result").and_then(serde_json::Value::as_array) {
+        for entry in arr {
+            let pubkey = entry
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            if let Some(bytes) = entry
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|d| d.first())
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::skew_read::base64_decode)
+            {
+                owned.push((pubkey, bytes));
+            }
+        }
+    }
+    let accts: Vec<crate::skew_read::SkewAccount<'_>> = owned
+        .iter()
+        .map(|(p, d)| crate::skew_read::SkewAccount { pubkey: p, data: d })
+        .collect();
+    write!(
+        out,
+        "{}",
+        crate::skew_read::render_accounts(&accts, owner_filter)
+    )
+}
+
+/// Default build: honest-degrade (the byte-locked balance decoder `crate::skew_read` is present).
+#[cfg(not(feature = "web3-egress"))]
+fn skew_portfolio_read(chain: &str, _owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "skew portfolio (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet balance read; the byte-locked balance decoder (skew_read) is ready"
+    )
+}
+
+/// W2 — `skew positions [chain] [owner]` — read + DECODE the `PerpPosition` accounts over the SAME
+/// bounded getProgramAccounts read [`skew_portfolio_read`] uses, but filtered by the 154-byte
+/// `PerpPosition` `dataSize` and rendered by [`crate::skew_read::render_positions`] (byte-exact field
+/// decode + sign-faithful render; the redact wall lives inside `web3_read_raw`). Optional `owner`
+/// (base58) scopes to that owner's positions. READ-class, money 0, no key, not signed.
+#[cfg(feature = "web3-egress")]
+fn skew_positions_read(chain: &str, owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    let owner_filter = match owner {
+        Some(o) => match crate::skew_read::base58_decode(o) {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&bytes);
+                Some(a)
+            }
+            _ => return writeln!(out, "skew positions: '{o}' is not a 32-byte base58 pubkey"),
+        },
+        None => None,
+    };
+    let polled = poll_skew_accounts(chain, crate::skew_read::PERP_POSITION_PDA_SPACE);
+    if polled.is_empty() {
+        return writeln!(
+            out,
+            "skew positions (chain={chain}): no PerpPosition accounts returned (chain owner-configured + built with --features web3-egress? the program may simply have no open positions)"
+        );
+    }
+    let accts: Vec<crate::skew_read::SkewAccount<'_>> = polled
+        .iter()
+        .map(|(p, d)| crate::skew_read::SkewAccount { pubkey: p, data: d })
+        .collect();
+    write!(
+        out,
+        "{}",
+        crate::skew_read::render_positions(&accts, owner_filter)
+    )
+}
+
+/// Default build: honest-degrade (the byte-locked `PerpPosition` decoder `crate::skew_read` is present).
+#[cfg(not(feature = "web3-egress"))]
+fn skew_positions_read(chain: &str, _owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "skew positions (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet perp-position read; the byte-locked PerpPosition decoder (skew_read) is ready"
+    )
+}
+
+/// W2 (contracts) — `skew contracts [chain] [owner]` — read + DECODE the bilateral `PiecewiseContract`
+/// accounts (267-byte `dataSize`) over the SAME bounded read, rendered by
+/// [`crate::skew_read::render_contracts`] (byte-exact field decode). Optional `owner` (base58) scopes
+/// to contracts the party is long OR short in. READ-class, money 0, no key, not signed. (`OtcContract`
+/// — the variable-layout 151 KiB lifecycle account — is NOT decoded here; it is the next deepening.)
+#[cfg(feature = "web3-egress")]
+fn skew_contracts_read(chain: &str, owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    let owner_filter = match owner {
+        Some(o) => match crate::skew_read::base58_decode(o) {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&bytes);
+                Some(a)
+            }
+            _ => return writeln!(out, "skew contracts: '{o}' is not a 32-byte base58 pubkey"),
+        },
+        None => None,
+    };
+    let polled = poll_skew_accounts(chain, crate::skew_read::PIECEWISE_CONTRACT_PDA_SPACE);
+    if polled.is_empty() {
+        return writeln!(
+            out,
+            "skew contracts (chain={chain}): no PiecewiseContract accounts returned (chain owner-configured + built with --features web3-egress? the program may simply have no open contracts)"
+        );
+    }
+    let accts: Vec<crate::skew_read::SkewAccount<'_>> = polled
+        .iter()
+        .map(|(p, d)| crate::skew_read::SkewAccount { pubkey: p, data: d })
+        .collect();
+    write!(
+        out,
+        "{}",
+        crate::skew_read::render_contracts(&accts, owner_filter)
+    )
+}
+
+/// Default build: honest-degrade (the byte-locked `PiecewiseContract` decoder `crate::skew_read` is present).
+#[cfg(not(feature = "web3-egress"))]
+fn skew_contracts_read(chain: &str, _owner: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "skew contracts (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet piecewise-contract read; the byte-locked PiecewiseContract decoder (skew_read) is ready"
+    )
+}
+
+/// W1 (autonomous margin): read the LIVE `UnifiedRiskAccount` balance for `owner` on `chain` — the SAME
+/// getProgramAccounts read [`skew_portfolio_read`] uses, but returns the DECODED [`crate::skew_read::UraBalance`]
+/// (free / locked) for the autonomous margin-sizing flow instead of rendering. READ-class, money 0, no key.
+/// `None` on transport-not-compiled / chain-not-configured / no matching URA / decode fail (fail-closed —
+/// the auto-margin flow NEVER trades blind on a missing read).
+#[cfg(feature = "web3-egress")]
+fn read_live_ura_balance(
+    chain: &str,
+    owner: &crate::solana_codec::Pubkey,
+) -> Option<crate::skew_read::UraBalance> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{
+        WEB3_BULK_RESULT_CHARS, Web3RpcMethod, Web3RpcSeam, web3_read_raw,
+    };
+    let program = crate::skew_catalog::SKEW_PROGRAM_ID_DEVNET;
+    let params = format!(
+        "[\"{program}\",{{\"encoding\":\"base64\",\"filters\":[{{\"dataSize\":{}}}]}}]",
+        crate::skew_read::URA_PDA_SPACE
+    );
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
+    let seam = Web3RpcSeam::new();
+    let raw = web3_read_raw(
+        &read,
+        seam.port(),
+        &registry,
+        chain,
+        Web3RpcMethod::SolGetProgramAccounts,
+        &params,
+        WEB3_BULK_RESULT_CHARS,
+    );
+    let body = raw.body?;
+    let value = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+    let arr = value.get("result").and_then(serde_json::Value::as_array)?;
+    for entry in arr {
+        let Some(bytes) = entry
+            .get("account")
+            .and_then(|a| a.get("data"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|d| d.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::skew_read::base64_decode)
+        else {
+            continue;
+        };
+        if let Some(ura) = crate::skew_read::decode_ura_account(&bytes) {
+            if ura.owner == owner.0 {
+                return Some(ura);
+            }
+        }
+    }
+    None
+}
+
+// ===================== K-3 HISTORY ACCUMULATOR + ANALYTICS =====================
+// Skew stores only the LATEST ReferenceSnapshot (no time-series). Sinabro polls the chain's singleton
+// PDAs READ-ONLY over time, decodes byte-exact, and accumulates each (slot, value) sample into a
+// bounded AEAD-encrypted time-series window: the local sealed window is the storage-of-record, and a
+// 2-tier Walrus publish is the decentralized ciphertext proof (E14-W2). READ-class, money 0; the only
+// WRITE is to the agent's OWN encrypted memory. NO chain write / custody / sign. See
+// `ops/evidence/stage_g/agent_loop/SKEW_HISTORY_THREAT_MODEL.md`.
+
+/// The sealed-window file extension under `<data_dir>/skew_history/`. The AEAD binding AAD lives in
+/// `skew_history::SKEW_HISTORY_AAD` (via `PersistedStore::seal_skew_history`/`open_skew_history`).
+const SKEW_HISTORY_EXT: &str = "swh";
+/// The default OHLC / volume candle width (slots) if the owner doesn't pass one.
+const SKEW_HISTORY_DEFAULT_BUCKET_SLOTS: u64 = 100;
+
+/// `<data_dir>/skew_history/` (created if missing) — the local storage-of-record for the sealed
+/// time-series windows.
+fn skew_history_dir() -> io::Result<std::path::PathBuf> {
+    let dir = crate::memory_store::data_dir()
+        .map_err(|_| io::Error::other("no data dir"))?
+        .join("skew_history");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Load + AEAD-open all sealed history windows from the local store (the storage-of-record). Each
+/// file is `<kind_tag>_<series_hex>.swh`; a corrupt / wrong-AAD / non-decoding file is skipped
+/// (fail-closed — never a partial series). Deterministically ordered (sorted by path).
+fn load_history_windows(
+    store: &crate::memory_store::PersistedStore,
+    dir: &std::path::Path,
+) -> Vec<crate::skew_history::HistoryWindow> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut paths: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some(SKEW_HISTORY_EXT))
+        .collect();
+    paths.sort();
+    for p in paths {
+        if let Ok(sealed) = std::fs::read(&p) {
+            if let Ok(plain) = store.open_skew_history(&sealed) {
+                if let Ok(w) = crate::skew_history::HistoryWindow::from_bytes(&plain) {
+                    out.push(w);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `skew history [chain] [bucket] [series-hex-prefix]` — render the accumulated time-series analysis
+/// from the LOCAL sealed windows (the storage-of-record; no network). Price + funding render per
+/// market series; volume aggregates all settlement windows into one bucketed series. Deterministic
+/// integer analysis (no LLM). READ-class, money 0.
+fn cmd_skew_history(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::skew_history::{HistoryWindow, SeriesKind, render_window, short_hex};
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return writeln!(out, "skew history: memory store unavailable (no key/home)");
+    };
+    let Ok(dir) = skew_history_dir() else {
+        return writeln!(out, "skew history: no data dir");
+    };
+    let windows = load_history_windows(&store, &dir);
+    if windows.is_empty() {
+        return writeln!(
+            out,
+            "skew history: no series accumulated yet — run `skew accumulate <chain>` to poll the chain (READ-class, money 0)"
+        );
+    }
+    // Trailing numeric arg = bucket width; a non-numeric arg = a series-hex-prefix filter.
+    let bucket = rest
+        .iter()
+        .find_map(|a| a.parse::<u64>().ok())
+        .unwrap_or(SKEW_HISTORY_DEFAULT_BUCKET_SLOTS);
+    let filter: Option<&str> = rest
+        .iter()
+        .find(|a| {
+            a.parse::<u64>().is_err()
+                && !a.eq_ignore_ascii_case("solana")
+                && !a.starts_with("solana")
+        })
+        .map(String::as_str);
+    let matches = |w: &HistoryWindow| filter.is_none_or(|f| short_hex(&w.series_id).starts_with(f));
+    writeln!(
+        out,
+        "skew history (local sealed time-series; deterministic integer analysis; chart data is REAL):"
+    )?;
+    // Price + funding: per-market singleton series.
+    for w in windows
+        .iter()
+        .filter(|w| w.kind != SeriesKind::SettlementVolume && matches(w))
+    {
+        write!(out, "{}", render_window(w, bucket))?;
+    }
+    // Volume: aggregate ALL settlement windows' samples into one bucketed series (distinct same-slot
+    // settlements both count). Build a synthetic aggregate window (samples set directly, slot-sorted).
+    let mut vol_samples: Vec<crate::skew_history::HistorySample> = windows
+        .iter()
+        .filter(|w| w.kind == SeriesKind::SettlementVolume && matches(w))
+        .flat_map(|w| w.samples.iter().copied())
+        .collect();
+    if !vol_samples.is_empty() {
+        vol_samples.sort_by(|a, b| a.slot.cmp(&b.slot));
+        let agg = HistoryWindow {
+            kind: SeriesKind::SettlementVolume,
+            series_id: [0u8; 32],
+            samples: vol_samples,
+        };
+        write!(out, "{}", render_window(&agg, bucket))?;
+    }
+    Ok(())
+}
+
+// ── the bounded poll loop (web3-egress): poll the chain READ-ONLY + accumulate ──────────────────
+
+/// The bounded cap on poll cycles in ONE `skew accumulate` invocation (the owner re-invokes / crons
+/// for continuous accumulation; never an unbounded loop).
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_CYCLES_MAX: u32 = 64;
+/// The default poll-cycle count if the owner doesn't pass one.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_CYCLES_DEFAULT: u32 = 3;
+/// The pace between poll cycles (ms) — devnet slot ~400-600ms; bounds RPC load + lets the series span
+/// time. The series advances only when a keeper re-validates the snapshot (honest scope).
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_POLL_INTERVAL_MS: u64 = 400;
+
+/// W4 — the HARD cap on poll cycles in ONE `skew accumulate-loop` run. The loop is a RECURRING bounded
+/// daemon over a user-chosen SECONDS cadence (vs the `accumulate` burst), so its cap is larger — but
+/// still bounded (never an unbounded daemon): cycles × max-interval is the run's time ceiling.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_LOOP_CYCLES_MAX: u32 = 256;
+/// The default `accumulate-loop` cycle count if the owner doesn't pass one.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_LOOP_CYCLES_DEFAULT: u32 = 12;
+/// The MINIMUM inter-cycle interval (seconds) — a sane floor so the recurring daemon never hammers the
+/// RPC. The cadence is in SECONDS (unlike the `accumulate` burst's 400 ms), making this a real daemon.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_LOOP_MIN_INTERVAL_SECS: u64 = 1;
+/// The default inter-cycle interval (seconds) if the owner doesn't pass one.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_LOOP_DEFAULT_INTERVAL_SECS: u64 = 5;
+/// The MAXIMUM inter-cycle interval (seconds) — a ceiling so the whole run stays time-bounded.
+#[cfg(feature = "web3-egress")]
+const SKEW_ACCUMULATE_LOOP_MAX_INTERVAL_SECS: u64 = 3600;
+
+/// The in-memory accumulator: a slot-deduped window per (kind, series). PURE ingest (testable). The
+/// dispatch loop persists the windows to the local sealed store after the bounded loop completes.
+#[cfg(feature = "web3-egress")]
+struct HistoryAccumulator {
+    windows: std::collections::BTreeMap<(u8, [u8; 32]), crate::skew_history::HistoryWindow>,
+    cycles: u32,
+    samples_added: u32,
+}
+
+#[cfg(feature = "web3-egress")]
+impl HistoryAccumulator {
+    fn from_loaded(loaded: Vec<crate::skew_history::HistoryWindow>) -> Self {
+        let mut windows = std::collections::BTreeMap::new();
+        for w in loaded {
+            windows.insert((w.kind.tag(), w.series_id), w);
+        }
+        Self {
+            windows,
+            cycles: 0,
+            samples_added: 0,
+        }
+    }
+
+    /// Append polled samples by kind: singleton series (price / funding) dedup by slot; event series
+    /// (volume) keep distinct same-slot events + dedup identical re-polls. Returns the count changed.
+    fn ingest(
+        &mut self,
+        polled: Vec<(
+            crate::skew_history::SeriesKind,
+            [u8; 32],
+            crate::skew_history::HistorySample,
+        )>,
+    ) -> u32 {
+        use crate::skew_history::SeriesKind;
+        let mut added = 0u32;
+        for (kind, sid, s) in polled {
+            let w = self
+                .windows
+                .entry((kind.tag(), sid))
+                .or_insert_with(|| crate::skew_history::HistoryWindow::new(kind, sid));
+            let changed = match kind {
+                SeriesKind::SettlementVolume => w.push_event(s),
+                _ => w.append_sample(s),
+            };
+            if changed {
+                added += 1;
+            }
+        }
+        self.samples_added += added;
+        added
+    }
+}
+
+#[cfg(all(test, feature = "web3-egress"))]
+mod k3_accumulator_tests {
+    use super::*;
+    use crate::skew_history::{HistorySample, SeriesKind};
+
+    fn price(slot: u64, p: u128) -> (SeriesKind, [u8; 32], HistorySample) {
+        (
+            SeriesKind::ReferencePrice,
+            [1u8; 32],
+            HistorySample {
+                slot,
+                price_atoms: p,
+                amount_atoms: 0,
+                signed_atoms: 0,
+                aux_u32: 0,
+                exponent: 6,
+            },
+        )
+    }
+    fn settle(slot: u64, amt: u128) -> (SeriesKind, [u8; 32], HistorySample) {
+        (
+            SeriesKind::SettlementVolume,
+            [2u8; 32],
+            HistorySample {
+                slot,
+                price_atoms: 100,
+                amount_atoms: amt,
+                signed_atoms: 0,
+                aux_u32: 0,
+                exponent: 0,
+            },
+        )
+    }
+
+    /// The accumulator routes by kind (price = singleton dedup-by-slot, volume = events) and the
+    /// re-ingest is deterministic / idempotent — the hermetic accumulate property.
+    #[test]
+    fn ingest_routes_by_kind_and_is_deterministic() {
+        let mut acc = HistoryAccumulator::from_loaded(vec![]);
+        // price: singleton dedup-by-slot — the 2nd identical poll is idempotent (no double count).
+        assert_eq!(acc.ingest(vec![price(100, 10), price(100, 10)]), 1);
+        // settlement: distinct same-slot events BOTH count (events, not a singleton).
+        assert_eq!(acc.ingest(vec![settle(50, 5), settle(50, 7)]), 2);
+        // re-ingest an identical settlement ⇒ 0 (idempotent re-poll).
+        assert_eq!(acc.ingest(vec![settle(50, 5)]), 0);
+        // two series: one price window + one volume window.
+        assert_eq!(acc.windows.len(), 2);
+        // the volume window sums BOTH same-slot settlements into one bucket.
+        for ((tag, _), w) in &acc.windows {
+            if *tag == SeriesKind::SettlementVolume.tag() {
+                let bars = crate::skew_history::volume(&w.samples, 100);
+                assert_eq!(bars.first().map(|b| b.volume_atoms), Some(12));
+            }
+        }
+        assert_eq!(acc.samples_added, 3); // 1 price + 2 distinct settlements
+    }
+}
+
+/// Poll one Skew account size over the single egress READ path, returning `(pubkey-base58, raw-bytes)`
+/// per account. Reuses `web3_read_raw` (SSRF + redact + byte cap); finality from the chain.
+#[cfg(feature = "web3-egress")]
+fn poll_skew_accounts(chain: &str, data_size: usize) -> Vec<(String, Vec<u8>)> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{
+        WEB3_BULK_RESULT_CHARS, Web3RpcMethod, Web3RpcSeam, web3_read_raw,
+    };
+    let program = crate::skew_catalog::SKEW_PROGRAM_ID_DEVNET;
+    let params = crate::skew_read::program_accounts_params(program, data_size);
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
+    let seam = Web3RpcSeam::new();
+    let raw = web3_read_raw(
+        &read,
+        seam.port(),
+        &registry,
+        chain,
+        Web3RpcMethod::SolGetProgramAccounts,
+        &params,
+        WEB3_BULK_RESULT_CHARS,
+    );
+    let mut out = Vec::new();
+    let Some(body) = raw.body else {
+        return out;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return out;
+    };
+    if let Some(arr) = value.get("result").and_then(serde_json::Value::as_array) {
+        for entry in arr {
+            let pubkey = entry
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(bytes) = entry
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|d| d.first())
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::skew_read::base64_decode)
+            {
+                out.push((pubkey, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// Poll ALL THREE Skew time-series sources once, decode byte-exact, return samples keyed by series.
+/// Price = the per-market snapshot PDA (series = the snapshot pubkey); volume = per settlement-mint
+/// (series = the mint); funding = the per-market funding-state PDA. Fail-closed: a mis-shaped /
+/// wrong-disc / non-validated account is skipped, never fabricated.
+#[cfg(feature = "web3-egress")]
+fn poll_skew_samples(
+    chain: &str,
+) -> Vec<(
+    crate::skew_history::SeriesKind,
+    [u8; 32],
+    crate::skew_history::HistorySample,
+)> {
+    use crate::skew_history::{HistorySample, SeriesKind};
+    let sid = |pubkey: &str| -> Option<[u8; 32]> {
+        crate::skew_read::base58_decode(pubkey).and_then(|b| {
+            if b.len() == 32 {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&b);
+                Some(a)
+            } else {
+                None
+            }
+        })
+    };
+    let mut out = Vec::new();
+    // ① ReferenceSnapshot (153 B; SHARED with PerpMarket ⇒ classify by disc inside decode) → price.
+    for (pk, data) in poll_skew_accounts(chain, crate::skew_read::REFERENCE_SNAPSHOT_PDA_SPACE) {
+        if let (Some(s), Some(series_id)) =
+            (crate::skew_read::decode_reference_snapshot(&data), sid(&pk))
+        {
+            if s.is_validated() {
+                out.push((
+                    SeriesKind::ReferencePrice,
+                    series_id,
+                    HistorySample {
+                        slot: s.observed_slot,
+                        price_atoms: s.composite_atoms,
+                        amount_atoms: 0,
+                        signed_atoms: 0,
+                        aux_u32: u32::from(s.confidence_bps),
+                        exponent: s.exponent,
+                    },
+                ));
+            }
+        }
+    }
+    // ② SettlementReceipt (441 B) → volume series keyed by the settlement MINT (aggregate per mint).
+    for (_pk, data) in poll_skew_accounts(chain, crate::skew_read::SETTLEMENT_RECEIPT_PDA_SPACE) {
+        if let Some(r) = crate::skew_read::decode_settlement_receipt(&data) {
+            out.push((
+                SeriesKind::SettlementVolume,
+                r.settlement_mint,
+                HistorySample {
+                    slot: r.created_slot,
+                    price_atoms: r.settlement_price,
+                    amount_atoms: r.paid_amount,
+                    signed_atoms: r.signed_payoff_amount,
+                    aux_u32: 0,
+                    exponent: 0,
+                },
+            ));
+        }
+    }
+    // ③ FundingState (74 B) → funding series keyed by the per-market funding-state PDA.
+    for (pk, data) in poll_skew_accounts(chain, crate::skew_read::FUNDING_STATE_PDA_SPACE) {
+        if let (Some(f), Some(series_id)) =
+            (crate::skew_read::decode_funding_state(&data), sid(&pk))
+        {
+            out.push((
+                SeriesKind::FundingRate,
+                series_id,
+                HistorySample {
+                    slot: f.last_snapshot_slot,
+                    price_atoms: 0,
+                    amount_atoms: u128::from(f.max_rate),
+                    signed_atoms: f.cumulative_funding_index,
+                    aux_u32: u32::from(f.status),
+                    exponent: 0,
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// Seal one window with the local AEAD key (storage-of-record) + atomic-write it under `dir`.
+#[cfg(feature = "web3-egress")]
+fn persist_history_window(
+    store: &crate::memory_store::PersistedStore,
+    dir: &std::path::Path,
+    window: &crate::skew_history::HistoryWindow,
+) -> bool {
+    let Ok(sealed) = store.seal_skew_history(&window.to_bytes()) else {
+        return false;
+    };
+    let hex: String = window
+        .series_id
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = dir.join(format!("{}_{hex}.{SKEW_HISTORY_EXT}", window.kind.tag()));
+    crate::memory_store::atomic_write(&path, &sealed).is_ok()
+}
+
+/// `skew accumulate [chain] [cycles]` — the BOUNDED daemon poll loop (reuses the std-thread
+/// `RuntimeHandle` pump; NO tokio). Each cycle polls the chain READ-ONLY (`web3_read_raw`,
+/// `&ReadCapability`; NO grant — READ is free), decodes byte-exact, and accumulates into the
+/// AEAD-encrypted windows; after the bounded loop, the windows are sealed to the local
+/// storage-of-record. READ-class, money 0; NO chain write / custody / sign. The series advances only
+/// when a keeper re-validates a snapshot (honest scope — re-invoke for continuous accumulation).
+#[cfg(feature = "web3-egress")]
+fn cmd_skew_accumulate(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::commands::budget::BudgetCap;
+    use crate::daemon::runtime::{AutonomyRuntime, RuntimeHandle};
+    use std::sync::{Arc, Mutex};
+    let chain = rest.first().map_or("solana", String::as_str).to_string();
+    let cycles_target = rest
+        .get(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(SKEW_ACCUMULATE_CYCLES_DEFAULT)
+        .clamp(1, SKEW_ACCUMULATE_CYCLES_MAX);
+
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return writeln!(
+            out,
+            "skew accumulate: memory store unavailable (no key/home)"
+        );
+    };
+    let Ok(dir) = skew_history_dir() else {
+        return writeln!(out, "skew accumulate: no data dir");
+    };
+    let loaded = load_history_windows(&store, &dir);
+    let acc = Arc::new(Mutex::new(HistoryAccumulator::from_loaded(loaded)));
+
+    // The bounded poll driver: READ-only poll + accumulate; mints NOTHING (no grant install, no sign).
+    let acc_driver = Arc::clone(&acc);
+    let chain_owned = chain.clone();
+    let driver = move |rt: &mut AutonomyRuntime| -> bool {
+        if rt.is_terminal() {
+            return false;
+        }
+        let polled = poll_skew_samples(&chain_owned);
+        let reached_target = {
+            let Ok(mut a) = acc_driver.lock() else {
+                return false;
+            };
+            a.ingest(polled);
+            a.cycles = a.cycles.saturating_add(1);
+            a.cycles >= cycles_target
+        };
+        if reached_target {
+            false
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(
+                SKEW_ACCUMULATE_POLL_INTERVAL_MS,
+            ));
+            true
+        }
+    };
+    // Arm a NO-GRANT runtime (READ is free; the loop reaches no egress/mutate/custody authority) and
+    // pump it on the std-thread; join blocks until the bounded loop completes (no zombie).
+    let trace = crate::StageFTraceLink::new([0x6b; 32], 0x6b33, 0);
+    let runtime = AutonomyRuntime::arm(
+        1,
+        None,
+        BudgetCap::new(100_000, 1_000_000, 100_000),
+        2,
+        trace,
+    );
+    let handle = RuntimeHandle::spawn(runtime, driver, std::time::Duration::from_millis(50));
+    handle.join();
+
+    // After the bounded loop: seal each window to the local storage-of-record + render the summary.
+    let Ok(a) = acc.lock() else {
+        return writeln!(
+            out,
+            "skew accumulate: accumulator lock poisoned (fail-closed)"
+        );
+    };
+    let mut persisted = 0usize;
+    for w in a.windows.values() {
+        if persist_history_window(&store, &dir, w) {
+            persisted += 1;
+        }
+    }
+    writeln!(
+        out,
+        "skew accumulate (chain={chain}): cycles={} samples_added={} series={} persisted={persisted} (local AEAD storage-of-record; READ-class; money 0; finality from the chain)",
+        a.cycles,
+        a.samples_added,
+        a.windows.len()
+    )?;
+    for w in a.windows.values() {
+        writeln!(
+            out,
+            "  [{}] series={} samples={}",
+            w.kind.as_str(),
+            crate::skew_history::short_hex(&w.series_id),
+            w.len()
+        )?;
+    }
+    if a.samples_added == 0 {
+        writeln!(
+            out,
+            "  (no NEW samples — the snapshot advances only on keeper re-validation; re-invoke over time to grow the series)"
+        )?;
+    }
+    Ok(())
+}
+
+/// Default build: honest-degrade (the byte-locked decoders + the pure analyzers are present; the LIVE
+/// devnet poll needs `web3-egress`).
+#[cfg(not(feature = "web3-egress"))]
+fn cmd_skew_accumulate(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    let chain = rest.first().map_or("solana", String::as_str);
+    writeln!(
+        out,
+        "skew accumulate (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet poll loop; the byte-locked decoders + the OHLC/volume/funding analyzers (skew_read + skew_history) are ready"
+    )
+}
+
+/// W4 — `skew accumulate-loop <chain> [cycles] [interval_secs]` — the RECURRING bounded accumulation
+/// daemon. Where `skew accumulate` runs ONE burst (rapid `cycles` polls @ 400 ms, sealed once at the
+/// end), this runs the SAME poll-accumulate as a long-lived daemon on a user-chosen SECONDS cadence,
+/// and SEALS the windows to the local AEAD storage-of-record AFTER EVERY cycle that ingests new samples
+/// — so an interrupt never loses accumulated history (the recurring-daemon distinction). BOUNDED: a
+/// hard cycle cap ([`SKEW_ACCUMULATE_LOOP_CYCLES_MAX`] = 256) AND a clamped seconds interval
+/// (`[MIN..=MAX]`). It reuses the EXISTING std-thread [`RuntimeHandle::spawn`] pump (NO tokio, NO new
+/// crate) and `join`s cleanly (the no-zombie proof) — interruptible via the runtime's terminal check.
+/// READ-class, money 0; the ONLY write is to the agent's OWN encrypted store. NO chain write / custody
+/// / sign (the c0-LESSON — this whole function reaches zero such token).
+#[cfg(feature = "web3-egress")]
+fn cmd_skew_accumulate_loop(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::commands::budget::BudgetCap;
+    use crate::daemon::runtime::{AutonomyRuntime, RuntimeHandle};
+    use std::sync::{Arc, Mutex};
+    let chain = rest.first().map_or("solana", String::as_str).to_string();
+    let cycles_target = rest
+        .get(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(SKEW_ACCUMULATE_LOOP_CYCLES_DEFAULT)
+        .clamp(1, SKEW_ACCUMULATE_LOOP_CYCLES_MAX);
+    let interval_secs = rest
+        .get(2)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(SKEW_ACCUMULATE_LOOP_DEFAULT_INTERVAL_SECS)
+        .clamp(
+            SKEW_ACCUMULATE_LOOP_MIN_INTERVAL_SECS,
+            SKEW_ACCUMULATE_LOOP_MAX_INTERVAL_SECS,
+        );
+
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return writeln!(
+            out,
+            "skew accumulate-loop: memory store unavailable (no key/home)"
+        );
+    };
+    let Ok(dir) = skew_history_dir() else {
+        return writeln!(out, "skew accumulate-loop: no data dir");
+    };
+    let loaded = load_history_windows(&store, &dir);
+    let acc = Arc::new(Mutex::new(HistoryAccumulator::from_loaded(loaded)));
+
+    // The bounded RECURRING driver: READ-only poll + accumulate + per-cycle local seal; mints NOTHING
+    // (no grant install, no sign, no chain write). `store`/`dir` are cloned into the closure so each
+    // cycle can durably seal (PersistedStore: Clone). No other thread holds `acc` during the run, so
+    // the brief seal-under-lock contends with nothing.
+    let acc_driver = Arc::clone(&acc);
+    let chain_owned = chain.clone();
+    let store_driver = store.clone();
+    let dir_driver = dir.clone();
+    let driver = move |rt: &mut AutonomyRuntime| -> bool {
+        if rt.is_terminal() {
+            return false;
+        }
+        let polled = poll_skew_samples(&chain_owned);
+        let reached_target = {
+            let Ok(mut a) = acc_driver.lock() else {
+                return false;
+            };
+            let added = a.ingest(polled);
+            a.cycles = a.cycles.saturating_add(1);
+            // Per-cycle durability: seal every window to the local AEAD storage-of-record whenever this
+            // cycle ingested NEW samples, so an interrupt keeps accumulated history (recurring daemon).
+            if added > 0 {
+                for w in a.windows.values() {
+                    let _sealed = persist_history_window(&store_driver, &dir_driver, w);
+                }
+            }
+            a.cycles >= cycles_target
+        };
+        if reached_target {
+            false
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+            true
+        }
+    };
+    // Arm a NO-GRANT runtime (READ is free; the loop reaches no egress/mutate/custody authority) and
+    // pump it on the std-thread; join blocks until the bounded loop completes (no zombie, interruptible
+    // via the runtime terminal check).
+    let trace = crate::StageFTraceLink::new([0x6c; 32], 0x6c33, 0);
+    let runtime = AutonomyRuntime::arm(
+        1,
+        None,
+        BudgetCap::new(100_000, 1_000_000, 100_000),
+        2,
+        trace,
+    );
+    let handle = RuntimeHandle::spawn(runtime, driver, std::time::Duration::from_millis(50));
+    handle.join();
+
+    // After the bounded loop: final seal-all + render the authoritative summary.
+    let Ok(a) = acc.lock() else {
+        return writeln!(
+            out,
+            "skew accumulate-loop: accumulator lock poisoned (fail-closed)"
+        );
+    };
+    let mut persisted = 0usize;
+    for w in a.windows.values() {
+        if persist_history_window(&store, &dir, w) {
+            persisted += 1;
+        }
+    }
+    writeln!(
+        out,
+        "skew accumulate-loop (chain={chain}): cycles={}/{cycles_target} interval={interval_secs}s samples_added={} series={} persisted={persisted} (recurring bounded daemon; per-cycle local AEAD seal; READ-class; money 0; finality from the chain)",
+        a.cycles,
+        a.samples_added,
+        a.windows.len()
+    )?;
+    for w in a.windows.values() {
+        writeln!(
+            out,
+            "  [{}] series={} samples={}",
+            w.kind.as_str(),
+            crate::skew_history::short_hex(&w.series_id),
+            w.len()
+        )?;
+    }
+    if a.samples_added == 0 {
+        writeln!(
+            out,
+            "  (no NEW samples this run — the snapshot advances only on keeper re-validation; the loop polled the chain {} time(s) at a {interval_secs}s cadence)",
+            a.cycles
+        )?;
+    }
+    Ok(())
+}
+
+/// Default build: honest-degrade (the byte-locked decoders + the pure analyzers are present; the LIVE
+/// devnet recurring poll loop needs `web3-egress`).
+#[cfg(not(feature = "web3-egress"))]
+fn cmd_skew_accumulate_loop(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    let chain = rest.first().map_or("solana", String::as_str);
+    writeln!(
+        out,
+        "skew accumulate-loop (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet recurring poll daemon; the byte-locked decoders + the OHLC/volume/funding analyzers (skew_read + skew_history) are ready"
+    )
+}
+
+// ── the 2-tier Walrus publish (put-fixture-net): the agent's ENCRYPTED time-series, decentralized ──
+
+/// The owner phrase to publish the ENCRYPTED history time-series to Walrus testnet (DISTINCT from the
+/// memory backup phrase so muscle memory can never cross-fire).
+#[cfg(feature = "put-fixture-net")]
+const SKEW_HISTORY_WALRUS_PHRASE: &str = "publish-skew-history-to-walrus-testnet";
+
+#[cfg(feature = "put-fixture-net")]
+fn skew_history_walrus_error(
+    out: &mut impl Write,
+    envelope_hex: &str,
+    msg: &str,
+) -> io::Result<bool> {
+    emit(
+        out,
+        "skew history-walrus",
+        envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        RenderTruth::Red,
+        &[format!("skew history-walrus: {msg}")],
+    )?;
+    Ok(true)
+}
+
+/// `skew history-walrus <phrase>` — publish the agent's ENCRYPTED time-series as a 2-tier Walrus blob
+/// set (E14-W2 reuse) + round-trip proof. Gate: exact phrase → load the local sealed windows → PUT
+/// each as an `EncryptedUserMemory` sub-blob (CIPHERTEXT only; no plaintext leaves) → build + SEAL +
+/// PUT the MAIN INDEX manifest → round-trip (GET main + open + match; GET first sub + byte-match +
+/// AEAD-open to a valid window). Testnet, keyless, no funds; custody/chain-write HARD-LOCKED (PD-6).
+#[cfg(feature = "put-fixture-net")]
+fn cmd_skew_history_walrus(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::repl::approval::{ApprovalDecision, ApprovalPrompt};
+    use mnemos_c_walrus::publisher::EpochCount;
+    use mnemos_c_walrus::reqwest_transport::ReqwestPublisher;
+
+    let envelope_hex = hex16(&sha256_32(b"skew history-walrus"));
+    let supplied = rest.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+    let mut prompt =
+        ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, SKEW_HISTORY_WALRUS_PHRASE);
+    if !matches!(prompt.evaluate(supplied.trim()), ApprovalDecision::Approved) {
+        emit(
+            out,
+            "skew history-walrus",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &[
+                "skew history-walrus = publish the agent's ENCRYPTED Skew time-series (AES ciphertext) to Walrus testnet (2-tier) + round-trip".to_string(),
+                format!("to run, supply EXACTLY: skew history-walrus {SKEW_HISTORY_WALRUS_PHRASE}"),
+                "ciphertext only (EncryptedUserMemory); no plaintext leaves; no funds; custody/chain-write HARD-LOCKED (PD-6)".to_string(),
+            ],
+        )?;
+        return Ok(true);
+    }
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return skew_history_walrus_error(out, &envelope_hex, "memory store unavailable");
+    };
+    let Ok(dir) = skew_history_dir() else {
+        return skew_history_walrus_error(out, &envelope_hex, "no data dir");
+    };
+    let windows = load_history_windows(&store, &dir);
+    if windows.is_empty() {
+        emit(
+            out,
+            "skew history-walrus",
+            &envelope_hex,
+            CommandRisk::Network,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &[
+                "skew history-walrus: no accumulated series to publish — run `skew accumulate <chain>` first".to_string(),
+            ],
+        )?;
+        return Ok(true);
+    }
+    let epochs = match EpochCount::new(1) {
+        Ok(e) => e,
+        Err(_) => return skew_history_walrus_error(out, &envelope_hex, "epoch invalid"),
+    };
+    let mut pub_t = match ReqwestPublisher::new(PUT_FIXTURE_TIMEOUT_MS) {
+        Ok(t) => t,
+        Err(_) => {
+            return skew_history_walrus_error(
+                out,
+                &envelope_hex,
+                "publisher transport init failed",
+            );
+        }
+    };
+
+    let total = windows.len();
+    let mut truth = RenderTruth::Green;
+    let mut body = vec![format!(
+        "skew history-walrus: {total} encrypted window(s) → 2-tier Walrus (sub-blobs + main index); AES ciphertext; key local; testnet; no funds"
+    )];
+    let mut entries: Vec<crate::memory_walrus::WalrusMemEntry> = Vec::new();
+    let mut first_sub: Option<Vec<u8>> = None;
+    for (i, w) in windows.iter().enumerate().take(BACKUP_WALRUS_MAX_RECORDS) {
+        let sealed = match store.seal_skew_history(&w.to_bytes()) {
+            Ok(c) => c,
+            Err(_) => {
+                truth = RenderTruth::Red;
+                body.push(format!("window {} seal failed", w.topic()));
+                continue;
+            }
+        };
+        match walrus_put_verified(&mut pub_t, epochs, &sealed) {
+            Some(blob) => {
+                body.push(format!(
+                    "SUB PUT ok: {} -> blob_id={blob} (verified)",
+                    w.topic()
+                ));
+                if first_sub.is_none() {
+                    first_sub = Some(sealed.clone());
+                }
+                entries.push(crate::memory_walrus::WalrusMemEntry {
+                    memory_id: i as u64,
+                    topic: w.topic(),
+                    sub_blob_id: blob,
+                    sub_0g_root: None,
+                });
+            }
+            None => {
+                truth = RenderTruth::Red;
+                body.push(format!(
+                    "{}: SUB PUT rejected (self-report ban or boundary)",
+                    w.topic()
+                ));
+            }
+        }
+    }
+    let index = crate::memory_walrus::WalrusMainIndex {
+        entries: entries.clone(),
+    };
+    let mut main_blob = String::new();
+    if !index.entries.is_empty() {
+        match store.seal_index(&index.to_bytes()) {
+            Ok(ct) => match walrus_put_verified(&mut pub_t, epochs, &ct) {
+                Some(blob) => {
+                    body.push(format!(
+                        "MAIN INDEX PUT ok: {} entries -> blob_id={blob}",
+                        index.entries.len()
+                    ));
+                    main_blob = blob;
+                }
+                None => {
+                    truth = RenderTruth::Red;
+                    body.push("MAIN INDEX PUT rejected".to_string());
+                }
+            },
+            Err(_) => {
+                truth = RenderTruth::Red;
+                body.push("MAIN INDEX seal failed".to_string());
+            }
+        }
+    }
+    if !main_blob.is_empty() {
+        match walrus_get_by_blob_text(&main_blob) {
+            Some(fetched) => {
+                let decoded = store
+                    .open_index(&fetched)
+                    .ok()
+                    .and_then(|p| crate::memory_walrus::WalrusMainIndex::from_bytes(&p).ok());
+                if decoded.as_ref() == Some(&index) {
+                    body.push(format!(
+                        "MAIN INDEX round-trip: GET+decrypt OK ({} entries match)",
+                        index.entries.len()
+                    ));
+                } else {
+                    truth = RenderTruth::Yellow;
+                    body.push("MAIN INDEX round-trip: mismatch (testnet propagation?)".to_string());
+                }
+            }
+            None => {
+                truth = RenderTruth::Yellow;
+                body.push("MAIN INDEX round-trip: GET not fetched (propagation)".to_string());
+            }
+        }
+    }
+    if let (Some(entry), Some(sealed)) = (entries.first(), first_sub.as_ref()) {
+        match walrus_get_by_blob_text(&entry.sub_blob_id) {
+            Some(fetched) => {
+                let bytes_match = &fetched == sealed;
+                let decodes = store
+                    .open_skew_history(&fetched)
+                    .ok()
+                    .and_then(|p| crate::skew_history::HistoryWindow::from_bytes(&p).ok())
+                    .is_some();
+                body.push(format!(
+                    "SUB round-trip: GET {} -> {} bytes; byte-match={bytes_match}; decrypts-to-window={decodes}",
+                    entry.topic,
+                    fetched.len()
+                ));
+                if !bytes_match || !decodes {
+                    truth = RenderTruth::Red;
+                }
+            }
+            None => {
+                truth = RenderTruth::Yellow;
+                body.push("SUB round-trip: GET not fetched (propagation)".to_string());
+            }
+        }
+    }
+    body.push(format!(
+        "published: {} window(s) + {} main index; 2-tier round-trip; no funds; custody/chain-write HARD-LOCKED (PD-6)",
+        entries.len(),
+        u8::from(!main_blob.is_empty())
+    ));
+    emit(
+        out,
+        "skew history-walrus",
+        &envelope_hex,
+        CommandRisk::Network,
+        ApprovalRequirement::TypedPhrase,
+        truth,
+        &body,
+    )?;
+    Ok(true)
+}
+
+/// Default build: honest-degrade (the local sealed storage-of-record is the always-available store).
+#[cfg(not(feature = "put-fixture-net"))]
+fn cmd_skew_history_walrus(_rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    writeln!(
+        out,
+        "skew history-walrus: walrus transport not compiled — build with --features put-fixture-net to publish the encrypted time-series to testnet; the local sealed storage-of-record is always available"
+    )?;
+    Ok(true)
+}
+
+/// `skew [capabilities | capability <name>]` — READ-class awareness readout of the Skew capability
+/// catalog (the single source of truth [`crate::skew_catalog`]). Money 0, no key, no network: it
+/// renders what Sinabro KNOWS the Skew Solana derivatives factory exposes (owner 2026-06-30:
+/// "시나브로 자체가 모든 기능을 인지하고 있어야 해"). `skew capabilities` lists the full surface incl.
+/// the secondary market; `skew capability <name>` shows one. Trading any of them is a separate
+/// bounded-`CustodyGrant` action (K-2), never originated by this readout.
+fn cmd_skew(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    match rest.first().map(String::as_str) {
+        None | Some("capabilities") => write!(out, "{}", crate::skew_catalog::render_catalog()),
+        Some("capability") => match rest.get(1) {
+            Some(name) => match crate::skew_catalog::find_capability(name) {
+                Some(c) => write!(out, "{}", crate::skew_catalog::render_capability(c)),
+                None => writeln!(
+                    out,
+                    "unknown skew capability: {name} (try `skew capabilities`)"
+                ),
+            },
+            None => writeln!(out, "usage: skew capability <name>"),
+        },
+        Some("markets") => {
+            skew_chain_read(rest.get(1).map_or("solana", String::as_str), Some(228), out)
+        }
+        Some("inventory") => {
+            skew_chain_read(rest.get(1).map_or("solana", String::as_str), None, out)
+        }
+        Some("portfolio") => skew_portfolio_read(
+            rest.get(1).map_or("solana", String::as_str),
+            rest.get(2).map(String::as_str),
+            out,
+        ),
+        Some("positions") => skew_positions_read(
+            rest.get(1).map_or("solana", String::as_str),
+            rest.get(2).map(String::as_str),
+            out,
+        ),
+        Some("contracts") => skew_contracts_read(
+            rest.get(1).map_or("solana", String::as_str),
+            rest.get(2).map(String::as_str),
+            out,
+        ),
+        Some("accumulate") => cmd_skew_accumulate(&rest[1..], out),
+        Some("accumulate-loop") => cmd_skew_accumulate_loop(&rest[1..], out),
+        Some("history") => cmd_skew_history(&rest[1..], out),
+        Some("history-walrus") => cmd_skew_history_walrus(rest, out).map(|_| ()),
+        Some("oracle") => cmd_skew_oracle(&rest[1..], out),
+        Some("strategy") => cmd_skew_strategy(&rest[1..], out),
+        Some("custody") => cmd_skew_custody(out),
+        Some("payoff") => cmd_skew_payoff(&rest[1..], out),
+        Some(other) => writeln!(
+            out,
+            "unknown skew subcommand: {other} (try: skew capabilities | capability <name> | markets [chain] | inventory [chain] | portfolio [chain] [owner] | positions [chain] [owner] | contracts [chain] [owner] | accumulate [chain] [cycles] | accumulate-loop [chain] [cycles] [interval_secs] | history [bucket] [series] | history-walrus <phrase> | oracle <class> … | strategy <example|propose|certify|corpus> … | custody | payoff <straddle|forward> …)"
+        ),
+    }
+}
+
+/// WAVE G — `skew payoff <straddle|forward> …` — render a DETERMINISTIC payoff-diagram SVG (READ-class,
+/// money 0, no key, no chain). The agent PROPOSES a payoff; this visualizes its `f(S)` over the collar.
+/// The GUI payoff pane fetches the SAME SVG via the `skew_payoff_svg` Tauri command (single core source).
+///   skew payoff straddle <lo> <hi> <tau> <strike> <premium>   (f = |S−strike| − premium)
+///   skew payoff forward  <lo> <hi> <forward_pc> [tau]         (f = S − Pc, the affine WCC forward)
+fn cmd_skew_payoff(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::skew_payoff_svg::{
+        affine_forward_segments, render_payoff_svg, sample_piecewise, straddle_payoff_segs,
+    };
+    let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+    let (title, segs, lo, hi, tau) = match rest.first().map(String::as_str) {
+        Some("straddle") => {
+            let (Some(lo), Some(hi), Some(tau), Some(strike), Some(premium)) = (
+                pi128(1),
+                pi128(2),
+                rest.get(3).and_then(|s| s.trim().parse::<u128>().ok()),
+                pi128(4),
+                pi128(5),
+            ) else {
+                return writeln!(
+                    out,
+                    "usage: skew payoff straddle <lo> <hi> <tau> <strike> <premium>"
+                );
+            };
+            (
+                format!("straddle K={strike} prem={premium} [{lo},{hi}]"),
+                straddle_payoff_segs(hi, strike, premium),
+                lo,
+                hi,
+                tau,
+            )
+        }
+        Some("forward") => {
+            let (Some(lo), Some(hi), Some(forward_pc)) = (pi128(1), pi128(2), pi128(3)) else {
+                return writeln!(
+                    out,
+                    "usage: skew payoff forward <lo> <hi> <forward_pc> [tau]"
+                );
+            };
+            let tau = rest
+                .get(4)
+                .and_then(|s| s.trim().parse::<u128>().ok())
+                .unwrap_or(1);
+            (
+                format!("forward Pc={forward_pc} [{lo},{hi}]"),
+                affine_forward_segments(hi, 1, forward_pc.saturating_neg()),
+                lo,
+                hi,
+                tau,
+            )
+        }
+        _ => {
+            return writeln!(
+                out,
+                "usage: skew payoff <straddle|forward> … (straddle <lo> <hi> <tau> <strike> <premium> | forward <lo> <hi> <forward_pc> [tau])"
+            );
+        }
+    };
+    match sample_piecewise(lo, hi, tau, &segs) {
+        Some(points) => {
+            writeln!(
+                out,
+                "skew payoff: {title} — deterministic SVG ({} vertices, money 0):",
+                points.len()
+            )?;
+            writeln!(out, "{}", render_payoff_svg(&title, &points, 360, 220))
+        }
+        None => writeln!(
+            out,
+            "skew payoff: degenerate domain (need lo<hi, tau>=1, on-lattice breakpoints) — nothing rendered (fail-closed)"
+        ),
+    }
+}
+
+/// K-5c — the per-owner custody bounds the K-2 `daemon trade` path arms WITHIN. The wallet
+/// settings window (the cockpit) is where the owner sets the ceiling + funds; until a config seam
+/// lands these are the session defaults, exposed as the SINGLE source of truth shared by BOTH the
+/// trade path (`cmd_daemon_trade`) and the dial readout (`skew_custody_dial`) — never duplicated.
+pub const SKEW_CUSTODY_PER_TX_MINOR: u128 = 1_000_000_000;
+/// Total budget across an arm window (atoms) = max escrow = provable max loss.
+pub const SKEW_CUSTODY_BUDGET_MINOR: u128 = 1_000_000_000;
+/// Time-to-live of an arm window (ms).
+pub const SKEW_CUSTODY_TTL_MS: u64 = 5 * 60 * 1000;
+/// Tx-count cap per arm window.
+pub const SKEW_CUSTODY_MAX_ACTIONS: u32 = 4;
+
+/// K-5c — the CustodyGrant dial state for the wallet-settings cockpit (READ-class, money 0). The
+/// SINGLE source of truth for both the `skew custody` CLI render AND the GUI wallet panel (the
+/// `read_custody_dial` Tauri command). It renders the bounds the K-2 `daemon trade` path arms
+/// within (the SAME consts), the chain/protocol allowlist, the isolated signer pubkey PRESENCE
+/// (the public fee-payer key — NEVER the seed), the network, and the armed posture. It performs
+/// NO sign / mint / spend: a configuration view; the model holds no arm phrase (IV-FG8).
+pub struct CustodyDialView {
+    /// The chain the custody grant allowlists (devnet; mainnet = a separate owner arm).
+    pub network: String,
+    /// The protocol the custody grant allowlists (`skew`).
+    pub protocol: String,
+    /// The isolated signer's PUBLIC base58 key (the fee payer), or `None` if not generated yet
+    /// (run `daemon trade-addr`). NEVER the seed.
+    pub signer_pubkey: Option<String>,
+    /// Per-tx ceiling (settlement-mint atoms).
+    pub per_tx_max_minor: u128,
+    /// Total budget across the grant (atoms) — the provable-max-loss cap.
+    pub total_budget_minor: u128,
+    /// Time-to-live of an arm window (ms).
+    pub ttl_ms: u64,
+    /// Tx-count cap per arm.
+    pub max_actions: u32,
+    /// Whether a STANDING armed session exists. Always `false`: there is no persisted custody
+    /// session — each trade arms within bounds via the owner's typed phrase (the arm IS the
+    /// authorization; the model can never self-arm).
+    pub armed: bool,
+}
+
+/// K-5c — read the current custody-dial state (the wallet cockpit's single source of truth).
+/// READ-class, money 0: it reads the shared bounds consts + the chain/protocol allowlist + the
+/// isolated signer's PUBLIC key presence. NO sign / mint / spend.
+#[must_use]
+pub fn skew_custody_dial() -> CustodyDialView {
+    use crate::skew_execute::{K2_CHAIN, K2_PROTOCOL};
+    CustodyDialView {
+        network: K2_CHAIN.to_string(),
+        protocol: K2_PROTOCOL.to_string(),
+        signer_pubkey: load_solana_signer().map(|s| s.pubkey().to_base58()),
+        per_tx_max_minor: SKEW_CUSTODY_PER_TX_MINOR,
+        total_budget_minor: SKEW_CUSTODY_BUDGET_MINOR,
+        ttl_ms: SKEW_CUSTODY_TTL_MS,
+        max_actions: SKEW_CUSTODY_MAX_ACTIONS,
+        armed: false,
+    }
+}
+
+/// `skew custody` — the CustodyGrant dial readout (the wallet-settings cockpit, CLI form). The
+/// owner sets the ceiling + funds here; the readout renders the bounds the K-2 trade path arms
+/// within, the allowlist, the isolated signer presence, and the armed posture. READ-class, money
+/// 0, no sign: the window CONFIGURES, never signs (IV-FG8). ARM/REVOKE/KILL are the owner's
+/// typed-phrase ceremony (`daemon trade <CUSTODY_ARM_PHRASE> …`), never this readout.
+fn cmd_skew_custody(out: &mut impl Write) -> io::Result<()> {
+    let dial = skew_custody_dial();
+    let signer = dial
+        .signer_pubkey
+        .as_deref()
+        .unwrap_or("not generated — run `daemon trade-addr`");
+    writeln!(
+        out,
+        "skew custody = the CustodyGrant dial (the wallet-settings cockpit; READ-class, money 0)"
+    )?;
+    writeln!(
+        out,
+        "  network          {} (mainnet = a separate owner arm)",
+        dial.network
+    )?;
+    writeln!(out, "  protocol allow   {}", dial.protocol)?;
+    writeln!(out, "  isolated signer  {signer}")?;
+    writeln!(out, "  per-tx max       {} atoms", dial.per_tx_max_minor)?;
+    writeln!(
+        out,
+        "  total budget     {} atoms (= max escrow = provable max loss)",
+        dial.total_budget_minor
+    )?;
+    writeln!(out, "  TTL              {} ms", dial.ttl_ms)?;
+    writeln!(out, "  max-actions      {}", dial.max_actions)?;
+    writeln!(
+        out,
+        "  armed            {}",
+        if dial.armed {
+            "yes (standing session)"
+        } else {
+            "no standing session — each trade arms within bounds via the owner phrase"
+        }
+    )?;
+    writeln!(
+        out,
+        "  the model holds no arm phrase; only the owner arms (the window configures, never signs/mints)"
+    )?;
+    Ok(())
+}
+
+/// `skew oracle <subcommand>` — the K-1 TRADE ORACLE (C-3 first domain). A PURE, deterministic
+/// re-derivation of Skew's OWN worst-case escrow (byte-locked from the verified source) + a
+/// fail-closed verdict (AFFORDABLE & IN-BOUNDS | DENIED(reason)) against the owner's PLAIN bound
+/// numbers — **no LLM judge, no signing, money 0** (the real `CustodyGrant` authorize + signing is
+/// K-2). Per-class verbs preview a hypothetical trade; `live` reads REAL devnet templates/positions
+/// and runs the oracle on the chain's own certified worst-case numbers.
+fn cmd_skew_oracle(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::skew_oracle::{OracleBounds, PartyDirection, SkewTrade, render_verdict};
+    let pu128 = |s: &String| s.parse::<u128>().ok();
+    let pi128 = |s: &String| s.parse::<i128>().ok();
+    let pu64 = |s: &String| s.parse::<u64>().ok();
+    let pu32 = |s: &String| s.parse::<u32>().ok();
+    let pi64 = |s: &String| s.parse::<i64>().ok();
+    // Owner bounds from the trailing `<per_tx_max> <total_budget>`; the drawdown dial defaults to the
+    // budget (the clean `Σ(escrows) ≤ budget` theorem). Single-trade preview ⇒ spent/portfolio = 0.
+    let bounds_from = |per_tx: u128, budget: u128| OracleBounds {
+        per_tx_max_minor: per_tx,
+        total_budget_minor: budget,
+        drawdown_max_minor: budget,
+    };
+    match rest.first().map(String::as_str) {
+        Some("usm-vm") => {
+            if let (Some(notional), Some(bps), Some(per_tx), Some(budget)) = (
+                rest.get(1).and_then(pu128),
+                rest.get(2).and_then(pu32),
+                rest.get(3).and_then(pu128),
+                rest.get(4).and_then(pu128),
+            ) {
+                let trade = SkewTrade::UsmVmForward {
+                    notional_minor: notional,
+                    initial_bps: bps,
+                };
+                write!(
+                    out,
+                    "{}",
+                    render_verdict(&trade, 0, 0, &bounds_from(per_tx, budget))
+                )
+            } else {
+                writeln!(
+                    out,
+                    "usage: skew oracle usm-vm <notional> <initial_bps> <per_tx_max> <total_budget>"
+                )
+            }
+        }
+        Some("fixed-lock") => {
+            if let (Some(locked), Some(per_tx), Some(budget)) = (
+                rest.get(1).and_then(pu128),
+                rest.get(2).and_then(pu128),
+                rest.get(3).and_then(pu128),
+            ) {
+                let trade = SkewTrade::FixedLock {
+                    locked_amount_minor: locked,
+                };
+                write!(
+                    out,
+                    "{}",
+                    render_verdict(&trade, 0, 0, &bounds_from(per_tx, budget))
+                )
+            } else {
+                writeln!(
+                    out,
+                    "usage: skew oracle fixed-lock <locked_amount> <per_tx_max> <total_budget>"
+                )
+            }
+        }
+        Some("wcc") => {
+            let dir = match rest.get(1).map(String::as_str) {
+                Some("long") => Some(PartyDirection::Long),
+                Some("short") => Some(PartyDirection::Short),
+                _ => None,
+            };
+            if let (
+                Some(direction),
+                Some(qty),
+                Some(cs),
+                Some(lo),
+                Some(hi),
+                Some(pc),
+                Some(per_tx),
+                Some(budget),
+            ) = (
+                dir,
+                rest.get(2).and_then(pu64),
+                rest.get(3).and_then(pu128),
+                rest.get(4).and_then(pi128),
+                rest.get(5).and_then(pi128),
+                rest.get(6).and_then(pi128),
+                rest.get(7).and_then(pu128),
+                rest.get(8).and_then(pu128),
+            ) {
+                let trade = SkewTrade::WccAffineForward {
+                    direction,
+                    quantity_q: qty,
+                    contract_size: cs,
+                    collar_lo: lo,
+                    collar_hi: hi,
+                    forward_price_pc: pc,
+                };
+                write!(
+                    out,
+                    "{}",
+                    render_verdict(&trade, 0, 0, &bounds_from(per_tx, budget))
+                )
+            } else {
+                writeln!(
+                    out,
+                    "usage: skew oracle wcc <long|short> <qty> <contract_size> <collar_lo> <collar_hi> <forward_price> <per_tx_max> <total_budget>"
+                )
+            }
+        }
+        Some("perp") => {
+            if let (
+                Some(q),
+                Some(cs),
+                Some(entry),
+                Some(lo),
+                Some(hi),
+                Some(fcap),
+                Some(per_tx),
+                Some(budget),
+            ) = (
+                rest.get(1).and_then(pi64),
+                rest.get(2).and_then(pu128),
+                rest.get(3).and_then(pi128),
+                rest.get(4).and_then(pi128),
+                rest.get(5).and_then(pi128),
+                rest.get(6).and_then(pu128),
+                rest.get(7).and_then(pu128),
+                rest.get(8).and_then(pu128),
+            ) {
+                let trade = SkewTrade::Perp {
+                    signed_qty: q,
+                    contract_size: cs,
+                    entry_price: entry,
+                    lo_price: lo,
+                    hi_price: hi,
+                    funding_cap_per_unit: fcap,
+                };
+                write!(
+                    out,
+                    "{}",
+                    render_verdict(&trade, 0, 0, &bounds_from(per_tx, budget))
+                )
+            } else {
+                writeln!(
+                    out,
+                    "usage: skew oracle perp <signed_qty> <contract_size> <entry> <lo> <hi> <funding_cap> <per_tx_max> <total_budget>"
+                )
+            }
+        }
+        Some("bound") => {
+            if let (Some(per_unit), Some(qty), Some(per_tx), Some(budget)) = (
+                rest.get(1).and_then(pu64),
+                rest.get(2).and_then(pu64),
+                rest.get(3).and_then(pu128),
+                rest.get(4).and_then(pu128),
+            ) {
+                let trade = SkewTrade::CertifiedBound {
+                    wcl_bound_per_unit: per_unit,
+                    quantity_q: qty,
+                };
+                write!(
+                    out,
+                    "{}",
+                    render_verdict(&trade, 0, 0, &bounds_from(per_tx, budget))
+                )
+            } else {
+                writeln!(
+                    out,
+                    "usage: skew oracle bound <wcl_bound_per_unit> <qty> <per_tx_max> <total_budget>"
+                )
+            }
+        }
+        Some("live") => {
+            let chain = rest.get(1).map_or("solana", String::as_str);
+            let qty = rest.get(2).and_then(pu64).unwrap_or(1);
+            let per_tx = rest.get(3).and_then(pu128).unwrap_or(u128::MAX);
+            let budget = rest.get(4).and_then(pu128).unwrap_or(u128::MAX);
+            skew_oracle_live(chain, qty, bounds_from(per_tx, budget), out)
+        }
+        _ => writeln!(
+            out,
+            "usage: skew oracle <usm-vm|fixed-lock|wcc|perp|bound|live> … (deterministic worst-case re-derivation; no LLM judge; money 0; not signed — K-2)"
+        ),
+    }
+}
+
+/// `skew oracle live <chain> [qty] [per_tx_max] [total_budget]` — the LIVE devnet proof: read REAL
+/// `skew_otc` ProductTemplates (228 B) + PerpPositions (154 B) over the EXISTING `web3_read_raw`
+/// single-egress path (same SSRF + redact wall as `skew portfolio`), byte-decode their margin-
+/// relevant fields, and run the K-1 oracle on the chain's OWN certified worst-case numbers
+/// (`wcl_bound_atoms`) / stored `reserved_collateral` (the on-chain `E_epoch`). READ-class, money 0,
+/// no key, not signed.
+#[cfg(feature = "web3-egress")]
+fn skew_oracle_live(
+    chain: &str,
+    qty: u64,
+    bounds: crate::skew_oracle::OracleBounds,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::skew_oracle::{
+        SkewTrade, decode_perp_position, decode_product_template, render_verdict,
+    };
+    writeln!(
+        out,
+        "skew oracle live (chain={chain}, qty={qty}): re-deriving Skew's worst-case escrow on REAL devnet accounts\n  bounds: per_tx_max={} total_budget={} (deterministic; no LLM judge; money 0; not signed — K-2)",
+        bounds.per_tx_max_minor, bounds.total_budget_minor
+    )?;
+
+    // --- ProductTemplates (228 B): policy class + chain-certified per-unit WCL bound -------------
+    match fetch_skew_program_accounts(chain, crate::skew_oracle::PRODUCT_TEMPLATE_PDA_SPACE) {
+        Ok(accts) => {
+            let templates: Vec<_> = accts
+                .iter()
+                .filter_map(|(pk, data)| decode_product_template(data).map(|m| (pk, m)))
+                .collect();
+            writeln!(out, "  templates: {} decoded", templates.len())?;
+            for (pk, m) in &templates {
+                writeln!(
+                    out,
+                    "    {pk}: policy={} listing_kind={} cert_via_mode={} certified_per_unit_wcl={} atoms",
+                    m.policy_class().as_str(),
+                    m.listing_kind,
+                    m.cert_via_mode,
+                    m.wcl_bound_atoms
+                )?;
+                if m.wcl_bound_atoms > 0 {
+                    // The chain certified this per-unit worst-case; the oracle re-uses it directly.
+                    let trade = SkewTrade::CertifiedBound {
+                        wcl_bound_per_unit: m.wcl_bound_atoms,
+                        quantity_q: qty,
+                    };
+                    write!(out, "      {}", render_verdict(&trade, 0, 0, &bounds))?;
+                }
+            }
+        }
+        Err(e) => writeln!(out, "  templates: unavailable [{e}]")?,
+    }
+
+    // --- PerpPositions (154 B): the chain's stored E_epoch (reserved_collateral) -----------------
+    match fetch_skew_program_accounts(chain, crate::skew_oracle::PERP_POSITION_PDA_SPACE) {
+        Ok(accts) => {
+            let positions: Vec<_> = accts
+                .iter()
+                .filter_map(|(pk, data)| decode_perp_position(data).map(|p| (pk, p)))
+                .collect();
+            writeln!(out, "  perp positions: {} decoded", positions.len())?;
+            for (pk, p) in &positions {
+                writeln!(
+                    out,
+                    "    {pk}: signed_qty={} entry_notional={} chain_reserved_E_epoch={} atoms status={}",
+                    p.signed_qty, p.entry_notional, p.reserved_collateral, p.status
+                )?;
+            }
+        }
+        Err(e) => writeln!(out, "  perp positions: unavailable [{e}]")?,
+    }
+    writeln!(
+        out,
+        "  finality from the chain, never an indexer; the oracle DECIDED with deterministic math — Sinabro is a 4th verification lane atop Skew's on-chain solvency"
+    )
+}
+
+/// Honest-degrade (default build): the pure oracle + byte-locked decode are present; the LIVE devnet
+/// read needs `--features web3-egress`.
+#[cfg(not(feature = "web3-egress"))]
+fn skew_oracle_live(
+    chain: &str,
+    _qty: u64,
+    _bounds: crate::skew_oracle::OracleBounds,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "skew oracle live (chain={chain}): web3 transport not compiled — build with --features web3-egress for the LIVE devnet read; the pure oracle + byte-locked decode (skew_oracle) are ready"
+    )
+}
+
+// ── K-4: the typed strategy DSL + the autonomous R-E-W shadow→certify→corpus spine ──────────────
+
+/// The file extension for a sealed certified-strategy corpus entry.
+const SKEW_STRATEGY_CORPUS_EXT: &str = "sc";
+
+/// `<data_dir>/skew_strategy_corpus/` (created if missing) — the local sealed certified-strategy
+/// corpus (the agent's OWN encrypted data; the K-3 sealed pattern reuse).
+fn skew_strategy_corpus_dir() -> io::Result<std::path::PathBuf> {
+    let dir = crate::memory_store::data_dir()
+        .map_err(|_| io::Error::other("no data dir"))?
+        .join("skew_strategy_corpus");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Load + AEAD-open the existing certified-strategy corpus as `(key, topic, content)` triples (a
+/// corrupt / wrong-AAD / non-pattern file is skipped — fail-closed). Deterministically ordered.
+fn load_strategy_corpus(
+    store: &crate::memory_store::PersistedStore,
+    dir: &std::path::Path,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut paths: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some(SKEW_STRATEGY_CORPUS_EXT))
+        .collect();
+    paths.sort();
+    for p in paths {
+        if let Ok(sealed) = std::fs::read(&p) {
+            if let Ok(plain) = store.open_strategy_corpus(&sealed) {
+                if let Ok(body) = String::from_utf8(plain) {
+                    if let Some(parsed) = crate::autonomy_evolve::parse_pattern_memory(&body) {
+                        out.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `skew strategy <example|propose|certify|corpus> …` — the K-4 typed DSL + R-E-W spine. The frontier
+/// PROPOSES a strategy as TOML; a malformed proposal is a serde PARSE ERROR (never a trade); the
+/// deterministic runtime shadow-evaluates it over the REAL K-3 history with EVERY leg oracle-gated; the
+/// conformal cert certifies it; only a certified strategy ACCUMULATEs (P-HALL-gated). Shadow money 0;
+/// the live sub-budget is the owner-armed K-2 path.
+fn cmd_skew_strategy(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    match rest.first().map(String::as_str) {
+        None | Some("example") => write!(out, "{}", crate::skew_strategy::example_strategy_toml()),
+        Some("propose") => skew_strategy_propose(rest.get(1).map(String::as_str), out),
+        Some("certify") => skew_strategy_certify(&rest[1..], false, out),
+        Some("corpus") => skew_strategy_certify(&rest[1..], true, out),
+        Some(other) => writeln!(
+            out,
+            "unknown skew strategy subcommand: {other} (try: example | propose <file> | certify <file> [per_tx_max] [total_budget] | corpus <file> [per_tx_max] [total_budget])"
+        ),
+    }
+}
+
+/// Read a strategy DSL file (a local READ, no network). `None` (with a usage line) on a missing path
+/// or an unreadable file — fail-closed.
+fn skew_strategy_read_file(path: Option<&str>, verb: &str, out: &mut impl Write) -> Option<String> {
+    let Some(p) = path else {
+        let _ = writeln!(
+            out,
+            "usage: skew strategy {verb} <file.toml> [per_tx_max] [total_budget]"
+        );
+        return None;
+    };
+    match std::fs::read_to_string(p) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let _ = writeln!(out, "skew strategy {verb}: cannot read {p}: {e}");
+            None
+        }
+    }
+}
+
+/// `skew strategy propose <file>` — parse the DSL serde-fail-closed; render the parsed strategy (proves
+/// the typed DSL) OR the parse error (proves a hallucination is a parse error, never a trade).
+fn skew_strategy_propose(path: Option<&str>, out: &mut impl Write) -> io::Result<()> {
+    let Some(src) = skew_strategy_read_file(path, "propose", out) else {
+        return Ok(());
+    };
+    match crate::skew_strategy::parse_strategy_toml(&src) {
+        Ok(dsl) => {
+            writeln!(
+                out,
+                "skew strategy propose: PARSED OK (serde-fail-closed typed DSL; a malformed proposal would be a parse error, never a trade)"
+            )?;
+            writeln!(
+                out,
+                "  name={} archetype={} rules={}",
+                dsl.name.as_str(),
+                dsl.archetype.as_str(),
+                dsl.rules.len()
+            )?;
+            for r in &dsl.rules {
+                writeln!(
+                    out,
+                    "    rule [{}] signal={:?}/{:?} lookback={} op={:?} threshold={} trade={}",
+                    r.name.as_str(),
+                    r.signal.feature,
+                    r.signal.series,
+                    r.signal.lookback,
+                    r.condition.op,
+                    r.condition.threshold,
+                    r.trade.class_label()
+                )?;
+            }
+            Ok(())
+        }
+        Err(e) => writeln!(
+            out,
+            "skew strategy propose: REJECTED (serde-fail-closed) — {e} (the hallucination wall: a malformed/unknown-field proposal is a parse error, NEVER a trade)"
+        ),
+    }
+}
+
+/// `skew strategy certify|corpus <file> [per_tx_max] [total_budget]` — parse + shadow-evaluate over the
+/// LOCAL sealed K-3 history + conformal-certify; `corpus` ALSO runs the cert through the EXISTING
+/// `select_evolution_writes` gate and (if certified + cross-memory-consistent) seals the strategy into
+/// the local corpus + re-reads it (the P-HALL-gated ACCUMULATE; an uncertified strategy NEVER writes).
+fn skew_strategy_certify(
+    rest: &[String],
+    write_corpus: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let verb = if write_corpus { "corpus" } else { "certify" };
+    let Some(src) = skew_strategy_read_file(rest.first().map(String::as_str), verb, out) else {
+        return Ok(());
+    };
+    let dsl = match crate::skew_strategy::parse_strategy_toml(&src) {
+        Ok(d) => d,
+        Err(e) => {
+            return writeln!(
+                out,
+                "skew strategy {verb}: REJECTED (serde-fail-closed) — {e} (a hallucination is a parse error, never a trade)"
+            );
+        }
+    };
+    // owner bounds: `<per_tx_max> <total_budget>` (the drawdown dial = the budget); generous defaults.
+    let per_tx = rest
+        .get(1)
+        .and_then(|s| s.parse::<u128>().ok())
+        .unwrap_or(1_000_000_000);
+    let budget = rest
+        .get(2)
+        .and_then(|s| s.parse::<u128>().ok())
+        .unwrap_or(1_000_000_000);
+    let bounds = crate::skew_oracle::OracleBounds {
+        per_tx_max_minor: per_tx,
+        total_budget_minor: budget,
+        drawdown_max_minor: budget,
+    };
+    // the shadow backtest reads the agent's OWN local sealed K-3 history (no network).
+    let Ok(store) = crate::memory_store::PersistedStore::open_local() else {
+        return writeln!(
+            out,
+            "skew strategy {verb}: memory store unavailable (no key/home)"
+        );
+    };
+    let windows = match skew_history_dir() {
+        Ok(dir) => load_history_windows(&store, &dir),
+        Err(_) => Vec::new(),
+    };
+    if windows.is_empty() {
+        writeln!(
+            out,
+            "skew strategy {verb}: no accumulated K-3 history — run `skew accumulate <chain>` first (the shadow backtest reads the agent's own sealed time-series; READ-class, money 0)"
+        )?;
+    }
+    let report = crate::skew_strategy::shadow_evaluate(&dsl, &windows, &bounds);
+    let cert = crate::skew_strategy::certify_strategy(&report);
+    write!(
+        out,
+        "{}",
+        crate::skew_strategy::render_shadow(&report, &cert)
+    )?;
+
+    if !write_corpus {
+        return Ok(());
+    }
+    // ── corpus ACCUMULATE: the cert flows through the EXISTING P-HALL write gate ──────────────────
+    let goal = dsl.corpus_goal();
+    let content = match dsl.to_toml() {
+        Ok(t) => t,
+        Err(e) => return writeln!(out, "skew strategy corpus: cannot serialize strategy: {e}"),
+    };
+    let candidate = crate::autonomy_evolve::strategy_candidate(&goal, &content, cert.certified);
+    // held LTM = the existing corpus (a real write-time cross-memory consistency check).
+    let corpus_dir = match skew_strategy_corpus_dir() {
+        Ok(d) => d,
+        Err(e) => return writeln!(out, "skew strategy corpus: no corpus dir: {e}"),
+    };
+    let held: Vec<crate::autonomy_evolve::HeldMemory> = load_strategy_corpus(&store, &corpus_dir)
+        .into_iter()
+        .map(|(_k, topic, content)| crate::autonomy_evolve::HeldMemory { topic, content })
+        .collect();
+    let no_prior = |_k: &str| crate::verification::PerfScore::default();
+    let outcome = crate::autonomy_evolve::select_evolution_writes(
+        std::slice::from_ref(&candidate),
+        &held,
+        &no_prior,
+    );
+    writeln!(
+        out,
+        "  CORPUS WRITE (P-HALL-gated via select_evolution_writes): written={} doubly_verified={} quarantined={} unverified={}",
+        outcome.written_count(),
+        outcome.doubly_verified_count(),
+        outcome.quarantined.len(),
+        outcome.unverified.len()
+    )?;
+    // persist + re-read each written (certified) pattern — the corpus is real + re-readable.
+    for w in &outcome.written {
+        let body =
+            crate::autonomy_evolve::format_pattern_memory(&w.pattern_key, &w.topic, &w.content);
+        let sealed = match store.seal_strategy_corpus(body.as_bytes()) {
+            Ok(s) => s,
+            Err(_) => {
+                writeln!(
+                    out,
+                    "  persist: seal failed (fail-closed) for {}",
+                    w.pattern_key
+                )?;
+                continue;
+            }
+        };
+        let path = corpus_dir.join(format!("{}.{SKEW_STRATEGY_CORPUS_EXT}", w.pattern_key));
+        if let Err(e) = std::fs::write(&path, &sealed) {
+            writeln!(out, "  persist: write failed: {e}")?;
+            continue;
+        }
+        // round-trip: re-read + re-open + re-parse (prove the sealed corpus entry is real).
+        let round_trip = std::fs::read(&path)
+            .ok()
+            .and_then(|b| store.open_strategy_corpus(&b).ok())
+            .and_then(|p| String::from_utf8(p).ok())
+            .and_then(|b| crate::autonomy_evolve::parse_pattern_memory(&b))
+            .is_some_and(|(k, _, _)| k == w.pattern_key);
+        writeln!(
+            out,
+            "  ACCUMULATED strategy key={} topic={} (sealed; AES ciphertext; key local; round_trip={})",
+            w.pattern_key, w.topic, round_trip
+        )?;
+    }
+    if outcome.written.is_empty() {
+        writeln!(
+            out,
+            "  (nothing accumulated — an UNcertified / contradicting strategy NEVER writes: the P-HALL collapse defense)"
+        )?;
+    }
+    Ok(())
+}
+
+/// Fetch + base64-decode every `skew_otc` program account of one `data_size` over the EXISTING
+/// `web3_read_raw` single-egress path (SSRF + redact wall reused). Returns `(pubkey, raw_bytes)`
+/// pairs. READ-class, money 0.
+#[cfg(feature = "web3-egress")]
+fn fetch_skew_program_accounts(
+    chain: &str,
+    data_size: usize,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{
+        WEB3_BULK_RESULT_CHARS, Web3RpcMethod, Web3RpcSeam, web3_read_raw,
+    };
+    let program = crate::skew_catalog::SKEW_PROGRAM_ID_DEVNET;
+    let params = format!(
+        "[\"{program}\",{{\"encoding\":\"base64\",\"filters\":[{{\"dataSize\":{data_size}}}]}}]"
+    );
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
+    let seam = Web3RpcSeam::new();
+    let raw = web3_read_raw(
+        &read,
+        seam.port(),
+        &registry,
+        chain,
+        Web3RpcMethod::SolGetProgramAccounts,
+        &params,
+        WEB3_BULK_RESULT_CHARS,
+    );
+    let body = raw.body.ok_or_else(|| {
+        format!(
+            "{} (chain owner-configured + web3-egress?)",
+            raw.class_label
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
+        format!("result not valid JSON or exceeded the bulk cap ({WEB3_BULK_RESULT_CHARS} chars)")
+    })?;
+    let mut out = Vec::new();
+    if let Some(arr) = value.get("result").and_then(serde_json::Value::as_array) {
+        for entry in arr {
+            let pubkey = entry
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            if let Some(bytes) = entry
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|d| d.first())
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::skew_read::base64_decode)
+            {
+                out.push((pubkey, bytes));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `sinabro daemon [status|kill]` — the REAL bounded background runner (ENDGAME
 /// E3). Replaces the static "phase 0 control surface only" projection with a live
 /// [`AutonomyRuntime`](crate::daemon::runtime::AutonomyRuntime): a single bounded
@@ -10401,6 +14116,35 @@ fn cmd_daemon(rest: &[String], out: &mut impl Write) -> io::Result<()> {
     // `web3-egress`. custody/funds/chain-write stay HARD-LOCKED (PD-6).
     if verb.eq_ignore_ascii_case("web3-read") {
         return cmd_daemon_web3_read(rest, out).map(|_| ());
+    }
+    // `daemon chain-dry-run <ARM_PHRASE> <chain> <protocol> <amount_minor>`: the owner-armed
+    // user-BOUNDED custody DRY-RUN (ONCHAIN PIVOT C-0). The owner ceremony arms a single-shot,
+    // revocable `CustodyGrant` (demo bounds: per-tx / total-budget / chain+protocol allowlist); the
+    // tx is evaluated against the bounds and the INERT chokepoint renders AUTHORIZED (would-execute)
+    // or DENIED (the bound reason). C-0 is PURE: NO signing, NO broadcast, NO key, money 0 — the
+    // real build→sign→broadcast is C-2 (testnet-first). The model holds no `ChainTxCapability` ctor
+    // and there is NO loop tool ⇒ it cannot self-spend. Blanket `CustodyCapability` uninhabited
+    // (PD-6); mainnet = a further owner arm.
+    if verb.eq_ignore_ascii_case("chain-dry-run") {
+        return cmd_daemon_chain_dry_run(rest, out).map(|_| ());
+    }
+    // `daemon trade-addr`: show (and, if absent, generate) the ISOLATED devnet signer pubkey
+    // (MNEMOS × SKEW K-2 / ONCHAIN PIVOT C-2). READ-class, money 0: it derives + displays the
+    // PUBLIC key (the fee payer the owner funds with devnet SOL) and persists the 32-byte secret
+    // SEED to a 0600 owner-controlled file — the seed is NEVER rendered/logged (IV-K2-5). This is
+    // the "isolated trading keypair" surface of the wallet-settings window (§8).
+    if verb.eq_ignore_ascii_case("trade-addr") {
+        return cmd_daemon_trade_addr(out).map(|_| ());
+    }
+    // `daemon trade <ARM_PHRASE> <sim|live> <open-account|deposit|withdraw|submit-perp|submit-order|pay-vm|lock-collateral|mark-vm|settle|form-contract|list-wcc-template|list-piecewise-template|form-piecewise|settle-piecewise|open-perp-market|factory-list-perp-market|form-funding-swap|open-liquidation|complete-liquidation> [args]`: the owner-armed
+    // K-2 SKEW chain-write (ONCHAIN PIVOT C-2; devnet). The owner ceremony arms a single-shot,
+    // revocable `CustodyGrant` (solana-devnet + skew); the K-1 oracle DECIDES affordability; the
+    // bounded `ChainTxCapability` witness authorizes the tx; then assemble → REAL devnet simulate
+    // (D2/D3) → [live:] D14 genesis pin → sign (isolated key) → D13 → REAL broadcast. `sim` stops at
+    // the real simulate (money 0). The model holds no witness + no signer + NO loop tool ⇒ it cannot
+    // self-sign (IV-K2-12); mainnet is a further owner arm; blanket `CustodyCapability` uninhabited.
+    if verb.eq_ignore_ascii_case("trade") {
+        return cmd_daemon_trade(rest, out).map(|_| ());
     }
     // `daemon image-frontier <ARM_PHRASE> <path>`: the owner-armed FRONTIER-IMAGE egress
     // ([5] B⑭). The owner ceremony arms a single-shot EgressGrant; render_frontier_image
@@ -11457,12 +15201,21 @@ fn cmd_daemon_run(rest: &[String], out: &mut impl Write) -> io::Result<()> {
 /// SAME read path as the other config-derived surfaces). Absent/unreadable/empty ⇒
 /// `None` ⇒ `render_web3_read` reports the honest `NoEndpointConfigured`. There is NO
 /// arbitrary-URL argument — the endpoint is config-only (the `chain_env` invariant).
-fn read_owner_web3_rpc_endpoint() -> Option<String> {
-    let dir = crate::memory_store::data_dir().ok()?;
-    let path = dir.join(crate::config::CONFIG_PERSIST_FILE);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let cfg = crate::config::parse_layer(&text).ok()?;
-    crate::config::effective_web3_rpc_endpoint(&[(crate::config::ConfigLayer::User, cfg)])
+/// ONCHAIN PIVOT C-1 — read the owner-configured MULTI-CHAIN registry from the persisted config
+/// (the SAME read path as the other config-derived surfaces). Absent/unreadable/empty ⇒ an empty
+/// registry ⇒ every read is the honest `ChainNotConfigured`. The agent reads ONLY these chains.
+fn read_owner_web3_chain_registry() -> crate::provider::web3_rpc::Web3ChainRegistry {
+    let load = || -> Option<crate::provider::web3_rpc::Web3ChainRegistry> {
+        let dir = crate::memory_store::data_dir().ok()?;
+        let path = dir.join(crate::config::CONFIG_PERSIST_FILE);
+        let text = std::fs::read_to_string(&path).ok()?;
+        let cfg = crate::config::parse_layer(&text).ok()?;
+        Some(crate::config::effective_web3_chain_registry(&[(
+            crate::config::ConfigLayer::User,
+            cfg,
+        )]))
+    };
+    load().unwrap_or_default()
 }
 
 /// [7] B⑪ — read the owner-configured remote SSH host from the persisted config (the SAME
@@ -11719,95 +15472,2726 @@ fn cmd_daemon_image_frontier(rest: &[String], out: &mut impl Write) -> io::Resul
 /// and reports the redacted result. Honest-degrades to `TransportNotCompiled` without
 /// `web3-egress`. The read is NOT a loop tool (the model cannot self-dial); custody/funds/
 /// chain-write stay HARD-LOCKED (PD-6); the method allowlist blocks a chain WRITE.
-fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
-    use crate::commands::authority::local_egress_capability;
-    use crate::commands::grant::{EgressGrant, GrantBounds, GrantTier, OwnerArmCeremony};
-    use crate::provider::web3_rpc::{
-        WEB3_READ_ARM_PHRASE, Web3RpcMethod, Web3RpcSeam, render_web3_read,
+/// `daemon chain-dry-run <ARM_PHRASE> <chain> <protocol> <amount_minor>`: the owner-armed,
+/// user-BOUNDED custody DRY-RUN (ONCHAIN PIVOT C-0). The owner ceremony arms a single-shot,
+/// fast-expiring, revocable `CustodyGrant` (demo bounds); the proposed tx is evaluated against the
+/// bounds and the INERT chokepoint renders AUTHORIZED (would-execute) or DENIED (the bound reason).
+/// C-0 is PURE: NO signing, NO broadcast, NO key, money 0 — the real build→sign→broadcast is C-2
+/// (testnet-first). The model holds no `ChainTxCapability` ctor and there is NO loop tool ⇒ it
+/// cannot self-spend. Blanket `CustodyCapability` stays uninhabited (unbounded custody impossible).
+fn cmd_daemon_chain_dry_run(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::chain_execute::execute_authorized_chain_tx;
+    use crate::commands::authority::local_chain_tx_capability;
+    use crate::commands::grant::{
+        CUSTODY_ARM_PHRASE, ChainTxRequest, CustodyAuthorization, CustodyBounds, GrantBounds,
+        arm_local_custody_grant,
     };
     use crate::repl::approval::ApprovalPrompt;
 
+    /// Single-shot, fast-expiring, revocable arm window for the dry-run.
+    const CUSTODY_MAX_ACTIONS: u32 = 1;
+    const CUSTODY_TTL_MS: u64 = 2 * 60 * 1000;
+    /// Demo bounds for the dry-run (real per-owner bounds come from config/args in C-2).
+    const PER_TX_MAX: u128 = 1000;
+    const TOTAL_BUDGET: u128 = 1000;
+
     let envelope_hex = toplevel_envelope_hex("daemon");
     let supplied_phrase = rest.get(1).map_or("", String::as_str);
-    let method_token = rest.get(2).map_or("", String::as_str);
-    let params = rest.get(3).map_or("[]", String::as_str);
-
-    // GATE (owner-arm ceremony): the EXACT web3-read arm phrase ⇒ a bounded EgressGrant.
-    // Missing/wrong ⇒ NO grant, NO dial — fail-closed (the model cannot supply this).
-    let mut prompt = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, WEB3_READ_ARM_PHRASE);
-    let audit_hash_32 = sha256_32(b"daemon.web3-read.egress.arm.v1");
-    let Some(ceremony) = OwnerArmCeremony::complete(
-        &mut prompt,
-        supplied_phrase.trim(),
-        GrantTier::Egress,
-        audit_hash_32,
-    ) else {
-        let body = vec![
-            "daemon web3-read = ONE owner-armed READ-ONLY chain RPC read (bounded egress grant)"
-                .to_string(),
-            "risk=network; single-shot (max_actions=1), 120s, revocable; READ-only (chain-write refused); secret-zero"
-                .to_string(),
-            format!(
-                "to arm, supply EXACTLY: daemon web3-read {WEB3_READ_ARM_PHRASE} <method> [params-json]"
-            ),
-            format!("methods: {}", Web3RpcMethod::token_list()),
-            "endpoint = your config web3_rpc_endpoint (no arbitrary URL); the model cannot self-dial"
-                .to_string(),
-            "denied: no read without the exact arm phrase; funds/custody/chain-write HARD-LOCKED (PD-6)"
-                .to_string(),
-        ];
-        return emit(
-            out,
-            "daemon",
-            &envelope_hex,
-            CommandRisk::Network,
-            ApprovalRequirement::TypedPhrase,
-            RenderTruth::Yellow,
-            &body,
-        )
-        .map(|()| true);
-    };
-
+    let chain = rest.get(2).map_or("", String::as_str).trim();
+    let protocol = rest.get(3).map_or("", String::as_str).trim();
+    let amount_raw = rest.get(4).map_or("", String::as_str).trim();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0u64, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-    let bounds = GrantBounds {
-        max_actions_u32: 1,
-        expires_at_epoch_ms: now_ms.saturating_add(120_000),
+
+    // GATE (owner-arm ceremony): the EXACT custody arm phrase. Missing/wrong ⇒ NO grant, NO
+    // evaluation — fail-closed (the model cannot supply this).
+    let mut prompt = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+    let audit_hash_32 = sha256_32(b"daemon.chain-dry-run.custody.arm.v1");
+    let Some(grant) = arm_local_custody_grant(
+        &mut prompt,
+        supplied_phrase.trim(),
+        audit_hash_32,
+        CustodyBounds {
+            base: GrantBounds {
+                max_actions_u32: CUSTODY_MAX_ACTIONS,
+                expires_at_epoch_ms: now_ms.saturating_add(CUSTODY_TTL_MS),
+            },
+            per_tx_max_minor: PER_TX_MAX,
+            total_budget_minor: TOTAL_BUDGET,
+            chain_allowlist: vec![
+                "ethereum".to_string(),
+                "base".to_string(),
+                "arbitrum".to_string(),
+            ],
+            protocol_allowlist: vec!["uniswap".to_string(), "aave".to_string()],
+        },
+    ) else {
+        let body = vec![
+            "daemon chain-dry-run = an owner-armed user-BOUNDED custody DRY-RUN (ONCHAIN PIVOT C-0)".to_string(),
+            format!(
+                "demo bound: per-tx<={PER_TX_MAX} · budget<={TOTAL_BUDGET} · chains[ethereum,base,arbitrum] · protocols[uniswap,aave] · {CUSTODY_MAX_ACTIONS} tx / {} min, revocable",
+                CUSTODY_TTL_MS / 60_000
+            ),
+            format!("to arm, supply EXACTLY: daemon chain-dry-run {CUSTODY_ARM_PHRASE} <chain> <protocol> <amount_minor>"),
+            "C-0 is INERT — it AUTHORIZES within bounds but NEVER signs/broadcasts (money 0); the real fire is C-2 (testnet-first)".to_string(),
+            "the model holds no chain-tx capability and there is NO loop tool — it cannot self-spend; custody is OFF here (C-0 inert, money=0), owner-armable at C-2".to_string(),
+        ];
+        emit(
+            out,
+            "daemon",
+            &envelope_hex,
+            CommandRisk::Admin,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &body,
+        )?;
+        return Ok(false);
     };
-    let Some(grant) = EgressGrant::arm(ceremony, bounds) else {
+
+    // parse the amount (integer minor units; NO float).
+    let Ok(amount_minor) = amount_raw.parse::<u128>() else {
+        let body = vec![
+            "daemon chain-dry-run: armed, but <amount_minor> is not an integer (fail-closed)"
+                .to_string(),
+            format!(
+                "usage: daemon chain-dry-run {CUSTODY_ARM_PHRASE} <chain> <protocol> <amount_minor>"
+            ),
+        ];
+        emit(
+            out,
+            "daemon",
+            &envelope_hex,
+            CommandRisk::Admin,
+            ApprovalRequirement::TypedPhrase,
+            RenderTruth::Yellow,
+            &body,
+        )?;
+        return Ok(false);
+    };
+    let tx = ChainTxRequest {
+        chain: chain.to_string(),
+        protocol: protocol.to_string(),
+        amount_minor,
+    };
+
+    // RE-DERIVE the bounded capability at the live (now, used=0, spent=0); the INERT chokepoint
+    // renders the verdict. NO money moves, NO key is touched.
+    let (truth, verdict_line) = match local_chain_tx_capability(&grant, now_ms, 0, 0, &tx) {
+        Some(cap) => {
+            let receipt = execute_authorized_chain_tx(cap, &tx);
+            (
+                RenderTruth::Green,
+                format!(
+                    "verdict: AUTHORIZED within bounds ⇒ {:?} (INERT — C-0 would build+sign+broadcast in C-2; money 0)",
+                    receipt.status
+                ),
+            )
+        }
+        None => {
+            let reason = match grant.authorize(now_ms, 0, 0, &tx) {
+                CustodyAuthorization::Denied(r) => format!("{r:?}"),
+                CustodyAuthorization::Authorized => "—".to_string(),
+            };
+            (
+                RenderTruth::Red,
+                format!("verdict: DENIED ({reason}) — fail-closed, nothing authorized, money 0"),
+            )
+        }
+    };
+    let body = vec![
+        format!(
+            "daemon chain-dry-run: ARMED a single-shot custody grant ({CUSTODY_MAX_ACTIONS} tx / {} min, revocable)",
+            CUSTODY_TTL_MS / 60_000
+        ),
+        format!("tx: chain={chain} protocol={protocol} amount_minor={amount_minor}"),
+        format!(
+            "bound: per-tx<={PER_TX_MAX} · budget<={TOTAL_BUDGET} · chains[ethereum,base,arbitrum] · protocols[uniswap,aave]"
+        ),
+        verdict_line,
+        "C-0 honest LOCK: PURE/INERT — no key, no signature, no broadcast (money 0); the real fire is C-2 (testnet-first). Custody is OFF here (inert), owner-armable at C-2; mainnet = a further owner arm.".to_string(),
+    ];
+    emit(
+        out,
+        "daemon",
+        &envelope_hex,
+        CommandRisk::Admin,
+        ApprovalRequirement::TypedPhrase,
+        truth,
+        &body,
+    )?;
+    Ok(true)
+}
+
+/// The 0600 owner-controlled file that holds the ISOLATED devnet signer SEED (base58). The seed is
+/// NEVER rendered/logged (IV-K2-5); only the PUBLIC key is displayed. For mainnet (a future arm) the
+/// seed would be sealed via the keystore; on devnet a 0600 file (like an ssh key) is the source.
+fn solana_signer_key_path() -> Option<std::path::PathBuf> {
+    Some(
+        crate::memory_store::data_dir()
+            .ok()?
+            .join("solana_devnet_signer.key"),
+    )
+}
+
+/// Write `contents` to `path` with 0600 perms on unix (create-time), a plain write elsewhere.
+fn write_key_file_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
+/// Load the isolated devnet signer from its 0600 file (`None` if absent / unparsable).
+fn load_solana_signer() -> Option<crate::chain_signer::IsolatedSigner> {
+    let path = solana_signer_key_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let seed = crate::chain_signer::IsolatedSigner::parse_base58_seed(&text)?;
+    Some(crate::chain_signer::IsolatedSigner::from_seed(seed))
+}
+
+/// `sinabro daemon trade-addr` — show (and, if absent, generate) the ISOLATED devnet signer pubkey
+/// (MNEMOS × SKEW K-2 / C-2). READ-class, money 0: derive + display the PUBLIC key (the fee payer
+/// the owner funds with devnet SOL) and persist the secret SEED to a 0600 file (NEVER rendered).
+fn cmd_daemon_trade_addr(out: &mut impl Write) -> io::Result<()> {
+    let envelope_hex = toplevel_envelope_hex("daemon");
+    let Some(path) = solana_signer_key_path() else {
+        let body = vec!["daemon trade-addr: no data dir available (fail-closed)".to_string()];
         return emit(
             out,
             "daemon",
             &envelope_hex,
-            CommandRisk::Network,
-            ApprovalRequirement::TypedPhrase,
-            RenderTruth::Yellow,
-            &["egress grant arm failed; nothing read".to_string()],
-        )
-        .map(|()| true);
+            CommandRisk::ReadOnly,
+            ApprovalRequirement::None,
+            RenderTruth::Red,
+            &body,
+        );
     };
-    let Some(cap) = local_egress_capability(&grant) else {
-        return emit(
+    // load OR generate+persist the isolated key.
+    let (signer, newly) = match load_solana_signer() {
+        Some(s) => (s, false),
+        None => {
+            let Some(s) = crate::chain_signer::IsolatedSigner::generate() else {
+                let body = vec!["daemon trade-addr: OS RNG unavailable (fail-closed)".to_string()];
+                return emit(
+                    out,
+                    "daemon",
+                    &envelope_hex,
+                    CommandRisk::ReadOnly,
+                    ApprovalRequirement::None,
+                    RenderTruth::Red,
+                    &body,
+                );
+            };
+            let persisted = s.seed_base58_for_persist();
+            if write_key_file_private(&path, &persisted).is_err() {
+                let body = vec![
+                    "daemon trade-addr: could not persist the isolated key (fail-closed)"
+                        .to_string(),
+                ];
+                return emit(
+                    out,
+                    "daemon",
+                    &envelope_hex,
+                    CommandRisk::ReadOnly,
+                    ApprovalRequirement::None,
+                    RenderTruth::Red,
+                    &body,
+                );
+            }
+            (s, true)
+        }
+    };
+    let pubkey = signer.pubkey().to_base58();
+    let body = vec![
+        "daemon trade-addr = the ISOLATED Sinabro devnet signer (MNEMOS × SKEW K-2 / C-2)".to_string(),
+        format!("isolated devnet pubkey: {pubkey}"),
+        if newly {
+            "status: NEWLY generated (32-byte seed persisted to a 0600 file; the SECRET is never rendered/logged)".to_string()
+        } else {
+            "status: existing isolated key (the SECRET seed stays in its 0600 file; never rendered)".to_string()
+        },
+        format!(
+            "fund it (devnet SOL, free): `solana airdrop 1 {pubkey} --url devnet` — then `daemon trade {} live open-account`",
+            crate::commands::grant::CUSTODY_ARM_PHRASE
+        ),
+        format!("balance: https://explorer.solana.com/address/{pubkey}?cluster=devnet"),
+        "this key is NEVER the Skew keeper key / the owner main wallet; total compromise is bounded by the funded amount (three walls, one number).".to_string(),
+    ];
+    emit(
+        out,
+        "daemon",
+        &envelope_hex,
+        CommandRisk::ReadOnly,
+        ApprovalRequirement::None,
+        RenderTruth::Green,
+        &body,
+    )
+}
+
+/// Emit a `daemon`-namespace Admin/typed-phrase render (the shared exit for `daemon trade`).
+fn emit_daemon_admin<W: Write>(
+    out: &mut W,
+    envelope_hex: &str,
+    truth: RenderTruth,
+    body: Vec<String>,
+) -> io::Result<()> {
+    emit(
+        out,
+        "daemon",
+        envelope_hex,
+        CommandRisk::Admin,
+        ApprovalRequirement::TypedPhrase,
+        truth,
+        &body,
+    )
+}
+
+/// `sinabro daemon trade <ARM_PHRASE> <sim|live> <open-account|deposit|withdraw|submit-perp|submit-order|pay-vm|lock-collateral|mark-vm|settle|form-contract|list-wcc-template|list-piecewise-template|form-piecewise|settle-piecewise|open-perp-market|factory-list-perp-market|form-funding-swap|open-liquidation|complete-liquidation> [args]` — the
+/// owner-armed K-2 SKEW chain-write (ONCHAIN PIVOT C-2; devnet). Gate chain: the EXACT custody arm
+/// phrase → the K-1 oracle DECIDES affordability → a within-bounds `ChainTxCapability` witness → the
+/// isolated signer → assemble → REAL devnet simulate (D2/D3) → [live:] D14 genesis pin → sign → D13
+/// → REAL broadcast. `sim` stops at the real simulate (money 0). Fail-closed at every gate; the
+/// model holds no phrase + no witness + no signer + NO loop tool (IV-K2-12).
+/// Build the canonical straddle leg pair (the deployed `aether-opt-straddle-1` shape that the
+/// `list_piecewise_template` golden uses) + each leg's EXACT certified WCL. `leg_long = |S−strike|
+/// − premium` (WCL = premium, the apex loss); `leg_short` = its antisymmetric negation (WCL =
+/// `intrinsic_max − premium`). The piecewise listing / form / settle arms PROPOSE this structured
+/// payoff from a few scalar knobs. Returns `None` (fail-closed) on a degenerate domain, an
+/// off-lattice strike (the segment breakpoint must be on-lattice for the partition + the exact
+/// WCL), a degenerate top segment, or a premium above the intrinsic max — never a malformed leg.
+fn build_straddle_legs(
+    lo: i128,
+    hi: i128,
+    tau: u128,
+    strike: i128,
+    premium: i128,
+) -> Option<(
+    crate::solana_codec::PiecewiseAffine1D,
+    crate::solana_codec::PiecewiseAffine1D,
+    u128,
+    u128,
+)> {
+    use crate::solana_codec::{PieceSegment, PiecewiseAffine1D};
+    if lo >= hi || tau == 0 || strike <= lo || strike >= hi || premium < 0 {
+        return None;
+    }
+    let tau_i = i128::try_from(tau).ok()?;
+    // strike on-lattice (the breakpoint must land on `D` so the partition is valid + WCL_long == premium).
+    let span_lo = u128::try_from(strike.checked_sub(lo)?).ok()?;
+    if span_lo % tau != 0 {
+        return None;
+    }
+    // the top segment [strike+tau, hi] must be non-empty.
+    if strike.checked_add(tau_i)? > hi {
+        return None;
+    }
+    let intrinsic_max = (strike - lo).max(hi - strike);
+    if premium > intrinsic_max {
+        return None;
+    }
+    let leg_long = PiecewiseAffine1D {
+        lo,
+        hi,
+        tau,
+        segments: vec![
+            PieceSegment {
+                x_hi: strike,
+                coeff: -1,
+                konst: strike.checked_sub(premium)?,
+            },
+            PieceSegment {
+                x_hi: hi,
+                coeff: 1,
+                konst: strike.checked_add(premium)?.checked_neg()?,
+            },
+        ],
+    };
+    let leg_short = PiecewiseAffine1D {
+        lo,
+        hi,
+        tau,
+        segments: vec![
+            PieceSegment {
+                x_hi: strike,
+                coeff: 1,
+                konst: premium.checked_sub(strike)?,
+            },
+            PieceSegment {
+                x_hi: hi,
+                coeff: -1,
+                konst: strike.checked_add(premium)?,
+            },
+        ],
+    };
+    let wcl_long = u128::try_from(premium).ok()?;
+    let wcl_short = u128::try_from(intrinsic_max.checked_sub(premium)?).ok()?;
+    Some((leg_long, leg_short, wcl_long, wcl_short))
+}
+
+/// W1 — the AUTONOMOUS MARGIN flow for a single-party `submit-order` (owner: "read the required margin →
+/// deposit EXACTLY that → trade, autonomously"). ONE owner ceremony, up to TWO chain txs: (1) read the LIVE
+/// URA → free / locked; (2) build the order + the REQUIRED worst-case margin (the K-1 oracle); (3) if
+/// `free < required`, DEPOSIT exactly the shortfall; (4) SUBMIT the order (it atomically escrows `required`
+/// from free collateral). The oracle's drawdown check sees the REAL on-chain `portfolio_locked` (the live
+/// `locked`), not 0. Needs web3-egress (read) + chain-write (write); honest-degrade otherwise. Fail-closed at
+/// every gate; the model cannot supply the arm phrase; money moves ONLY through the EXISTING K-2 chokepoint
+/// (devnet; `CustodyCapability` uninhabited). The deposit is bounded by the oracle-computed margin (it can
+/// NEVER over-deposit), and a failed deposit ABORTS the order (no half-funded trade). web3-egress-gated
+/// (auto-margin MUST read the live URA to size the deposit); the chain-WRITE chokepoint honest-degrades via
+/// the seam without `chain-write`. The interception honest-degrades without web3-egress.
+#[cfg(feature = "web3-egress")]
+#[allow(clippy::too_many_arguments)]
+fn cmd_daemon_trade_auto_margin(
+    phrase: &str,
+    mode: crate::skew_execute::ExecMode,
+    signer: &crate::chain_signer::IsolatedSigner,
+    owner: &crate::solana_codec::Pubkey,
+    mint: &crate::solana_codec::Pubkey,
+    bounds: &crate::skew_oracle::OracleBounds,
+    now_ms: u64,
+    rest: &[String],
+    envelope_hex: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::commands::authority::local_chain_tx_capability;
+    use crate::commands::grant::{
+        CUSTODY_ARM_PHRASE, CustodyBounds, GrantBounds, arm_local_custody_grant,
+    };
+    use crate::repl::approval::ApprovalPrompt;
+    use crate::skew_execute::{
+        ChainWriteSeam, K2_CHAIN, K2_PROTOCOL, SkewExecOutcome, execute_skew_chain_tx,
+        plan_deposit_margin, plan_submit_order,
+    };
+    use crate::skew_oracle::{PartyDirection, SkewTrade};
+    use crate::solana_codec::{Pubkey, SubmitOrderDescriptor, WccParamsCodec};
+
+    let usage = format!(
+        "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> auto-margin <template_id_b58> <batch_slot> <nonce> <limit_tick> <long|short> <quantity_q> <contract_size> <collar_lo> <collar_hi> <forward_pc> [tick_tau] [sup_mode]"
+    );
+    // Parse the order args (rest[4..]; the SAME layout as the `submit-order` action).
+    let side_s = rest.get(8).map_or("", String::as_str).trim();
+    let pu64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u64>().ok());
+    let pu32 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u32>().ok());
+    let pu128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u128>().ok());
+    let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+    let (dir_u8, direction) = match side_s {
+        "long" => (0u8, PartyDirection::Long),
+        "short" => (1u8, PartyDirection::Short),
+        _ => {
+            return emit_daemon_admin(
+                out,
+                envelope_hex,
+                RenderTruth::Yellow,
+                vec![
+                    "daemon trade auto-margin: side must be long|short (fail-closed)".to_string(),
+                    usage,
+                ],
+            );
+        }
+    };
+    let (
+        Some(template_pk),
+        Some(batch_slot),
+        Some(nonce),
+        Some(limit_tick),
+        Some(quantity_q),
+        Some(contract_size),
+        Some(collar_lo),
+        Some(collar_hi),
+        Some(forward_pc),
+    ) = (
+        Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+        pu64(5),
+        pu64(6),
+        pu32(7),
+        pu64(9),
+        pu128(10),
+        pi128(11),
+        pi128(12),
+        pi128(13),
+    )
+    else {
+        return emit_daemon_admin(
             out,
-            "daemon",
-            &envelope_hex,
-            CommandRisk::Network,
-            ApprovalRequirement::TypedPhrase,
+            envelope_hex,
             RenderTruth::Yellow,
-            &["egress capability denied (fresh grant); nothing read".to_string()],
-        )
-        .map(|()| true);
+            vec![
+                "daemon trade auto-margin: bad/missing args (fail-closed)".to_string(),
+                usage,
+            ],
+        );
     };
+    let tick_tau = pu128(14).unwrap_or(1);
+    let sup_mode = rest
+        .get(15)
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .unwrap_or(0);
+    let descriptor = SubmitOrderDescriptor {
+        template_id: template_pk.0,
+        batch_slot,
+        nonce,
+        limit_tick,
+        wcc: WccParamsCodec {
+            collar_lo,
+            collar_hi,
+            forward_price_pc: forward_pc,
+            tick_tau,
+            quantity_q,
+            contract_size_cs: contract_size,
+            party_direction: dir_u8,
+            sup_provider_mode: sup_mode,
+        },
+    };
+    let trade = SkewTrade::WccAffineForward {
+        direction,
+        quantity_q,
+        contract_size,
+        collar_lo,
+        collar_hi,
+        forward_price_pc: forward_pc,
+    };
+    // The K-1 oracle re-derives the EXACT worst-case escrow the program will lock (= the required margin).
+    let Some(required) = trade.worst_case_escrow() else {
+        return emit_daemon_admin(
+            out,
+            envelope_hex,
+            RenderTruth::Red,
+            vec![
+                "daemon trade auto-margin: the oracle could not derive the required margin (fail-closed)"
+                    .to_string(),
+            ],
+        );
+    };
+    // GATE 1 — the owner-arm ceremony FIRST: nothing happens (not even a chain READ) without the EXACT
+    // phrase (fail-closed LOCKED; the model cannot supply it). Arm ONE grant (max_actions=4 ≥ 2: deposit+order).
+    let mut prompt = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+    let audit_hash_32 = sha256_32(b"daemon.trade.skew.custody.arm.v1");
+    let Some(grant) = arm_local_custody_grant(
+        &mut prompt,
+        phrase.trim(),
+        audit_hash_32,
+        CustodyBounds {
+            base: GrantBounds {
+                max_actions_u32: SKEW_CUSTODY_MAX_ACTIONS,
+                expires_at_epoch_ms: now_ms.saturating_add(SKEW_CUSTODY_TTL_MS),
+            },
+            per_tx_max_minor: SKEW_CUSTODY_PER_TX_MINOR,
+            total_budget_minor: SKEW_CUSTODY_BUDGET_MINOR,
+            chain_allowlist: vec![K2_CHAIN.to_string()],
+            protocol_allowlist: vec![K2_PROTOCOL.to_string()],
+        },
+    ) else {
+        return emit_daemon_admin(
+            out,
+            envelope_hex,
+            RenderTruth::Yellow,
+            vec![
+                "daemon trade auto-margin: LOCKED — the custody arm phrase is missing/wrong (fail-closed; no chain read)"
+                    .to_string(),
+                "the model cannot supply this phrase; only the owner arms.".to_string(),
+            ],
+        );
+    };
+
+    // (2) READ the LIVE URA — fail-closed if no URA (NEVER trade blind on a missing read).
+    let Some(ura) = read_live_ura_balance(K2_CHAIN, owner) else {
+        return emit_daemon_admin(
+            out,
+            envelope_hex,
+            RenderTruth::Yellow,
+            vec![
+                "daemon trade auto-margin: could not read the LIVE URA (fail-closed; NEVER trades blind)"
+                    .to_string(),
+                "build with --features web3-egress AND `open-account` + fund the isolated key first."
+                    .to_string(),
+                format!("the order's required worst-case margin (oracle) = {required} atoms."),
+            ],
+        );
+    };
+    let free = ura.free;
+    let locked = ura.locked_epoch.saturating_add(ura.locked_wcc);
+    let shortfall = required.saturating_sub(free);
+    let Ok(shortfall_u64) = u64::try_from(shortfall) else {
+        return emit_daemon_admin(
+            out,
+            envelope_hex,
+            RenderTruth::Red,
+            vec![format!(
+                "daemon trade auto-margin: shortfall {shortfall} exceeds u64 (fail-closed)"
+            )],
+        );
+    };
+
+    // Build the order plan (+ the deposit plan if underfunded), oracle-gated with the REAL portfolio_locked.
+    // spent=0 for each: the order's escrow (= required) IS the total worst-case risk; the deposit funds it,
+    // so the per-tx + budget checks bound `required` correctly (no double-count).
+    let order_plan = match plan_submit_order(owner, mint, &descriptor, &trade, bounds, 0, locked) {
+        Ok(p) => p,
+        Err(reason) => {
+            return emit_daemon_admin(
+                out,
+                envelope_hex,
+                RenderTruth::Red,
+                vec![
+                    format!(
+                        "daemon trade auto-margin: ORACLE DENIED the order ({}) — fail-closed, nothing signed (money 0)",
+                        reason.as_str()
+                    ),
+                    format!(
+                        "read: free={free} locked={locked} required={required} shortfall={shortfall} (drawdown uses the LIVE locked)"
+                    ),
+                ],
+            );
+        }
+    };
+    let deposit_plan = if shortfall > 0 {
+        match plan_deposit_margin(owner, mint, shortfall_u64, bounds, 0, locked) {
+            Ok(p) => Some(p),
+            Err(reason) => {
+                return emit_daemon_admin(
+                    out,
+                    envelope_hex,
+                    RenderTruth::Red,
+                    vec![
+                        format!(
+                            "daemon trade auto-margin: ORACLE DENIED the deposit ({}) — fail-closed (money 0)",
+                            reason.as_str()
+                        ),
+                        format!("read: free={free} required={required} shortfall={shortfall}"),
+                    ],
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let registry = read_owner_web3_chain_registry();
+    let Some(entry) = registry.lookup(K2_CHAIN) else {
+        return emit_daemon_admin(
+            out,
+            envelope_hex,
+            RenderTruth::Red,
+            vec![format!(
+                "daemon trade auto-margin: chain '{K2_CHAIN}' not configured (config web3_rpc_chains); nothing signed"
+            )],
+        );
+    };
+    let endpoint = entry.endpoint().to_string();
+    let seam = ChainWriteSeam::new();
+
+    let summarize = |label: &str, oc: &SkewExecOutcome| -> String {
+        match oc {
+            SkewExecOutcome::Broadcast { signature_b58, .. } => {
+                format!("{label}: ★ BROADCAST a REAL devnet tx {signature_b58}")
+            }
+            SkewExecOutcome::Simulated { sim_ok, .. } => {
+                format!("{label}: REAL devnet SIMULATE sim_ok={sim_ok} (signed; not broadcast)")
+            }
+            SkewExecOutcome::Denied(r) => format!("{label}: DENIED ({})", r.label()),
+        }
+    };
+    let succeeded = |oc: &SkewExecOutcome| {
+        matches!(
+            oc,
+            SkewExecOutcome::Broadcast { .. } | SkewExecOutcome::Simulated { sim_ok: true, .. }
+        )
+    };
+
+    let mut body = vec![
+        format!(
+            "daemon trade auto-margin [submit-order]: read free={free} locked={locked} required={required} shortfall={shortfall}"
+        ),
+        format!(
+            "plan: {} → submit-order (oracle drawdown uses the LIVE locked={locked}; money via the K-2 chokepoint, devnet)",
+            if shortfall > 0 {
+                format!("deposit EXACTLY {shortfall}")
+            } else {
+                "no deposit (free already covers the margin)".to_string()
+            }
+        ),
+    ];
+    let mut used = 0u32;
+    // tx1 — the deposit (only if underfunded). A failed deposit ABORTS the order (no half-funded trade).
+    if let Some(dep) = &deposit_plan {
+        let Some(cap) = local_chain_tx_capability(&grant, now_ms, used, 0, &dep.request) else {
+            body.push("deposit: CUSTODY DENIED (fail-closed; nothing signed)".to_string());
+            return emit_daemon_admin(out, envelope_hex, RenderTruth::Red, body);
+        };
+        let oc = execute_skew_chain_tx(cap, dep, signer, seam.port(), &endpoint, mode);
+        body.push(summarize("deposit", &oc));
+        if !succeeded(&oc) {
+            body.push(
+                "→ deposit did not succeed ⇒ the order is NOT submitted (fail-closed).".to_string(),
+            );
+            return emit_daemon_admin(out, envelope_hex, RenderTruth::Red, body);
+        }
+        used = used.saturating_add(1);
+    }
+    // tx2 — the order (atomically escrows EXACTLY `required` from free collateral).
+    let Some(cap2) = local_chain_tx_capability(&grant, now_ms, used, 0, &order_plan.request) else {
+        body.push("order: CUSTODY DENIED (fail-closed; nothing signed)".to_string());
+        return emit_daemon_admin(out, envelope_hex, RenderTruth::Red, body);
+    };
+    let oc2 = execute_skew_chain_tx(cap2, &order_plan, signer, seam.port(), &endpoint, mode);
+    body.push(summarize("order", &oc2));
+    let truth = if succeeded(&oc2) {
+        RenderTruth::Green
+    } else {
+        RenderTruth::Red
+    };
+    emit_daemon_admin(out, envelope_hex, truth, body)
+}
+
+fn cmd_daemon_trade(rest: &[String], out: &mut impl Write) -> io::Result<()> {
+    use crate::commands::authority::local_chain_tx_capability;
+    use crate::commands::grant::{
+        CUSTODY_ARM_PHRASE, CustodyBounds, GrantBounds, arm_local_custody_grant,
+    };
+    use crate::repl::approval::ApprovalPrompt;
+    use crate::skew_execute::{
+        ChainWriteSeam, ExecMode, K2_CHAIN, K2_PROTOCOL, SkewExecOutcome, execute_skew_chain_tx,
+        plan_accept_secondary, plan_advance_funding_epoch, plan_atomic_position_transfer,
+        plan_cancel_secondary, plan_claim_fill, plan_close_batch, plan_complete_liquidation,
+        plan_deposit_margin, plan_factory_list_perp_market, plan_force_reduce_position,
+        plan_form_contract, plan_form_funding_swap, plan_form_piecewise_contract,
+        plan_list_piecewise_template, plan_list_secondary, plan_list_wcc_template,
+        plan_lock_collateral, plan_mark_vm, plan_open_batch, plan_open_fixed_forward_liquidation,
+        plan_open_perp_market, plan_open_risk_account, plan_pay_vm, plan_quote_secondary,
+        plan_settle_account_funding, plan_settle_batch, plan_settle_batch_contract,
+        plan_settle_fixed_forward, plan_settle_piecewise_contract, plan_submit_order,
+        plan_submit_perp_order, plan_validate_reference_snapshot, plan_withdraw_margin,
+    };
+    use crate::skew_oracle::{OracleBounds, PartyDirection, SkewTrade};
+    use crate::solana_codec::{
+        AcceptSecondaryDescriptor, AdvanceFundingEpochDescriptor, AffineCoord,
+        AtomicPositionTransferDescriptor, CancelSecondaryDescriptor, ClaimFillDescriptor,
+        CloseBatchDescriptor, CompleteLiquidationDescriptor, FactoryListPerpMarketDescriptor,
+        ForceReducePositionDescriptor, FormContractDescriptor, FormFundingSwapDescriptor,
+        FormPiecewiseContractDescriptor, ListPiecewiseTemplateDescriptor, ListSecondaryDescriptor,
+        ListWccTemplateDescriptor, LockCollateralDescriptor, MarkVmDescriptor, ModeCCertKind,
+        ModeCDescriptor, OpenBatchDescriptor, OpenLiquidationDescriptor, OpenPerpMarketDescriptor,
+        PayVmDescriptor, Pubkey, QuoteSecondaryDescriptor, SettleAccountFundingDescriptor,
+        SettleBatchContractDescriptor, SettleBatchDescriptor, SettleFixedForwardDescriptor,
+        SettlePiecewiseContractDescriptor, SubmitOrderDescriptor, SubmitPerpOrderDescriptor,
+        ValidateReferenceSnapshotDescriptor, WccParamsCodec,
+    };
+
+    // The per-owner custody bounds — the SINGLE source shared with the wallet-settings dial
+    // (`skew_custody_dial`, rendered by the K-5c cockpit). The wallet window is where the owner
+    // sets the ceiling + funds; these are the session defaults until a config seam lands.
+    const PER_TX: u128 = SKEW_CUSTODY_PER_TX_MINOR;
+    const BUDGET: u128 = SKEW_CUSTODY_BUDGET_MINOR;
+    const TTL_MS: u64 = SKEW_CUSTODY_TTL_MS;
+    const MAX_ACTIONS: u32 = SKEW_CUSTODY_MAX_ACTIONS;
+
+    let envelope_hex = toplevel_envelope_hex("daemon");
+    let phrase = rest.get(1).map_or("", String::as_str);
+    let mode_s = rest.get(2).map_or("", String::as_str).trim();
+    let action = rest.get(3).map_or("", String::as_str).trim();
+    let amount_s = rest.get(4).map_or("", String::as_str).trim();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0u64, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+
+    let mode = match mode_s {
+        "sim" => ExecMode::SimulateOnly,
+        "live" => ExecMode::SimulateThenBroadcast,
+        // FAST PATH — owner-armed speed modes (the owner TYPES the verb ⇒ the model can never select
+        // a faster/less-safe mode). `fast` skips the pre-sim round-trip; `turbo` + Jito/TPU inclusion.
+        "fast" => ExecMode::FastBroadcast,
+        "turbo" => ExecMode::TurboBroadcast,
+        _ => {
+            return emit_daemon_admin(out, &envelope_hex, RenderTruth::Yellow, vec![
+                "daemon trade = the owner-armed K-2 SKEW chain-write (ONCHAIN PIVOT C-2; devnet)".to_string(),
+                format!("usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> <open-account|deposit|withdraw|submit-perp|submit-order|pay-vm|lock-collateral|mark-vm|settle|form-contract|list-wcc-template|list-piecewise-template|form-piecewise|settle-piecewise|open-perp-market|factory-list-perp-market|form-funding-swap|open-liquidation|complete-liquidation> [args]"),
+                "sim = simulate-only (money 0); live = sim-gated broadcast (safest)".to_string(),
+                "fast = SKIP pre-sim → 1 fewer round-trip (oracle+D13+D14 still gated); turbo = fast + Jito/TPU inclusion".to_string(),
+                "run `daemon trade-addr` first to generate + fund the isolated devnet key.".to_string(),
+            ]);
+        }
+    };
+
+    // The isolated signer MUST exist (run `trade-addr` first).
+    let Some(signer) = load_solana_signer() else {
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Red,
+            vec![
+                "daemon trade: no isolated devnet signer found (fail-closed)".to_string(),
+                "run `daemon trade-addr` to generate + fund the isolated key first.".to_string(),
+            ],
+        );
+    };
+    let owner = signer.pubkey();
+    let Some(mint) = Pubkey::from_base58(crate::skew_catalog::SKEW_SETTLEMENT_MINT_DEVNET) else {
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Red,
+            vec!["daemon trade: settlement mint invalid (fail-closed)".to_string()],
+        );
+    };
+    let bounds = OracleBounds {
+        per_tx_max_minor: PER_TX,
+        total_budget_minor: BUDGET,
+        drawdown_max_minor: BUDGET,
+    };
+
+    // GATE 1 — the K-1 oracle DECIDES affordability at PLAN time (fail-closed before assembly).
+    // W1 — AUTONOMOUS MARGIN: read the LIVE margin → deposit EXACTLY the shortfall → submit, one ceremony.
+    // A 2-tx flow (deposit + order) needs its own tail; isolate it here so the single-tx arms below are
+    // byte-unchanged. Needs web3-egress (read) + chain-write (write); honest-degrade otherwise.
+    if action == "auto-margin" {
+        #[cfg(feature = "web3-egress")]
+        return cmd_daemon_trade_auto_margin(
+            phrase,
+            mode,
+            &signer,
+            &owner,
+            &mint,
+            &bounds,
+            now_ms,
+            rest,
+            &envelope_hex,
+            out,
+        );
+        #[cfg(not(feature = "web3-egress"))]
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Yellow,
+            vec![
+                "daemon trade auto-margin: needs --features web3-egress to read the LIVE margin (honest-degrade)".to_string(),
+                "the single-step arms (deposit / submit-order) work without it; auto-margin reads the URA to size the deposit.".to_string(),
+            ],
+        );
+    }
+    let plan_result = match action {
+        "open-account" => plan_open_risk_account(&owner, &mint, &bounds, 0, 0),
+        "deposit" => {
+            let Ok(amount) = amount_s.parse::<u64>() else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade deposit: <amount_atoms> is not an integer (fail-closed)"
+                            .to_string(),
+                        format!(
+                            "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live> deposit <amount_atoms>"
+                        ),
+                    ],
+                );
+            };
+            plan_deposit_margin(&owner, &mint, amount, &bounds, 0, 0)
+        }
+        // WAVE A — `withdraw_margin` (0x62): release free collateral OUT to the owner. Mirrors
+        // deposit (byte-identical descriptor); a withdraw structurally REDUCES protocol-held exposure
+        // (handler debits only free_collateral) yet rides the SAME conservative per-tx amount-binding.
+        "withdraw" => {
+            let Ok(amount) = amount_s.parse::<u64>() else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade withdraw: <amount_atoms> is not an integer (fail-closed)"
+                            .to_string(),
+                        format!(
+                            "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live> withdraw <amount_atoms>"
+                        ),
+                    ],
+                );
+            };
+            plan_withdraw_margin(&owner, &mint, amount, &bounds, 0, 0)
+        }
+        // K-2b — `submit_perp_order` (0x71): the perp `buy`. The perp worst-case is NOT data-free, so
+        // the oracle GENUINELY needs the market band (contract_size · entry · lo · hi) — there is no
+        // shortcut (no fabricated escrow). Args (read `skew oracle live` / `skew markets` first):
+        //   submit-perp <market_id_b58> <long|short> <qty> <contract_size> <entry> <lo> <hi>
+        //               [batch_slot] [epoch_seq] [nonce] [limit_tick]
+        // The descriptor's batch_slot/epoch_seq/nonce/limit_tick default to 0 — a `sim` reaches the
+        // REAL devnet simulator (which validates the batch context honestly); a real `live` order needs
+        // the live batch context (a future "buy reads the market" refinement). Money 0 on `sim`.
+        "submit-perp" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live> submit-perp <market_id_b58> <long|short> <qty> <contract_size> <entry> <lo> <hi> [batch_slot] [epoch_seq] [nonce] [limit_tick]"
+            );
+            let market_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let side_s = rest.get(5).map_or("", String::as_str).trim();
+            let parse_u64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u64>().ok());
+            let parse_u128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u128>().ok());
+            let parse_i128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let parse_u32 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u32>().ok());
+            let side = match side_s {
+                "long" => Some(0u8),
+                "short" => Some(1u8),
+                _ => None,
+            };
+            let (
+                Some(market_pk),
+                Some(side),
+                Some(qty),
+                Some(contract_size),
+                Some(entry),
+                Some(lo),
+                Some(hi),
+            ) = (
+                Pubkey::from_base58(market_b58),
+                side,
+                parse_u64(6),
+                parse_u128(7),
+                parse_i128(8),
+                parse_i128(9),
+                parse_i128(10),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade submit-perp: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            // signed_qty: + long / − short (fail-closed if qty overflows i64).
+            let Ok(mag) = i64::try_from(qty) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec!["daemon trade submit-perp: qty out of range (fail-closed)".to_string()],
+                );
+            };
+            let signed_qty = if side == 1 { -mag } else { mag };
+            let descriptor = SubmitPerpOrderDescriptor {
+                market_id: market_pk.0,
+                settlement_mint: mint,
+                batch_slot: parse_u64(11).unwrap_or(0),
+                epoch_seq: parse_u64(12).unwrap_or(0),
+                nonce: parse_u64(13).unwrap_or(0),
+                limit_tick: parse_u32(14).unwrap_or(0),
+                qty,
+                side,
+                intent_flags: 0,
+            };
+            // The oracle prices the perp's worst-case epoch WCL from the market band (no funding yet).
+            let trade = SkewTrade::Perp {
+                signed_qty,
+                contract_size,
+                entry_price: entry,
+                lo_price: lo,
+                hi_price: hi,
+                funding_cap_per_unit: 0,
+            };
+            plan_submit_perp_order(&owner, &descriptor, &trade, &bounds, 0, 0)
+        }
+        // WAVE B — `submit_order` (0x52): the SINGLE-PARTY OTC entry (atomic exact-WCL escrow = the
+        // UDSI thesis). The K-1 WCC oracle re-derives the EXACT escrow the program locks from the SAME
+        // WccParams. Args: submit-order <template_id_b58> <batch_slot> <nonce> <limit_tick>
+        // <long|short> <quantity_q> <contract_size> <collar_lo> <collar_hi> <forward_pc> [tick_tau] [sup_mode]
+        "submit-order" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> submit-order <template_id_b58> <batch_slot> <nonce> <limit_tick> <long|short> <quantity_q> <contract_size> <collar_lo> <collar_hi> <forward_pc> [tick_tau] [sup_mode]"
+            );
+            let tid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let side_s = rest.get(8).map_or("", String::as_str).trim();
+            let pu64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u64>().ok());
+            let pu32 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u32>().ok());
+            let pu128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u128>().ok());
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (dir_u8, direction) = match side_s {
+                "long" => (0u8, PartyDirection::Long),
+                "short" => (1u8, PartyDirection::Short),
+                _ => {
+                    return emit_daemon_admin(
+                        out,
+                        &envelope_hex,
+                        RenderTruth::Yellow,
+                        vec![
+                            "daemon trade submit-order: side must be long|short (fail-closed)"
+                                .to_string(),
+                            usage,
+                        ],
+                    );
+                }
+            };
+            let (
+                Some(template_pk),
+                Some(batch_slot),
+                Some(nonce),
+                Some(limit_tick),
+                Some(quantity_q),
+                Some(contract_size),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(forward_pc),
+            ) = (
+                Pubkey::from_base58(tid_b58),
+                pu64(5),
+                pu64(6),
+                pu32(7),
+                pu64(9),
+                pu128(10),
+                pi128(11),
+                pi128(12),
+                pi128(13),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade submit-order: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let tick_tau = pu128(14).unwrap_or(1);
+            let sup_mode = rest
+                .get(15)
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
+            let descriptor = SubmitOrderDescriptor {
+                template_id: template_pk.0,
+                batch_slot,
+                nonce,
+                limit_tick,
+                wcc: WccParamsCodec {
+                    collar_lo,
+                    collar_hi,
+                    forward_price_pc: forward_pc,
+                    tick_tau,
+                    quantity_q,
+                    contract_size_cs: contract_size,
+                    party_direction: dir_u8,
+                    sup_provider_mode: sup_mode,
+                },
+            };
+            // The oracle re-derives the EXACT WCL from the SAME WccParams ⇒ oracle escrow == on-chain escrow.
+            let trade = SkewTrade::WccAffineForward {
+                direction,
+                quantity_q,
+                contract_size,
+                collar_lo,
+                collar_hi,
+                forward_price_pc: forward_pc,
+            };
+            plan_submit_order(&owner, &mint, &descriptor, &trade, &bounds, 0, 0)
+        }
+        // WAVE B — `pay_fixed_forward_vm` (8-byte Anchor sighash 64bc0d…): the open-call party pays in
+        // its variation-margin call. SINGLE-PARTY escrow trade (payment IS the escrow). Args:
+        //   pay-vm <contract_id_b58> <template_id_b58> <payment_amount>
+        // (`template_id` is the product_template seed — the descriptor omits it.)
+        "pay-vm" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> pay-vm <contract_id_b58> <template_id_b58> <payment_amount>"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let tid_b58 = rest.get(5).map_or("", String::as_str).trim();
+            let (Some(contract_pk), Some(template_pk), Some(payment_amount)) = (
+                Pubkey::from_base58(cid_b58),
+                Pubkey::from_base58(tid_b58),
+                rest.get(6).and_then(|s| s.trim().parse::<u128>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade pay-vm: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = PayVmDescriptor {
+                contract_id: contract_pk.0,
+                payment_amount,
+            };
+            plan_pay_vm(&owner, &mint, &template_pk.0, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE B part-2b — `lock_fixed_forward_initial_collateral` (8-byte sighash 24b0aa…): the agent
+        // (a contract PARTY) locks ITS side's initial collateral (escrow == lock_amount). Args:
+        //   lock-collateral <contract_id_b58> <template_id_b58> <other_party_b58> <long|short> <lock_amount>
+        "lock-collateral" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> lock-collateral <contract_id_b58> <template_id_b58> <other_party_b58> <long|short> <lock_amount>"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let tid_b58 = rest.get(5).map_or("", String::as_str).trim();
+            let other_b58 = rest.get(6).map_or("", String::as_str).trim();
+            let party_role = match rest.get(7).map_or("", String::as_str).trim() {
+                "long" => Some(0u8),
+                "short" => Some(1u8),
+                _ => None,
+            };
+            let (
+                Some(contract_pk),
+                Some(template_pk),
+                Some(other_pk),
+                Some(party_role),
+                Some(lock_amount),
+            ) = (
+                Pubkey::from_base58(cid_b58),
+                Pubkey::from_base58(tid_b58),
+                Pubkey::from_base58(other_b58),
+                party_role,
+                rest.get(8).and_then(|s| s.trim().parse::<u128>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade lock-collateral: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            // The FF-05 policy/snapshot bytes are template-fixed; empty for the assemble/sim demo (the
+            // live sim reaches AccountNotFound on a dummy contract BEFORE policy validation). A real lock
+            // supplies the template's policy bytes (read from `skew oracle live`).
+            let descriptor = LockCollateralDescriptor {
+                contract_id: contract_pk.0,
+                party_role,
+                lock_amount,
+                collateral_policy_version: 1,
+                collateral_params_bytes: Vec::new(),
+                collateral_snapshot_bytes: Vec::new(),
+                reference_snapshot_hash: [1u8; 32],
+                reference_snapshot_age_seconds: 0,
+                reference_max_age_seconds: 0,
+                vm_policy_bytes: Vec::new(),
+                vm_mark_source: 0,
+            };
+            plan_lock_collateral(
+                &owner,
+                &mint,
+                &template_pk.0,
+                &other_pk,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE B part-2b — `mark_fixed_forward_vm` (2-byte disc 0x0005): a PERMISSIONLESS keeper
+        // mark-to-market (escrow=0; the agent commits nothing). Args:
+        //   mark-vm <contract_id_b58> <template_id_b58> <mark_price_atoms>
+        "mark-vm" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> mark-vm <contract_id_b58> <template_id_b58> <mark_price_atoms>"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let tid_b58 = rest.get(5).map_or("", String::as_str).trim();
+            let (Some(contract_pk), Some(template_pk), Some(mark_price)) = (
+                Pubkey::from_base58(cid_b58),
+                Pubkey::from_base58(tid_b58),
+                rest.get(6).and_then(|s| s.trim().parse::<u128>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade mark-vm: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = MarkVmDescriptor {
+                contract_id: contract_pk.0,
+                vm_policy_bytes: Vec::new(),
+                mark_price_atoms: mark_price,
+                mark_publish_timestamp: 0,
+                mark_confidence_bps: 0,
+                mark_snapshot_hash: [1u8; 32],
+                mark_archive_pointer: [0u8; 32],
+                reference_policy_id: 0,
+                mark_price_decimals: 6,
+                current_unix_timestamp: 0,
+            };
+            plan_mark_vm(&owner, &template_pk.0, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE B part-2b — `settle_fixed_forward` (8-byte sighash 7998…): a PERMISSIONLESS keeper
+        // resolving a contract at maturity (escrow=0; disburses from the posted collateral). Args:
+        //   settle <contract_id_b58> <template_id_b58> <receiver_token_account_b58> <settlement_price>
+        "settle" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> settle <contract_id_b58> <template_id_b58> <receiver_token_account_b58> <settlement_price>"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let tid_b58 = rest.get(5).map_or("", String::as_str).trim();
+            let recv_b58 = rest.get(6).map_or("", String::as_str).trim();
+            let (Some(contract_pk), Some(template_pk), Some(receiver_pk), Some(settlement_price)) = (
+                Pubkey::from_base58(cid_b58),
+                Pubkey::from_base58(tid_b58),
+                Pubkey::from_base58(recv_b58),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = SettleFixedForwardDescriptor {
+                contract_id: contract_pk.0,
+                reference_snapshot_hash: [1u8; 32],
+                settlement_price,
+                current_unix_timestamp: 0,
+                archive_pointer: [0u8; 32],
+                reference_publish_timestamp: 0,
+            };
+            plan_settle_fixed_forward(
+                &owner,
+                &mint,
+                &template_pk.0,
+                &receiver_pk,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE B part-2b — `form_fixed_forward_contract` (2-byte disc 0x0003): form a bilateral
+        // fixed-forward. ★ 3 SIGNERS ⇒ ASSEMBLE + SIMULATE only (the agent can't forge the counterparty
+        // sigs; a real broadcast = a multi-sig / 2-agent / quote-authority owner go-live). Args:
+        //   form-contract <contract_id_b58> <template_id_b58> <long_b58> <short_b58> <quantity>
+        //                 <contract_size> <forward_price> <maturity_ts>
+        "form-contract" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim> form-contract <contract_id_b58> <template_id_b58> <long_b58> <short_b58> <quantity> <contract_size> <forward_price> <maturity_ts> (ASSEMBLE+SIM only — 3 signers)"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let tid_b58 = rest.get(5).map_or("", String::as_str).trim();
+            let long_b58 = rest.get(6).map_or("", String::as_str).trim();
+            let short_b58 = rest.get(7).map_or("", String::as_str).trim();
+            let (
+                Some(contract_pk),
+                Some(template_pk),
+                Some(long_pk),
+                Some(short_pk),
+                Some(quantity),
+                Some(contract_size),
+                Some(forward_price),
+                Some(maturity),
+            ) = (
+                Pubkey::from_base58(cid_b58),
+                Pubkey::from_base58(tid_b58),
+                Pubkey::from_base58(long_b58),
+                Pubkey::from_base58(short_b58),
+                rest.get(8).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(9).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(10).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(11).and_then(|s| s.trim().parse::<i64>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade form-contract: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let notional = u128::from(quantity)
+                .saturating_mul(contract_size)
+                .saturating_mul(forward_price);
+            let descriptor = FormContractDescriptor {
+                contract_id: contract_pk.0,
+                template_id: template_pk.0,
+                version: 1,
+                terms_hash: [1u8; 32],
+                accept_id: [2u8; 32],
+                quote_expiry: 0,
+                long_party: long_pk,
+                short_party: short_pk,
+                party_roles: 0,
+                allow_self_cross: long_pk == short_pk,
+                underlying_reference_id: [0u8; 32],
+                settlement_mint: mint,
+                quantity,
+                contract_size,
+                forward_price,
+                maturity_timestamp: maturity,
+                notional,
+                reference_data_policy_id: 0,
+                collateral_policy_id: 0,
+                vm_policy_id: 0,
+                settlement_adapter_id: 0,
+                approved_reference_ids: Vec::new(),
+                approved_settlement_mints: Vec::new(),
+            };
+            plan_form_contract(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE D — the SECONDARY market. list/quote/accept/cancel move NO tokens (escrow=0); the
+        // atomic position transfer is the value-moving leg (buyer posts WCL + pays the price).
+        // list-secondary <contract_b58> <side 0|1> <listing_qty> <ask_price> <expiry_slot> <exec_mode>
+        "list-secondary" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> list-secondary <contract_b58> <side 0|1> <listing_qty> <ask_price> <expiry_slot> <execution_mode>"
+            );
+            let cid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let (
+                Some(contract_pk),
+                Some(side),
+                Some(listing_qty),
+                Some(ask_price),
+                Some(expiry_slot),
+                Some(execution_mode),
+            ) = (
+                Pubkey::from_base58(cid_b58),
+                rest.get(5).and_then(|s| s.trim().parse::<u8>().ok()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(8).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(9).and_then(|s| s.trim().parse::<u8>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade list-secondary: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = ListSecondaryDescriptor {
+                contract_id: contract_pk.0,
+                side,
+                listing_qty,
+                ask_price,
+                expiry_slot,
+                execution_mode,
+            };
+            plan_list_secondary(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // quote-secondary <contract_b58> <seller_b58> <quote_price>
+        "quote-secondary" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> quote-secondary <contract_b58> <seller_b58> <quote_price>"
+            );
+            let (Some(contract_pk), Some(seller_pk), Some(quote_price)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u128>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade quote-secondary: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = QuoteSecondaryDescriptor {
+                contract_id: contract_pk.0,
+                seller: seller_pk,
+                quote_price,
+            };
+            plan_quote_secondary(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // accept-secondary <contract_b58> <accepted_buyer_b58> <accept_price> <transfer_deadline>
+        "accept-secondary" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> accept-secondary <contract_b58> <accepted_buyer_b58> <accept_price> <transfer_deadline>"
+            );
+            let (Some(contract_pk), Some(buyer_pk), Some(accept_price), Some(deadline)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(7).and_then(|s| s.trim().parse::<i64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade accept-secondary: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = AcceptSecondaryDescriptor {
+                contract_id: contract_pk.0,
+                accepted_buyer: buyer_pk,
+                accept_price,
+                transfer_deadline: deadline,
+            };
+            plan_accept_secondary(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // cancel-secondary <contract_b58> <seller_b58>
+        "cancel-secondary" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> cancel-secondary <contract_b58> <seller_b58>"
+            );
+            let (Some(contract_pk), Some(seller_pk)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade cancel-secondary: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = CancelSecondaryDescriptor {
+                contract_id: contract_pk.0,
+                seller: seller_pk,
+            };
+            plan_cancel_secondary(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // atomic-transfer <contract_b58> <seller_b58> <transfer_nonce> <long|short> <quantity>
+        //                 <contract_size> <collar_lo> <collar_hi> <forward_pc> <price> [tick_tau]
+        "atomic-transfer" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> atomic-transfer <contract_b58> <seller_b58> <transfer_nonce> <long|short> <quantity> <contract_size> <collar_lo> <collar_hi> <forward_pc> <price> [tick_tau]"
+            );
+            let direction = match rest.get(7).map_or("", String::as_str).trim() {
+                "long" => Some(PartyDirection::Long),
+                "short" => Some(PartyDirection::Short),
+                _ => None,
+            };
+            let (
+                Some(contract_pk),
+                Some(seller_pk),
+                Some(transfer_nonce),
+                Some(direction),
+                Some(quantity_q),
+                Some(contract_size),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(forward_pc),
+                Some(price),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+                direction,
+                rest.get(8).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(9).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(10).and_then(|s| s.trim().parse::<i128>().ok()),
+                rest.get(11).and_then(|s| s.trim().parse::<i128>().ok()),
+                rest.get(12).and_then(|s| s.trim().parse::<i128>().ok()),
+                rest.get(13).and_then(|s| s.trim().parse::<u128>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade atomic-transfer: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let tick_tau = rest
+                .get(14)
+                .and_then(|s| s.trim().parse::<u128>().ok())
+                .unwrap_or(1);
+            let descriptor = AtomicPositionTransferDescriptor {
+                contract_id: contract_pk.0,
+                transfer_nonce,
+                collar_lo,
+                collar_hi,
+                tick_tau,
+            };
+            // the oracle re-derives the position WCL from the SAME collar params; the buyer's outflow =
+            // WCL + price (bounded by per-tx/budget).
+            let wcc_trade = SkewTrade::WccAffineForward {
+                direction,
+                quantity_q,
+                contract_size,
+                collar_lo,
+                collar_hi,
+                forward_price_pc: forward_pc,
+            };
+            plan_atomic_position_transfer(
+                &owner,
+                &mint,
+                &seller_pk,
+                &descriptor,
+                &wcc_trade,
+                price,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE C — the batch-auction books. All escrow=0 permissionless crank/settle ops.
+        // open-batch <template_b58> <batch_slot>
+        "open-batch" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> open-batch <template_b58> <batch_slot>"
+            );
+            let (Some(template_pk), Some(batch_slot)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade open-batch: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = OpenBatchDescriptor {
+                template_id: template_pk.0,
+                batch_slot,
+            };
+            plan_open_batch(&owner, &mint, &descriptor, &bounds, 0, 0)
+        }
+        // close-batch <template_b58> <batch_slot>
+        "close-batch" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> close-batch <template_b58> <batch_slot>"
+            );
+            let (Some(template_pk), Some(batch_slot)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade close-batch: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = CloseBatchDescriptor {
+                template_id: template_pk.0,
+                batch_slot,
+            };
+            plan_close_batch(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // settle-batch <template_b58> <batch_slot> [phase] [shard_index] [shard_count]
+        "settle-batch" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> settle-batch <template_b58> <batch_slot> [phase] [shard_index] [shard_count]"
+            );
+            let (Some(template_pk), Some(batch_slot)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle-batch: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = SettleBatchDescriptor {
+                template_id: template_pk.0,
+                batch_slot,
+                phase: rest
+                    .get(6)
+                    .and_then(|s| s.trim().parse::<u8>().ok())
+                    .unwrap_or(3),
+                shard_index: rest
+                    .get(7)
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0),
+                shard_count: rest
+                    .get(8)
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(1),
+            };
+            plan_settle_batch(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // claim-fill <template_b58> <batch_slot> <nonce> <order_owner_b58>
+        "claim-fill" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> claim-fill <template_b58> <batch_slot> <nonce> <order_owner_b58>"
+            );
+            let (Some(template_pk), Some(batch_slot), Some(nonce), Some(owner_pk)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+                Pubkey::from_base58(rest.get(7).map_or("", String::as_str).trim()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade claim-fill: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = ClaimFillDescriptor {
+                template_id: template_pk.0,
+                batch_slot,
+                nonce,
+            };
+            plan_claim_fill(&owner, &mint, &owner_pk, &descriptor, &bounds, 0, 0)
+        }
+        // settle-batch-contract <contract_b58> <template_b58> <receiver_b58> <settlement_price> <collar_lo> <collar_hi> [tick_tau]
+        "settle-batch-contract" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> settle-batch-contract <contract_b58> <template_b58> <receiver_b58> <settlement_price> <collar_lo> <collar_hi> [tick_tau]"
+            );
+            let (
+                Some(contract_pk),
+                Some(template_pk),
+                Some(receiver_pk),
+                Some(settlement_price),
+                Some(collar_lo),
+                Some(collar_hi),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(6).map_or("", String::as_str).trim()),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(8).and_then(|s| s.trim().parse::<i128>().ok()),
+                rest.get(9).and_then(|s| s.trim().parse::<i128>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle-batch-contract: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = SettleBatchContractDescriptor {
+                contract_id: contract_pk.0,
+                settlement_price,
+                collar_lo,
+                collar_hi,
+                tick_tau: rest
+                    .get(10)
+                    .and_then(|s| s.trim().parse::<u128>().ok())
+                    .unwrap_or(1),
+            };
+            plan_settle_batch_contract(
+                &owner,
+                &mint,
+                &template_pk.0,
+                &receiver_pk,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE E — the KEEPER band (permissionless deterministic-liveness ops; escrow=0). The agent acts
+        // as an ALIGNED permissionless keeper; it commits NO funds of its own (disbursements come from
+        // the protocol's posted collateral / funding pool, bounded structurally on-chain).
+        // validate-reference <market_b58> <source_id> <observed_slot> <numerator> <divisor> <conf_bps> <spread_bps> <exponent>
+        "validate-reference" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> validate-reference <market_b58> <source_id> <observed_slot> <numerator_atoms> <divisor_atoms> <confidence_bps> <bid_ask_spread_bps> <exponent>"
+            );
+            let (
+                Some(market_pk),
+                Some(source_id),
+                Some(observed_slot),
+                Some(numerator_atoms),
+                Some(divisor_atoms),
+                Some(confidence_bps),
+                Some(spread_bps),
+                Some(exponent),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u32>().ok()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(8).and_then(|s| s.trim().parse::<u128>().ok()),
+                rest.get(9).and_then(|s| s.trim().parse::<u16>().ok()),
+                rest.get(10).and_then(|s| s.trim().parse::<u16>().ok()),
+                rest.get(11).and_then(|s| s.trim().parse::<u8>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade validate-reference: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = ValidateReferenceSnapshotDescriptor {
+                market_id: market_pk.0,
+                source_id,
+                observed_slot,
+                numerator_atoms,
+                divisor_atoms,
+                confidence_bps,
+                bid_ask_spread_bps: spread_bps,
+                exponent,
+                source_payload_hash: [1u8; 32],
+            };
+            plan_validate_reference_snapshot(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // advance-funding <market_b58> <epoch_seq>
+        "advance-funding" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> advance-funding <market_b58> <epoch_seq>"
+            );
+            let (Some(market_pk), Some(epoch_seq)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                rest.get(5).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade advance-funding: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = AdvanceFundingEpochDescriptor {
+                market_id: market_pk.0,
+                epoch_seq,
+            };
+            plan_advance_funding_epoch(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // settle-account-funding <market_b58> <owner_b58> <epoch_seq>
+        "settle-account-funding" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> settle-account-funding <market_b58> <position_owner_b58> <epoch_seq>"
+            );
+            let (Some(market_pk), Some(owner_pk), Some(epoch_seq)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle-account-funding: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = SettleAccountFundingDescriptor {
+                market_id: market_pk.0,
+                settlement_mint: mint,
+                owner: owner_pk,
+                epoch_seq,
+            };
+            plan_settle_account_funding(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // force-reduce <market_b58> <owner_b58> <admitted_epoch_seq>
+        "force-reduce" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> force-reduce <market_b58> <position_owner_b58> <admitted_epoch_seq>"
+            );
+            let (Some(market_pk), Some(owner_pk), Some(epoch_seq)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade force-reduce: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = ForceReducePositionDescriptor {
+                market_id: market_pk.0,
+                settlement_mint: mint,
+                owner: owner_pk,
+                admitted_epoch_seq: epoch_seq,
+            };
+            plan_force_reduce_position(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE C-listings — `list_wcc_template` (0x50): PERMISSIONLESS affine-forward template
+        // registration (escrow=0; the on-chain UDSI math gate replaces an admin authority). The agent
+        // PROPOSES an affine forward `f = S − Pc` over the collar `[lo,hi]`; the short leg is its
+        // antisymmetric partner; the cert is the affine corner (IntervalAffineIII). Args:
+        // W3 — the trailing `[settlement_mint_b58]` is the EXTERNAL settlement token (the on-chain
+        // `list_wcc_template` already takes `settlement_mint: Account<Mint>`, so this is honest: the
+        // agent CHOOSES the settlement currency). Absent ⇒ the hardcoded devnet mint (byte-unchanged).
+        //   list-wcc-template <template_id_b58> <collar_lo> <collar_hi> <forward_pc> [tau] [settlement_mint_b58]
+        "list-wcc-template" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> list-wcc-template <template_id_b58> <collar_lo> <collar_hi> <forward_pc> [tau] [settlement_mint_b58]"
+            );
+            let tid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (Some(template_pk), Some(collar_lo), Some(collar_hi), Some(forward_pc)) =
+                (Pubkey::from_base58(tid_b58), pi128(5), pi128(6), pi128(7))
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade list-wcc-template: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let tau = rest
+                .get(8)
+                .and_then(|s| s.trim().parse::<u128>().ok())
+                .unwrap_or(1);
+            if collar_lo >= collar_hi || tau == 0 {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade list-wcc-template: need collar_lo < collar_hi and tau >= 1 (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            }
+            let leg_long = ModeCDescriptor {
+                konst: forward_pc.saturating_neg(),
+                coords: vec![AffineCoord {
+                    coeff: 1,
+                    lo: collar_lo,
+                    hi: collar_hi,
+                    tau,
+                }],
+            };
+            let leg_short = ModeCDescriptor {
+                konst: forward_pc,
+                coords: vec![AffineCoord {
+                    coeff: -1,
+                    lo: collar_lo,
+                    hi: collar_hi,
+                    tau,
+                }],
+            };
+            // The affine-corner WCL: long is worst at S=lo (Pc − lo); short is worst at S=hi (hi − Pc).
+            let declared_b_long =
+                u128::try_from(forward_pc.saturating_sub(collar_lo).max(0)).unwrap_or(0);
+            let declared_b_short =
+                u128::try_from(collar_hi.saturating_sub(forward_pc).max(0)).unwrap_or(0);
+            let descriptor = ListWccTemplateDescriptor {
+                template_id: template_pk.0,
+                version: 1,
+                terms_schema_hash: sha256_32(b"sinabro.skew.list_wcc.terms.v1"),
+                payoff_adapter_id: 0x42,
+                settlement_adapter_id: 0xD4,
+                reference_data_policy_id: 0x10,
+                collateral_policy_id: 0x1B1B, // SKEW_COLLATERAL_WCC_V1
+                vm_policy_id: 0x30,
+                receipt_schema_hash: sha256_32(b"sinabro.skew.list_wcc.receipt.v1"),
+                leg_long,
+                leg_short,
+                declared_b_long,
+                declared_b_short,
+                cert_long: ModeCCertKind::IntervalAffineIII,
+                cert_short: ModeCCertKind::IntervalAffineIII,
+                fee_policy_id: 6, // FORWARD-active dated policy (6..=9)
+            };
+            // W3 — resolve the EXTERNAL settlement mint: optional trailing arg @9 (after tau @8). A
+            // valid 32-byte base58 pubkey OVERRIDES the settlement token; absent ⇒ the default mint
+            // (byte-unchanged). Only the mint SOURCE changes — the descriptor / cert / plan stay byte-
+            // identical (so the K-2 signing chokepoint is untouched). `Pubkey::from_base58` is fail-
+            // closed (a non-32-byte input ⇒ None ⇒ a typed Yellow refusal, never a silent default).
+            let effective_mint = match rest.get(9).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(s) => match Pubkey::from_base58(s) {
+                    Some(pk) => pk,
+                    None => {
+                        return emit_daemon_admin(
+                            out,
+                            &envelope_hex,
+                            RenderTruth::Yellow,
+                            vec![
+                                format!(
+                                    "daemon trade list-wcc-template: '{s}' is not a 32-byte base58 settlement mint (fail-closed)"
+                                ),
+                                usage,
+                            ],
+                        );
+                    }
+                },
+                None => mint,
+            };
+            plan_list_wcc_template(&owner, &effective_mint, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE C-listings — `list_piecewise_template` (0x86): PERMISSIONLESS piecewise (option /
+        // spread / digital / straddle) template registration (escrow=0). The agent PROPOSES the
+        // canonical straddle `f = |S−strike| − premium`. Args:
+        //   list-piecewise-template <template_id_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> [settlement_mint_b58]
+        // W3 — the trailing `[settlement_mint_b58]` picks the EXTERNAL settlement token (the on-chain
+        // `list_piecewise_template` already takes `settlement_mint: Account<Mint>`); absent ⇒ default.
+        "list-piecewise-template" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> list-piecewise-template <template_id_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> [settlement_mint_b58]"
+            );
+            let tid_b58 = rest.get(4).map_or("", String::as_str).trim();
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (
+                Some(template_pk),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(tau),
+                Some(strike),
+                Some(premium),
+            ) = (
+                Pubkey::from_base58(tid_b58),
+                pi128(5),
+                pi128(6),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+                pi128(8),
+                pi128(9),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade list-piecewise-template: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let Some((leg_long, leg_short, wcl_long, wcl_short)) =
+                build_straddle_legs(collar_lo, collar_hi, tau, strike, premium)
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade list-piecewise-template: degenerate straddle (need lo<strike<hi, strike on-lattice, premium<=intrinsic_max) (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let descriptor = ListPiecewiseTemplateDescriptor {
+                template_id: template_pk.0,
+                version: 1,
+                terms_schema_hash: sha256_32(b"sinabro.skew.list_piecewise.terms.v1"),
+                payoff_adapter_id: 0x243C,
+                settlement_adapter_id: 0xC696,
+                reference_data_policy_id: 0xA1,
+                collateral_policy_id: 0x8394, // SKEW_COLLATERAL_WCC_PIECEWISE_V1
+                vm_policy_id: 0x7A,
+                receipt_schema_hash: sha256_32(b"sinabro.skew.list_piecewise.receipt.v1"),
+                leg_long,
+                leg_short,
+                declared_b_long: wcl_long,
+                declared_b_short: wcl_short,
+            };
+            // W3 — resolve the EXTERNAL settlement mint: optional trailing arg @10 (after premium @9).
+            // Valid 32-byte base58 OVERRIDES the settlement token; absent ⇒ default mint (byte-
+            // unchanged). Only the mint SOURCE changes — descriptor / legs / plan stay byte-identical.
+            let effective_mint = match rest.get(10).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(s) => match Pubkey::from_base58(s) {
+                    Some(pk) => pk,
+                    None => {
+                        return emit_daemon_admin(
+                            out,
+                            &envelope_hex,
+                            RenderTruth::Yellow,
+                            vec![
+                                format!(
+                                    "daemon trade list-piecewise-template: '{s}' is not a 32-byte base58 settlement mint (fail-closed)"
+                                ),
+                                usage,
+                            ],
+                        );
+                    }
+                },
+                None => mint,
+            };
+            plan_list_piecewise_template(&owner, &effective_mint, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE E-piecewise — `form_piecewise_contract` (0x87): bilateral straddle formation +
+        // per-leg escrow. ★ 2-SIGNER ⇒ ASSEMBLE+SIM only (the agent is `long_party`; `short_party`
+        // is the counterparty — a real broadcast needs both sigs = an owner go-live). The oracle
+        // bounds escrow = WCL_long + WCL_short (the two legs the program pulls into the vault). Args:
+        //   form-piecewise <contract_id_b58> <template_id_b58> <short_party_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> <maturity_ts>
+        "form-piecewise" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> form-piecewise <contract_id_b58> <template_id_b58> <short_party_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> <maturity_ts>"
+            );
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (
+                Some(contract_pk),
+                Some(template_pk),
+                Some(short_pk),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(tau),
+                Some(strike),
+                Some(premium),
+                Some(maturity),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(6).map_or("", String::as_str).trim()),
+                pi128(7),
+                pi128(8),
+                rest.get(9).and_then(|s| s.trim().parse::<u128>().ok()),
+                pi128(10),
+                pi128(11),
+                rest.get(12).and_then(|s| s.trim().parse::<i64>().ok()),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade form-piecewise: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let Some((leg_long, leg_short, wcl_long, wcl_short)) =
+                build_straddle_legs(collar_lo, collar_hi, tau, strike, premium)
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade form-piecewise: degenerate straddle (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let (Some(long_src), Some(short_src)) = (
+                crate::solana_codec::associated_token_address(&owner, &mint),
+                crate::solana_codec::associated_token_address(&short_pk, &mint),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Red,
+                    vec![
+                        "daemon trade form-piecewise: ATA derivation failed (fail-closed)"
+                            .to_string(),
+                    ],
+                );
+            };
+            let descriptor = FormPiecewiseContractDescriptor {
+                contract_id: contract_pk.0,
+                template_id: template_pk.0,
+                leg_long,
+                leg_short,
+                declared_b_long: wcl_long,
+                declared_b_short: wcl_short,
+                maturity_timestamp: maturity,
+            };
+            // The agent is long_party (+ fee payer + rent payer); short_party is the counterparty.
+            plan_form_piecewise_contract(
+                &owner,
+                &short_pk,
+                &long_src,
+                &short_src,
+                &mint,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE E-piecewise — `settle_piecewise_contract` (0x88): PERMISSIONLESS keeper settle +
+        // disburse (escrow=0; the keeper commits nothing). The agent acts as the settle crank. Args:
+        //   settle-piecewise <contract_id_b58> <long_party_b58> <short_party_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> <settlement_ref>
+        "settle-piecewise" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> settle-piecewise <contract_id_b58> <long_party_b58> <short_party_b58> <collar_lo> <collar_hi> <tau> <strike> <premium> <settlement_ref>"
+            );
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (
+                Some(contract_pk),
+                Some(long_pk),
+                Some(short_pk),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(tau),
+                Some(strike),
+                Some(premium),
+                Some(settlement_ref),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(6).map_or("", String::as_str).trim()),
+                pi128(7),
+                pi128(8),
+                rest.get(9).and_then(|s| s.trim().parse::<u128>().ok()),
+                pi128(10),
+                pi128(11),
+                pi128(12),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle-piecewise: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let Some((leg_long, leg_short, wcl_long, wcl_short)) =
+                build_straddle_legs(collar_lo, collar_hi, tau, strike, premium)
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade settle-piecewise: degenerate straddle (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let (Some(long_tok), Some(short_tok)) = (
+                crate::solana_codec::associated_token_address(&long_pk, &mint),
+                crate::solana_codec::associated_token_address(&short_pk, &mint),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Red,
+                    vec![
+                        "daemon trade settle-piecewise: ATA derivation failed (fail-closed)"
+                            .to_string(),
+                    ],
+                );
+            };
+            let descriptor = SettlePiecewiseContractDescriptor {
+                contract_id: contract_pk.0,
+                leg_long,
+                leg_short,
+                declared_b_long: wcl_long,
+                declared_b_short: wcl_short,
+                settlement_reference: settlement_ref,
+            };
+            // The agent is the permissionless settle caller (keeper); the parties' ATAs receive.
+            plan_settle_piecewise_contract(
+                &owner,
+                &long_tok,
+                &short_tok,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE G-unwired — `open_perp_market` (0x6A): PERMISSIONLESS market init (NO token CPI ⇒
+        // escrow=0). Args: open-perp-market <market_id_b58> <contract_size> <tick_size>
+        //   [genesis_ref] [oi_cap] [max_funding] [ref_policy] [risk_bracket] [fee_policy]
+        "open-perp-market" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> open-perp-market <market_id_b58> <contract_size> <tick_size> [genesis_ref] [oi_cap] [max_funding] [ref_policy] [risk_bracket] [fee_policy]"
+            );
+            let pu64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u64>().ok());
+            let pu128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u128>().ok());
+            let pu16 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u16>().ok());
+            let (Some(market_pk), Some(contract_size), Some(tick_size)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                pu128(5),
+                pu64(6),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade open-perp-market: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            if contract_size == 0 || tick_size == 0 {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade open-perp-market: need contract_size>=1 and tick_size>=1 (on-chain param-sanity)".to_string(),
+                        usage,
+                    ],
+                );
+            }
+            let descriptor = OpenPerpMarketDescriptor {
+                market_id: market_pk.0,
+                settlement_mint: mint,
+                contract_size,
+                genesis_reference_atoms: pu128(7).unwrap_or(1_000_000),
+                open_interest_cap: pu64(8).unwrap_or(0),
+                max_funding_rate: pu64(9).unwrap_or(0),
+                tick_size,
+                reference_policy_id: pu16(10).unwrap_or(0),
+                active_risk_bracket_id: pu16(11).unwrap_or(0),
+                fee_policy_id: pu16(12).unwrap_or(0),
+            };
+            plan_open_perp_market(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE G-unwired — `factory_list_perp_market` (0x81): PERMISSIONLESS perp listing under the
+        // UDSI gate + envelope clamp + RECORD-only bond (NO token CPI ⇒ escrow=0). The WCC legs mirror
+        // list-wcc-template. Args: factory-list-perp-market <market_id_b58> <contract_size>
+        //   <tick_size> <collar_lo> <collar_hi> <forward_pc> [tau] [genesis_ref] [oi_cap] [max_funding]
+        "factory-list-perp-market" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> factory-list-perp-market <market_id_b58> <contract_size> <tick_size> <collar_lo> <collar_hi> <forward_pc> [tau] [genesis_ref] [oi_cap] [max_funding]"
+            );
+            let pu64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u64>().ok());
+            let pu128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<u128>().ok());
+            let pi128 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i128>().ok());
+            let (
+                Some(market_pk),
+                Some(contract_size),
+                Some(tick_size),
+                Some(collar_lo),
+                Some(collar_hi),
+                Some(forward_pc),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                pu128(5),
+                pu64(6),
+                pi128(7),
+                pi128(8),
+                pi128(9),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade factory-list-perp-market: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let tau = pu128(10).unwrap_or(1);
+            if contract_size == 0 || tick_size == 0 || collar_lo >= collar_hi || tau == 0 {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade factory-list-perp-market: need contract_size>=1, tick_size>=1, collar_lo<collar_hi, tau>=1 (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            }
+            // The WCC affine legs (same construction as list-wcc-template; long worst at S=lo,
+            // short at S=hi). The on-chain INC-A1 gate certifies these.
+            let leg_long = ModeCDescriptor {
+                konst: forward_pc.saturating_neg(),
+                coords: vec![AffineCoord {
+                    coeff: 1,
+                    lo: collar_lo,
+                    hi: collar_hi,
+                    tau,
+                }],
+            };
+            let leg_short = ModeCDescriptor {
+                konst: forward_pc,
+                coords: vec![AffineCoord {
+                    coeff: -1,
+                    lo: collar_lo,
+                    hi: collar_hi,
+                    tau,
+                }],
+            };
+            let declared_b_long =
+                u128::try_from(forward_pc.saturating_sub(collar_lo).max(0)).unwrap_or(0);
+            let declared_b_short =
+                u128::try_from(collar_hi.saturating_sub(forward_pc).max(0)).unwrap_or(0);
+            let descriptor = FactoryListPerpMarketDescriptor {
+                market_id: market_pk.0,
+                settlement_mint: mint,
+                contract_size,
+                genesis_reference_atoms: pu128(11).unwrap_or(1_000_000),
+                open_interest_cap: pu64(12).unwrap_or(0),
+                max_funding_rate: pu64(13).unwrap_or(0),
+                tick_size,
+                reference_policy_id: 0x00A1,
+                active_risk_bracket_id: 0,
+                fee_policy_id: 0x0042,
+                collateral_policy_id: 0x1B1B, // SKEW_COLLATERAL_WCC_V1
+                leg_long,
+                leg_short,
+                declared_b_long,
+                declared_b_short,
+                cert_long: ModeCCertKind::IntervalAffineIII,
+                cert_short: ModeCCertKind::IntervalAffineIII,
+                ref_min_divisor_price_atoms: 1,
+                ref_max_jump_bps_per_epoch: 0,
+                ref_max_staleness_slots: 0,
+                bond_committed_atoms: 0,
+            };
+            plan_factory_list_perp_market(&owner, &descriptor, &bounds, 0, 0)
+        }
+        // WAVE G-unwired — `form_funding_swap` (0x8E): bilateral fixed-for-floating funding swap;
+        // escrow = the CEIL worst-case per side the program pulls. ★ 2-signer ⇒ assemble+SIM only
+        // (never broadcasts solo). Args: form-funding-swap <contract_id_b58> <short_party_b58>
+        //   <quantity> <contract_size> <fixed_rate_bps> <rate_lo> <rate_hi> <maturity_ts>
+        "form-funding-swap" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> form-funding-swap <contract_id_b58> <short_party_b58> <quantity> <contract_size> <fixed_rate_bps> <rate_lo> <rate_hi> <maturity_ts>"
+            );
+            let pi64 = |i: usize| rest.get(i).and_then(|s| s.trim().parse::<i64>().ok());
+            let (
+                Some(contract_pk),
+                Some(short_pk),
+                Some(quantity),
+                Some(contract_size),
+                Some(fixed_rate_bps),
+                Some(rate_lo),
+                Some(rate_hi),
+                Some(maturity),
+            ) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                rest.get(6).and_then(|s| s.trim().parse::<u64>().ok()),
+                rest.get(7).and_then(|s| s.trim().parse::<u128>().ok()),
+                pi64(8),
+                pi64(9),
+                pi64(10),
+                pi64(11),
+            )
+            else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade form-funding-swap: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            if quantity == 0 || rate_lo >= rate_hi {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade form-funding-swap: need quantity>=1 and rate_lo<rate_hi (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            }
+            let (Some(long_src), Some(short_src)) = (
+                crate::solana_codec::associated_token_address(&owner, &mint),
+                crate::solana_codec::associated_token_address(&short_pk, &mint),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Red,
+                    vec![
+                        "daemon trade form-funding-swap: ATA derivation failed (fail-closed)"
+                            .to_string(),
+                    ],
+                );
+            };
+            let descriptor = FormFundingSwapDescriptor {
+                contract_id: contract_pk.0,
+                quantity,
+                contract_size,
+                fixed_rate_bps,
+                rate_lo,
+                rate_hi,
+                maturity_timestamp: maturity,
+            };
+            // The agent is long_party (fixed_payer + fee payer); short_party is the counterparty.
+            plan_form_funding_swap(
+                &owner,
+                &short_pk,
+                &long_src,
+                &short_src,
+                &mint,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE G-unwired — `open_fixed_forward_liquidation` (0x08): keeper liquidation TRIGGER (NO
+        // token CPI ⇒ escrow=0). Args: open-liquidation <contract_id_b58> <long_party_b58>
+        //   <short_party_b58> <template_id_b58> <liquidation_id_b58> [trigger_kind] [defaulter_role] [grace_secs]
+        // (the maintenance/collateral economic claims are 0; a real keeper supplies the live snapshot —
+        //  on a `sim` the missing parent PDAs fail AccountNotFound before those handler gates.)
+        "open-liquidation" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> open-liquidation <contract_id_b58> <long_party_b58> <short_party_b58> <template_id_b58> <liquidation_id_b58> [trigger_kind] [defaulter_role] [grace_secs]"
+            );
+            let (Some(contract_pk), Some(long_pk), Some(short_pk), Some(template_pk), Some(liq_pk)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(6).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(7).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(8).map_or("", String::as_str).trim()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade open-liquidation: bad/missing args (fail-closed)".to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let trigger_kind = rest
+                .get(9)
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
+            let defaulter_role = rest
+                .get(10)
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
+            let grace = rest
+                .get(11)
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(3600);
+            let descriptor = OpenLiquidationDescriptor {
+                liquidation_id: liq_pk.0,
+                contract_id: contract_pk.0,
+                trigger_kind,
+                // non-zero trigger snapshot (on-chain gate 2 requires non-zero; a real keeper cross-pins it).
+                trigger_snapshot_hash: sha256_32(b"sinabro.skew.liquidation.trigger.v1"),
+                maintenance_requirement: 0,
+                collateral_value: 0,
+                defaulter_role,
+                auction_grace_seconds: grace,
+            };
+            plan_open_fixed_forward_liquidation(
+                &owner,
+                &long_pk,
+                &short_pk,
+                &template_pk.0,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        // WAVE G-unwired — `complete_liquidation` (8-byte sighash): close the liquidation lifecycle
+        // (NO token CPI ⇒ escrow=0). Args: complete-liquidation <contract_id_b58> <long_party_b58>
+        //   <short_party_b58> <template_id_b58> <liquidation_id_b58> [valuation] [close_factor] [dispute_resolved]
+        "complete-liquidation" => {
+            let usage = format!(
+                "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live|fast|turbo> complete-liquidation <contract_id_b58> <long_party_b58> <short_party_b58> <template_id_b58> <liquidation_id_b58> [valuation] [close_factor] [dispute_resolved]"
+            );
+            let (Some(contract_pk), Some(long_pk), Some(short_pk), Some(template_pk), Some(liq_pk)) = (
+                Pubkey::from_base58(rest.get(4).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(5).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(6).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(7).map_or("", String::as_str).trim()),
+                Pubkey::from_base58(rest.get(8).map_or("", String::as_str).trim()),
+            ) else {
+                return emit_daemon_admin(
+                    out,
+                    &envelope_hex,
+                    RenderTruth::Yellow,
+                    vec![
+                        "daemon trade complete-liquidation: bad/missing args (fail-closed)"
+                            .to_string(),
+                        usage,
+                    ],
+                );
+            };
+            let valuation = rest
+                .get(9)
+                .and_then(|s| s.trim().parse::<i128>().ok())
+                .unwrap_or(0);
+            let close_factor = rest
+                .get(10)
+                .and_then(|s| s.trim().parse::<u128>().ok())
+                .unwrap_or(0);
+            let dispute_resolved =
+                matches!(rest.get(11).map(|s| s.trim()), Some("true") | Some("1"));
+            let descriptor = CompleteLiquidationDescriptor {
+                contract_id: contract_pk.0,
+                liquidation_id: liq_pk.0,
+                valuation_amount: valuation,
+                close_factor,
+                dispute_resolved,
+                current_unix_timestamp: 0,
+            };
+            plan_complete_liquidation(
+                &owner,
+                &long_pk,
+                &short_pk,
+                &template_pk.0,
+                &descriptor,
+                &bounds,
+                0,
+                0,
+            )
+        }
+        _ => {
+            return emit_daemon_admin(
+                out,
+                &envelope_hex,
+                RenderTruth::Yellow,
+                vec![
+                    format!("daemon trade: unknown action {action:?} (fail-closed)"),
+                    format!(
+                        "usage: daemon trade {CUSTODY_ARM_PHRASE} <sim|live> <open-account|deposit|withdraw|submit-perp|submit-order|pay-vm|lock-collateral|mark-vm|settle|form-contract|list-wcc-template|list-piecewise-template|form-piecewise|settle-piecewise|open-perp-market|factory-list-perp-market|form-funding-swap|open-liquidation|complete-liquidation> [args]"
+                    ),
+                ],
+            );
+        }
+    };
+    let plan = match plan_result {
+        Ok(p) => p,
+        Err(reason) => {
+            return emit_daemon_admin(
+                out,
+                &envelope_hex,
+                RenderTruth::Red,
+                vec![
+                    format!(
+                        "daemon trade: ORACLE DENIED ({}) — fail-closed, nothing assembled, nothing signed",
+                        reason.as_str()
+                    ),
+                    "the K-1 oracle re-derived Skew's worst-case escrow and refused (money 0)."
+                        .to_string(),
+                ],
+            );
+        }
+    };
+
+    // GATE 2 — the owner-arm ceremony: the EXACT custody phrase mints a within-bounds CustodyGrant.
+    let mut prompt = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+    let audit_hash_32 = sha256_32(b"daemon.trade.skew.custody.arm.v1");
+    let Some(grant) = arm_local_custody_grant(
+        &mut prompt,
+        phrase.trim(),
+        audit_hash_32,
+        CustodyBounds {
+            base: GrantBounds {
+                max_actions_u32: MAX_ACTIONS,
+                expires_at_epoch_ms: now_ms.saturating_add(TTL_MS),
+            },
+            per_tx_max_minor: PER_TX,
+            total_budget_minor: BUDGET,
+            chain_allowlist: vec![K2_CHAIN.to_string()],
+            protocol_allowlist: vec![K2_PROTOCOL.to_string()],
+        },
+    ) else {
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Yellow,
+            vec![
+                "daemon trade: LOCKED — the custody arm phrase is missing/wrong (fail-closed)"
+                    .to_string(),
+                format!(
+                    "to arm, supply EXACTLY: daemon trade {CUSTODY_ARM_PHRASE} <sim|live> <open-account|deposit|withdraw|submit-perp|submit-order|pay-vm|lock-collateral|mark-vm|settle|form-contract|list-wcc-template|list-piecewise-template|form-piecewise|settle-piecewise|open-perp-market|factory-list-perp-market|form-funding-swap|open-liquidation|complete-liquidation> [args]"
+                ),
+                "the model cannot supply this phrase; only the owner arms.".to_string(),
+            ],
+        );
+    };
+
+    // GATE 3 — the bounded ChainTxCapability witness (custody bound on the proposed tx).
+    let Some(cap) = local_chain_tx_capability(&grant, now_ms, 0, 0, &plan.request) else {
+        let reason = match grant.authorize(now_ms, 0, 0, &plan.request) {
+            crate::commands::grant::CustodyAuthorization::Denied(r) => format!("{r:?}"),
+            crate::commands::grant::CustodyAuthorization::Authorized => "—".to_string(),
+        };
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Red,
+            vec![format!(
+                "daemon trade: CUSTODY DENIED ({reason}) — fail-closed, nothing signed (money 0)"
+            )],
+        );
+    };
+
+    // The owner-configured devnet endpoint (config-only; no arbitrary URL).
+    let registry = read_owner_web3_chain_registry();
+    let Some(entry) = registry.lookup(K2_CHAIN) else {
+        return emit_daemon_admin(
+            out,
+            &envelope_hex,
+            RenderTruth::Red,
+            vec![format!(
+                "daemon trade: chain '{K2_CHAIN}' not configured — add it to web3_rpc_chains (config); nothing signed"
+            )],
+        );
+    };
+    let endpoint = entry.endpoint().to_string();
+
+    // GATE 4-7 — the chokepoint: assemble → REAL simulate (D2/D3) → [live] D14 → sign → D13 → broadcast.
+    let seam = ChainWriteSeam::new();
+    let outcome = execute_skew_chain_tx(cap, &plan, &signer, seam.port(), &endpoint, mode);
+
+    let (truth, mut body) = match outcome {
+        SkewExecOutcome::Broadcast {
+            signature_b58,
+            sim_ok,
+            sim_skipped,
+            jito,
+            d14_ok,
+            d13_ok,
+        } => (
+            RenderTruth::Green,
+            vec![
+                format!(
+                    "daemon trade [{}]: ★ BROADCAST a REAL devnet tx (sim={} D14={d14_ok} D13={d13_ok} inclusion={})",
+                    plan.action_label,
+                    if sim_skipped {
+                        "SKIPPED(fast/turbo — oracle+D13+D14 still gated)".to_string()
+                    } else {
+                        format!("ok={sim_ok}")
+                    },
+                    if jito {
+                        "jito/turbo (or standard if unconfigured)"
+                    } else {
+                        "standard"
+                    },
+                ),
+                format!("signature: {signature_b58}"),
+                format!("explorer: https://explorer.solana.com/tx/{signature_b58}?cluster=devnet"),
+            ],
+        ),
+        SkewExecOutcome::Simulated {
+            sim_ok,
+            sim_summary,
+            d13_ok,
+        } => (
+            if sim_ok {
+                RenderTruth::Green
+            } else {
+                RenderTruth::Red
+            },
+            vec![
+                format!(
+                    "daemon trade [{}]: REAL devnet SIMULATE (money 0) sim_ok={sim_ok} D13={d13_ok} (signed; NOT broadcast)",
+                    plan.action_label
+                ),
+                format!("sim: {sim_summary}"),
+                "re-run with `live` to D14-pin + broadcast (the isolated key must be funded)."
+                    .to_string(),
+            ],
+        ),
+        SkewExecOutcome::Denied(reason) => {
+            let mut lines = vec![format!(
+                "daemon trade [{}]: DENIED ({}) — fail-closed, nothing signed/broadcast (money 0)",
+                plan.action_label,
+                reason.label()
+            )];
+            // surface the redacted simulate detail (the live program's verdict on the bytes).
+            if let crate::skew_execute::SkewExecDenied::SimulateFailed(summary) = &reason {
+                lines.push(format!("sim: {summary}"));
+            }
+            (RenderTruth::Red, lines)
+        }
+    };
+    body.push(format!(
+        "bound: chain={K2_CHAIN} protocol={K2_PROTOCOL} per-tx<={PER_TX} budget<={BUDGET} amount={} (oracle-decided escrow)",
+        plan.request.amount_minor
+    ));
+    body.push("isolated key never reaches the model; mainnet = a further owner arm; CustodyCapability uninhabited (PD-6).".to_string());
+    emit_daemon_admin(out, &envelope_hex, truth, body)
+}
+
+fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<bool> {
+    use crate::commands::authority::ReadCapability;
+    use crate::provider::web3_rpc::{Web3RpcMethod, Web3RpcSeam, render_web3_read};
+
+    let envelope_hex = toplevel_envelope_hex("daemon");
+    let chain = rest.get(1).map_or("", String::as_str).trim();
+    let method_token = rest.get(2).map_or("", String::as_str);
+    let params = rest.get(3).map_or("[]", String::as_str);
+
+    // ONCHAIN PIVOT C-1: an AUTONOMOUS multi-chain READ — chain reads are READ-class (like
+    // web_fetch), so the witness is a freely-granted ReadCapability (NO owner arm). The bound is
+    // the owner-configured registry: the agent supplies a chain NAME, never a URL, and reads ONLY
+    // configured chains. A chain WRITE stays unrepresentable (the method enum has no write variant).
+    let read = ReadCapability::granted();
+    let registry = read_owner_web3_chain_registry();
 
     // Parse the READ-only method (unknown / any write method ⇒ None ⇒ honest deny).
     let Some(method) = Web3RpcMethod::parse(method_token) else {
+        let names = registry.chain_names();
         let body = vec![
             format!(
                 "daemon web3-read: unknown READ method '{}'",
                 method_token.chars().take(48).collect::<String>()
             ),
+            "usage: daemon web3-read <chain> <method> [params-json]".to_string(),
             format!("methods: {}", Web3RpcMethod::token_list()),
+            format!(
+                "configured chains: {}",
+                if names.is_empty() {
+                    "none (set web3_rpc_chains in config)".to_string()
+                } else {
+                    names
+                }
+            ),
             "a chain WRITE method is not selectable (unrepresentable); nothing read".to_string(),
         ];
         return emit(
@@ -11815,19 +18199,18 @@ fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<boo
             "daemon",
             &envelope_hex,
             CommandRisk::Network,
-            ApprovalRequirement::TypedPhrase,
+            ApprovalRequirement::None,
             RenderTruth::Yellow,
             &body,
         )
         .map(|()| true);
     };
 
-    // The endpoint comes ONLY from config (no arbitrary URL). The LIVE seam: a live
-    // transport under `web3-egress`, otherwise port = None ⇒ honest TransportNotCompiled.
-    // The capability witness `&cap` proves the owner-arm at the type level.
-    let endpoint = read_owner_web3_rpc_endpoint();
+    // The LIVE seam: a live transport under `web3-egress`, otherwise port = None ⇒ honest
+    // TransportNotCompiled. The ReadCapability witness proves READ-class at the type level; the
+    // registry lookup + family match + SSRF wall + redaction all run inside render_web3_read.
     let seam = Web3RpcSeam::new();
-    let render = render_web3_read(&cap, seam.port(), endpoint.as_deref(), method, params);
+    let render = render_web3_read(&read, seam.port(), &registry, chain, method, params);
 
     let truth = if render.ok {
         RenderTruth::Green
@@ -11835,8 +18218,8 @@ fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<boo
         RenderTruth::Yellow
     };
     let mut body = vec![format!(
-        "daemon web3-read: ARMED a single-shot READ ({method}/{token}, 120s, revocable); READ-only, chain-write refused",
-        method = method.chain(),
+        "daemon web3-read: AUTONOMOUS READ ({chain}/{token}); READ-only, chain-write unrepresentable",
+        chain = if chain.is_empty() { "<chain>" } else { chain },
         token = method.token(),
     )];
     for line in render.rendered.lines() {
@@ -11844,7 +18227,7 @@ fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<boo
     }
     body.push(format!("class={}", render.class_label));
     body.push(
-        "READ-only (no chain WRITE); secret-zero dial; params + result redacted; custody/funds/chain-write HARD-LOCKED (PD-6)"
+        "READ-only (no chain WRITE); secret-zero dial; params + result redacted; the agent reads ONLY owner-configured chains"
             .to_string(),
     );
     emit(
@@ -11852,7 +18235,7 @@ fn cmd_daemon_web3_read(rest: &[String], out: &mut impl Write) -> io::Result<boo
         "daemon",
         &envelope_hex,
         CommandRisk::Network,
-        ApprovalRequirement::TypedPhrase,
+        ApprovalRequirement::None,
         truth,
         &body,
     )
@@ -13570,6 +19953,7 @@ fn run_code(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::
         "budget" => cmd_budget(&args[1..], out).map(|()| true),
         "kill" => cmd_kill(&args[1..], out).map(|()| true),
         "daemon" => cmd_daemon(&args[1..], out).map(|()| true),
+        "skew" => cmd_skew(&args[1..], out).map(|()| true),
         "tui" => launch_tui(out).map(|()| true),
         "repl" => launch_repl(out).map(|()| true),
         other => match grammar::parse(other) {
@@ -13602,6 +19986,26 @@ mod tests {
 
     fn body_of(tokens: &[&str]) -> String {
         run_argv(tokens).1
+    }
+
+    #[test]
+    fn skew_capabilities_renders_catalog() {
+        let bare = body_of(&["skew"]);
+        let caps = body_of(&["skew", "capabilities"]);
+        for out in [&bare, &caps] {
+            assert!(out.contains("BD4DSsEDfv8zcs1HdgqEDoQCPAEgMi3AWWW9r7DVka81"));
+            assert!(out.contains("list_secondary"));
+            assert!(out.contains("PRE-LAUNCH"));
+        }
+    }
+
+    #[test]
+    fn skew_capability_detail_and_unknown() {
+        let detail = body_of(&["skew", "capability", "submit_perp_order"]);
+        assert!(detail.contains("0x71"));
+        assert!(detail.contains("perp"));
+        let unknown = body_of(&["skew", "capability", "nonexistent_ix"]);
+        assert!(unknown.contains("unknown skew capability"));
     }
 
     #[test]
@@ -13867,10 +20271,138 @@ mod tests {
     }
 
     /// Agent-core step 2 — the retrieval verbs are read-only + approval=none
+    /// D-1b (AGENT-NATIVE GITHUB): `registry scan` + `registry list` content-address a
+    /// real local tree through the PURE `agent_registry` core — ReadOnly, stateless, and
+    /// tamper-evident (every stored id re-derives from its content). Hermetic temp tree.
+    #[test]
+    fn registry_scan_and_list_are_content_addressed_readonly() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static CTR: AtomicU32 = AtomicU32::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("sinabro_reg_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("temp dir");
+        std::fs::File::create(tmp.join("a.txt"))
+            .expect("a")
+            .write_all(b"hello registry")
+            .expect("wa");
+        std::fs::File::create(tmp.join("b.rs"))
+            .expect("b")
+            .write_all(b"fn main() {}")
+            .expect("wb");
+        let tstr = tmp.to_string_lossy().into_owned();
+
+        let (scan_truth, scan) = registry_scan_body(&["scan".to_string(), tstr.clone()]);
+        let (list_truth, listing) = registry_list_body(&["list".to_string(), tstr.clone()]);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // scan: 2 content-addressed artifacts, the AGRX codec round-trips, Green.
+        assert_eq!(scan_truth, RenderTruth::Green, "{scan:?}");
+        assert!(
+            scan.iter()
+                .any(|l| l.contains("2 content-addressed artifact")),
+            "{scan:?}"
+        );
+        assert!(scan.iter().any(|l| l.contains("round-trip OK")), "{scan:?}");
+        // list: integrity OK (every id re-derives from its content), Green, code entries.
+        assert_eq!(list_truth, RenderTruth::Green, "{listing:?}");
+        assert!(
+            listing.iter().any(|l| l.contains("integrity OK")),
+            "{listing:?}"
+        );
+        assert!(listing.iter().any(|l| l.contains("code")), "{listing:?}");
+        // A missing path is honest-absent (Yellow), never a crash or a fabricated entry.
+        let (miss_truth, _) = registry_list_body(&[
+            "list".to_string(),
+            "/no/such/path/xyz-agent-registry".to_string(),
+        ]);
+        assert_eq!(miss_truth, RenderTruth::Yellow);
+    }
+
+    /// D-3 IV-D3-2 — the supply-chain seatbelt: `registry_content_verified` accepts bytes
+    /// that re-hash to the id and REJECTS any tamper / substitution / forged id. This is the
+    /// PURE core of what `registry fetch` (and the publish round-trip) enforce over the wire.
+    #[test]
+    fn registry_content_verified_is_the_supply_chain_seatbelt() {
+        use crate::agent_registry::{AgentArtifact, ArtifactKind};
+        let content = b"an agent registry artifact body";
+        let digest = sha256_32(content);
+        let art = AgentArtifact::new(
+            ArtifactKind::Code,
+            digest,
+            "agent://local".to_string(),
+            "body",
+            Some("blob-ref".to_string()),
+        );
+        // Correct bytes re-hash to the id ⇒ VERIFIED.
+        assert!(registry_content_verified(&art, content));
+        // Substituted / tampered bytes do NOT re-hash ⇒ REJECTED (fail-closed).
+        assert!(!registry_content_verified(&art, b"tampered bytes"));
+        assert!(!registry_content_verified(&art, b""));
+        // A FORGED id (bytes unchanged) ⇒ `id_matches_content()` false ⇒ REJECTED.
+        let mut forged = art.clone();
+        forged.id = "deadbeefdeadbeef".to_string();
+        assert!(!registry_content_verified(&forged, content));
+    }
+
+    /// D-3 IV-D3-3/IV-D3-10 — `registry publish` fires NOTHING without the exact owner phrase
+    /// (the locked surface, zero network), and `registry fetch` fails closed on missing args.
+    /// Hermetic: the gate rejects before any PUT, so no testnet call is made.
+    #[cfg(feature = "put-fixture-net")]
+    #[test]
+    fn registry_publish_is_owner_phrase_gated_and_fetch_args_fail_closed() {
+        // Wrong phrase ⇒ the locked surface (honest usage), no PUT.
+        let mut out = Vec::new();
+        let _ = registry_publish(
+            &[
+                "publish".to_string(),
+                "not-the-phrase".to_string(),
+                "/tmp".to_string(),
+            ],
+            &mut out,
+        );
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("to run, supply EXACTLY: registry publish"),
+            "locked surface expected, got: {s}"
+        );
+        assert!(!s.contains("PUT ok"), "no PUT on a locked gate: {s}");
+        // Fetch with no args ⇒ honest usage (Yellow), never a crash / fabricated success.
+        let mut out2 = Vec::new();
+        let _ = registry_fetch(&["fetch".to_string()], &mut out2);
+        let s2 = String::from_utf8_lossy(&out2);
+        assert!(
+            s2.contains("registry fetch <main-index-blob-id>"),
+            "usage expected, got: {s2}"
+        );
+        assert!(!s2.contains("VERIFIED"), "no verify without a fetch: {s2}");
+    }
+
     /// (IV6 autonomous-safe) and render the honest Phase-0 empty surface
     /// (no fabricated data; the fold projection lands at step 3).
     #[test]
     fn memory_index_and_read_are_readonly_autonomous() {
+        // Hermetic: redirect the data dir to a FRESH empty temp dir so the index
+        // reflects an EMPTY store (`indexed=0`; `read 7` not in index) regardless
+        // of the developer's real `~/.mnemos`. The override is thread-local
+        // (race-free under the parallel harness) and a drop guard clears it even
+        // if an assertion panics.
+        struct DataDirGuard;
+        impl Drop for DataDirGuard {
+            fn drop(&mut self) {
+                crate::memory_store::set_test_data_dir(None);
+            }
+        }
+        let tmp = {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static CTR: AtomicU32 = AtomicU32::new(0);
+            let n = CTR.fetch_add(1, Ordering::Relaxed);
+            std::env::temp_dir().join(format!("sinabro_idx_ro_{}_{n}", std::process::id()))
+        };
+        std::fs::create_dir_all(&tmp).expect("temp dir");
+        crate::memory_store::set_test_data_dir(Some(tmp.clone()));
+        let _guard = DataDirGuard;
+
         let index = body_of(&["memory", "index"]);
         assert!(index.contains("risk=read-only"));
         assert!(index.contains("approval=none"));
@@ -13888,6 +20420,8 @@ mod tests {
 
         let bad = body_of(&["memory", "read", "not-a-number"]);
         assert!(bad.contains("unsigned integer"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Agent-core step 2 — the full read gate chain over synthetic records:
@@ -15342,10 +21876,12 @@ mod provider_consult_local_tests {
             text.contains("progressive render of completed answer"),
             "honest scope label: {text}"
         );
-        // The context-pressure line carries the REAL measured tokens (30+9=39 of
-        // the 20000 cap), not a hard-coded 0.
+        // The context-pressure line carries the REAL measured tokens (30+9=39),
+        // metered against the INTERACTIVE CHAT cap (`CHAT_TOKEN_CAP` = 256000,
+        // P0 #1 — the consult render uses the chat cap, NOT the bounded-autonomy
+        // 20000), not a hard-coded 0.
         assert!(
-            text.contains("context: ") && text.contains("39/20000"),
+            text.contains("context: ") && text.contains("39/256000"),
             "measured context-pressure surfaced: {text}"
         );
     }
@@ -15623,20 +22159,73 @@ mod provider_consult_local_tests {
             assert!(p.contains("act first"));
             assert!(p.contains("NEVER refuse a real capability"));
             assert!(p.contains("Answer AS Sinabro, in the"));
-            // E10-3a (D-A5 / IV-A12 honesty): web3/chain is named as a DOMAIN the
-            // agent PROPOSES a kernel-sandboxed read for (after owner approval) —
-            // NOT a built-in live chain reader. The prior overclaim is GONE.
+            // ONCHAIN-PIVOT re-aim (was E10-3a): web3/chain is named as a DOMAIN, and
+            // the agent now ACTIVELY READS chain state — it reads the live Skew chain
+            // freely (READ-class) and the owner can arm a bounded RPC reader
+            // (daemon web3-read). The pre-pivot "NO built-in chain reader" claim is
+            // therefore STALE and FALSE, so it must be ABSENT from the prompt; the
+            // false live-reader overclaim "read web3/chain state" must also stay gone.
             assert!(
                 p.contains("reason about web3/chain as a DOMAIN"),
-                "prompt must name web3 as a domain capability, not a live reader: {p}"
+                "prompt must name web3 as a domain capability: {p}"
             );
             assert!(
-                p.contains("NO built-in chain reader"),
-                "prompt must be honest about holding no live chain reader: {p}"
+                !p.contains("NO built-in chain reader"),
+                "the stale pre-pivot 'NO built-in chain reader' claim must be gone — the agent reads the live Skew chain: {p}"
             );
             assert!(
                 !p.contains("read web3/chain state"),
                 "the false 'read web3/chain state' live-reader overclaim must be gone: {p}"
+            );
+            // ONCHAIN PIVOT re-aim (owner 2026-07-01 "Skew에만 한정두지말고 온체인 다 읽고
+            // 쓰게"): the prompt LEADS with sinabro's GENERAL bounded on-chain identity —
+            // a domain-general agent that reads ANY chain and acts on any ALLOWED
+            // chain/protocol within owner-bounded custody — and names Skew derivatives
+            // trading as its MOST-DEVELOPED example (not its limit): the free live Skew
+            // reads, the owner-armed `daemon trade` K-2 chokepoint over the executable
+            // instruction set, and the K-1 deterministic worst-case-loss oracle stay
+            // named, while KEEPING the safety needles (no self-arm / no auto-trade,
+            // user-bounded custody, mainnet locked, CustodyCapability uninhabited).
+            assert!(
+                p.contains("BOUNDED ON-CHAIN AGENT, domain-GENERAL"),
+                "prompt must LEAD with the general (not Skew-limited) on-chain identity: {p}"
+            );
+            assert!(
+                p.contains("that is ONE example, not your limit"),
+                "Skew must be framed as one example, not the agent's whole identity: {p}"
+            );
+            assert!(
+                p.contains("DERIVATIVES TRADING OPERATOR for the Skew protocol on Solana"),
+                "prompt must still name Skew derivatives trading as the flagship example: {p}"
+            );
+            assert!(p.contains("READ the live Skew chain"), "{p}");
+            assert!(
+                p.contains("read the LIVE Skew derivatives chain on Solana"),
+                "prompt must name the free live Skew reads: {p}"
+            );
+            assert!(
+                p.contains("daemon trade <CUSTODY-ARM-PHRASE> <sim|live|fast|turbo>"),
+                "prompt must name the owner-armed daemon trade chokepoint: {p}"
+            );
+            assert!(
+                p.contains("deterministic K-1 worst-case-loss"),
+                "prompt must name the K-1 worst-case-loss oracle: {p}"
+            );
+            assert!(
+                p.contains("Custody is USER-BOUNDED, not blanket-blocked"),
+                "prompt must frame custody as user-bounded, not blanket-blocked: {p}"
+            );
+            assert!(
+                p.contains("NEVER self-arm, auto-trade, or move"),
+                "the no-self-arm / no-auto-trade safety needle must survive: {p}"
+            );
+            assert!(
+                p.contains("CustodyCapability is uninhabited"),
+                "unbounded custody must stay an uninhabited type: {p}"
+            );
+            assert!(
+                p.contains("MAINNET stays locked"),
+                "mainnet must stay locked behind a further owner arm: {p}"
             );
             // E11-5 (capability activation awareness): the prompt names the REAL
             // live set the agent now holds — a content-free project index, a web

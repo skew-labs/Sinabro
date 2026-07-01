@@ -21,9 +21,13 @@
 //! layer (S2-3b) that CONSUMES this core. custody/funds stay HARD-LOCKED: pure, no IO.
 
 use crate::agent_orchestrator::OrchestratedOutcome;
+use crate::metamorphic_oracle::SummaryVerdict;
+use crate::recognition_synth::InducedVerdict;
+use crate::reconcile_oracle::ReconcileReceipt;
 use crate::verification::{
     PerfScore, VerificationClass, VerificationEvidence, VerificationReceipt, VerificationVerdict,
-    canary_intact, two_derivation_admits, verify,
+    canary_intact, metamorphic_receipt, recognition_receipt, reconciliation_receipt,
+    two_derivation_admits, verify,
 };
 
 /// A slim projection of one orchestrated sub-task — the only fields the WRITE decision
@@ -217,6 +221,116 @@ pub fn select_evolution_writes(
     result
 }
 
+/// O-2: the well-known expert-kind label for a finance reconciliation pattern (the R1 rung).
+/// A valid `ExecutorKind` label so the pattern key/topic are stable across runs.
+pub const FINANCE_RECONCILE_KIND: &str = "finance_reconcile";
+
+/// O-2: build a WRITE candidate from a finance reconciliation receipt — the SINGLE bridge that
+/// wires the deterministic [`crate::reconcile_oracle`] (the R1 invariant oracle) into the
+/// EXISTING ACCUMULATE write gate ([`select_evolution_writes`], reused unchanged — no second
+/// write path). A `Reconciled` certificate admits the write (then still subject to the SAME
+/// canary + cross-memory + two-derivation gates as every class; a reconciled pattern is
+/// Invariant ⟂ CrossMemory ⇒ DOUBLY VERIFIED); a `Violated` (sound reject) / `NotApplicable`
+/// (honest absence) one does NOT. The honest LOCK carries: admitting means arithmetic-sound,
+/// NOT that the positions/sources are real. The model never reaches `verify` — only the
+/// checker's TYPED verdict does (the §6.5 no-LLM-judge boundary).
+#[must_use]
+pub fn reconciliation_candidate(
+    goal: &str,
+    content: &str,
+    receipt: &ReconcileReceipt,
+) -> PatternCandidate {
+    let vr = reconciliation_receipt(receipt.verdict);
+    PatternCandidate {
+        kind: FINANCE_RECONCILE_KIND.to_string(),
+        goal: goal.to_string(),
+        answer: content.to_string(),
+        admits_write: vr.admits_write(),
+        admit_class: vr.class,
+    }
+}
+
+/// O-3b: the well-known expert-kind label for a recognition-synthesized pattern (the R5 rung).
+pub const RECOGNITION_KIND: &str = "recognition";
+
+/// O-3b: build a WRITE candidate from an induced-checker verdict — the SINGLE bridge that wires
+/// the [`crate::recognition_synth`] checker (the R5 induced oracle) into the EXISTING ACCUMULATE
+/// write gate ([`select_evolution_writes`], reused — no second write path). A CERTIFIED `Accept`
+/// admits the write (then still subject to the SAME canary + cross-memory + two-derivation gates;
+/// a recognition pattern is `Induced` ⟂ `CrossMemory` ⇒ DOUBLY VERIFIED); an uncertified accept /
+/// a `Reject` / an `Escalate` does NOT. The honest LOCK carries: an admitted `Accept` is a
+/// PROVISIONAL R5 pattern (held-out zero-false-accept gated; the quantitative α-budget is O-3c).
+#[must_use]
+pub fn recognition_candidate(
+    goal: &str,
+    content: &str,
+    verdict: InducedVerdict,
+    certified: bool,
+) -> PatternCandidate {
+    let vr = recognition_receipt(verdict, certified);
+    PatternCandidate {
+        kind: RECOGNITION_KIND.to_string(),
+        goal: goal.to_string(),
+        answer: content.to_string(),
+        admits_write: vr.admits_write(),
+        admit_class: vr.class,
+    }
+}
+
+/// O-4: the well-known expert-kind label for a summarization metamorphic pattern (the R2 rung).
+pub const METAMORPHIC_KIND: &str = "summary_metamorphic";
+
+/// O-4: build a WRITE candidate from a summarization metamorphic verdict — the SINGLE bridge that
+/// wires the [`crate::metamorphic_oracle`] checker (the R2 metamorphic SOUND REJECTOR) into the
+/// EXISTING write gate ([`select_evolution_writes`], reused — no second write path). Unlike the R1
+/// reconcile / R5 recognition bridges (which ADMIT a verified pattern), this is REJECTOR-ONLY: the
+/// metamorphic class NEVER `admits_write` (a `Rejected` is a sound reject; a `NotFalsified` is
+/// "not-yet-falsified", not proof; a malformed input is the honest absence). So NOTHING this bridge
+/// produces ever ACCUMULATEs — it can only BLOCK a hallucinated summary from being written (the
+/// P-HALL fabrication gate). The model never reaches `verify`; only the checker's TYPED verdict does
+/// (§6.5 no-LLM-judge). HONEST LOCK: a `NotFalsified` is provisional, NOT a faithful-summary cert.
+#[must_use]
+pub fn metamorphic_candidate(
+    goal: &str,
+    content: &str,
+    verdict: SummaryVerdict,
+) -> PatternCandidate {
+    let vr = metamorphic_receipt(verdict);
+    PatternCandidate {
+        kind: METAMORPHIC_KIND.to_string(),
+        goal: goal.to_string(),
+        answer: content.to_string(),
+        admits_write: vr.admits_write(),
+        admit_class: vr.class,
+    }
+}
+
+/// K-4: the well-known expert-kind label for a certified SKEW strategy pattern (the R4 rung).
+pub const STRATEGY_KIND: &str = "skew_strategy";
+
+/// K-4: build a WRITE candidate from a Skew strategy's conformal SHADOW certification — the SINGLE
+/// bridge that wires the deterministic strategy cert ([`crate::skew_strategy::certify_strategy`] →
+/// [`crate::verification::strategy_receipt`], R4) into the EXISTING ACCUMULATE write gate
+/// ([`select_evolution_writes`], reused unchanged — no second write path). A CERTIFIED strategy admits
+/// the write (then still subject to the SAME canary + cross-memory + two-derivation gates; a strategy
+/// pattern is `Strategy` R4 ⟂ `CrossMemory` R2 ⇒ DOUBLY VERIFIED); an UNcertified strategy does NOT (it
+/// lands in `unverified`, never written — the P-HALL fabrication gate against the owner's "wrong memory
+/// written as success → collapse" failure mode). The model never reaches `verify` — only the
+/// deterministic conformal cert bit does (the §6.5 no-LLM-judge boundary). HONEST LOCK: an admitted
+/// strategy's PROPOSALS stay in-bounds, NOT that it is PROFITABLE; shadow money 0; the live sub-budget
+/// is the owner-armed K-2 path.
+#[must_use]
+pub fn strategy_candidate(goal: &str, content: &str, certified: bool) -> PatternCandidate {
+    let vr = crate::verification::strategy_receipt(certified);
+    PatternCandidate {
+        kind: STRATEGY_KIND.to_string(),
+        goal: goal.to_string(),
+        answer: content.to_string(),
+        admits_write: vr.admits_write(),
+        admit_class: vr.class,
+    }
+}
+
 // ===========================================================================
 // Pattern-memory format + perf ledger (PURE codec; the S2-3b IO layer persists these)
 // ===========================================================================
@@ -347,6 +461,181 @@ mod tests {
             "same-axis pair is vacuous (correlation 1) — never doubly verified"
         );
         assert_eq!(ev2.doubly_verified_count(), 0);
+    }
+
+    /// O-2 THE ACCUMULATE CLOSURE (the e2e O-1 deferred): a RECONCILED finance certificate,
+    /// bridged to the R1 rung, flows through the EXISTING write gate and ACCUMULATEs — and
+    /// because the R1 invariant axis ⟂ the write-time cross-memory axis, it is DOUBLY VERIFIED.
+    /// A VIOLATED certificate (a sound reject) NEVER ACCUMULATEs (the P-HALL gate holds). No
+    /// LLM judge anywhere: the deterministic checker's verdict is the only admission input.
+    #[test]
+    fn o2_reconciled_certificate_accumulates_violated_never_does() {
+        use crate::reconcile_oracle::{
+            LineItem, LineKind, ReconcileClaim, ReconcileVerdict, check_reconciliation,
+        };
+        let mk = |kind, amt| LineItem {
+            kind,
+            amount_minor: amt,
+            source_ref: "src".to_string(),
+        };
+
+        // a SOLVENT certificate (Σreserve 150000 >= Σliability 120000) ⇒ Reconciled.
+        let solvent = check_reconciliation(&ReconcileClaim::Solvent {
+            items: vec![
+                mk(LineKind::Reserve, 150_000),
+                mk(LineKind::Liability, 120_000),
+            ],
+        });
+        assert!(solvent.is_reconciled());
+        let cand = reconciliation_candidate("q2 reserves", "<reconciled cert>", &solvent);
+        assert!(cand.admits_write, "a reconciled R1 cert admits a write");
+        assert_eq!(cand.admit_class, VerificationClass::Invariant);
+        let ev = select_evolution_writes(std::slice::from_ref(&cand), &[], &no_prior);
+        assert_eq!(ev.written_count(), 1, "a reconciled R1 pattern ACCUMULATEs");
+        assert!(
+            ev.written[0].doubly_verified,
+            "Invariant (R1) ⟂ CrossMemory (R2) ⇒ doubly verified"
+        );
+        assert_eq!(ev.doubly_verified_count(), 1);
+
+        // an INSOLVENT certificate (80000 < 100000) ⇒ Violated ⇒ never written.
+        let insolvent = check_reconciliation(&ReconcileClaim::Solvent {
+            items: vec![
+                mk(LineKind::Reserve, 80_000),
+                mk(LineKind::Liability, 100_000),
+            ],
+        });
+        assert_eq!(insolvent.verdict, ReconcileVerdict::Violated);
+        let bad = reconciliation_candidate("q2 shortfall", "<insolvent cert>", &insolvent);
+        assert!(!bad.admits_write, "a violated cert never admits");
+        let ev2 = select_evolution_writes(std::slice::from_ref(&bad), &[], &no_prior);
+        assert_eq!(
+            ev2.written_count(),
+            0,
+            "a violated R1 pattern NEVER ACCUMULATEs (the P-HALL gate)"
+        );
+        assert_eq!(ev2.unverified.len(), 1);
+    }
+
+    /// O-3b THE RECOGNITION ACCUMULATE: a CERTIFIED induced-checker `Accept` flows through the
+    /// EXISTING write gate and ACCUMULATEs as a DOUBLY-VERIFIED (Induced R5 ⟂ CrossMemory R2)
+    /// pattern; an uncertified accept / a `Reject` / an `Escalate` NEVER ACCUMULATEs (the
+    /// certify-before-accumulate + P-HALL gates). No LLM judge: the induced verdict is the only
+    /// admission input.
+    #[test]
+    fn o3b_certified_accept_accumulates_others_never_do() {
+        use crate::recognition_synth::InducedVerdict;
+
+        // a CERTIFIED Accept ⇒ ACCUMULATEs, doubly verified (R5 ⟂ R2).
+        let good = recognition_candidate(
+            "good shape",
+            "<accepted artifact>",
+            InducedVerdict::Accept,
+            true,
+        );
+        assert!(good.admits_write);
+        assert_eq!(good.admit_class, VerificationClass::Induced);
+        let ev = select_evolution_writes(std::slice::from_ref(&good), &[], &no_prior);
+        assert_eq!(ev.written_count(), 1, "a certified ACCEPT ACCUMULATEs");
+        assert!(
+            ev.written[0].doubly_verified,
+            "Induced (R5) ⟂ CrossMemory (R2) ⇒ doubly verified"
+        );
+
+        // none of these admit a write:
+        for (label, verdict, certified) in [
+            ("uncertified accept", InducedVerdict::Accept, false),
+            ("reject", InducedVerdict::Reject, true),
+            ("escalate", InducedVerdict::Escalate, true),
+        ] {
+            let cand = recognition_candidate("x", "<artifact>", verdict, certified);
+            assert!(!cand.admits_write, "{label} must not admit");
+            let ev = select_evolution_writes(std::slice::from_ref(&cand), &[], &no_prior);
+            assert_eq!(ev.written_count(), 0, "{label} NEVER ACCUMULATEs");
+        }
+    }
+
+    /// O-4 THE METAMORPHIC REJECTOR (rejector-only — unlike O-1/O-3b, NOTHING accumulates): a
+    /// summarization metamorphic verdict NEVER admits a write — a `Rejected` (a fabrication) is
+    /// BLOCKED and a `NotFalsified` pass is "not-yet-falsified" (also not written). The checker is
+    /// a pure write-time GATE that can only quarantine a hallucinated summary, never ACCUMULATE one.
+    #[test]
+    fn o4_metamorphic_rejector_never_accumulates() {
+        use crate::metamorphic_oracle::SummaryVerdict;
+
+        // a NOT-falsified (passing) summary: still NEVER admits (rejector-only) — nothing written.
+        let pass = metamorphic_candidate(
+            "a faithful summary",
+            "<grounded summary>",
+            SummaryVerdict::NotFalsified,
+        );
+        assert!(
+            !pass.admits_write,
+            "a metamorphic PASS never admits (R2 rejector-only)"
+        );
+        assert_eq!(pass.admit_class, VerificationClass::Metamorphic);
+        let ev = select_evolution_writes(std::slice::from_ref(&pass), &[], &no_prior);
+        assert_eq!(
+            ev.written_count(),
+            0,
+            "a metamorphic pass NEVER ACCUMULATEs (rejector-only)"
+        );
+
+        // a Rejected summary (a fabrication): BLOCKED — never written.
+        let rejected = metamorphic_candidate(
+            "a hallucinated summary",
+            "<fabricated summary>",
+            SummaryVerdict::Rejected,
+        );
+        assert!(
+            !rejected.admits_write,
+            "a metamorphic REJECT blocks the write"
+        );
+        let ev2 = select_evolution_writes(std::slice::from_ref(&rejected), &[], &no_prior);
+        assert_eq!(
+            ev2.written_count(),
+            0,
+            "a fabrication is NEVER written (the P-HALL gate)"
+        );
+        assert_eq!(
+            ev2.unverified.len(),
+            1,
+            "the fabrication lands in unverified (blocked)"
+        );
+    }
+
+    /// K-4 THE STRATEGY ACCUMULATE: a CONFORMAL-CERTIFIED Skew strategy flows through the EXISTING
+    /// write gate and ACCUMULATEs as a DOUBLY-VERIFIED (Strategy R4 ⟂ CrossMemory R2) pattern; an
+    /// UNcertified strategy NEVER ACCUMULATEs (the certify-before-accumulate + P-HALL gates — the
+    /// collapse defense). No LLM judge: the deterministic conformal cert bit is the only admission input.
+    #[test]
+    fn k4_certified_strategy_accumulates_uncertified_never_does() {
+        // a CERTIFIED strategy ⇒ ACCUMULATEs, doubly verified (R4 ⟂ R2).
+        let good = strategy_candidate(
+            "skew-strategy:market_making/mm",
+            "<certified strategy toml>",
+            true,
+        );
+        assert!(good.admits_write);
+        assert_eq!(good.admit_class, VerificationClass::Strategy);
+        let ev = select_evolution_writes(std::slice::from_ref(&good), &[], &no_prior);
+        assert_eq!(ev.written_count(), 1, "a certified strategy ACCUMULATEs");
+        assert!(
+            ev.written[0].doubly_verified,
+            "Strategy (R4) ⟂ CrossMemory (R2) ⇒ doubly verified"
+        );
+        assert_eq!(ev.doubly_verified_count(), 1);
+
+        // an UNcertified strategy (a hallucinated/under-proven "win") ⇒ NEVER written.
+        let bad = strategy_candidate("skew-strategy:hft/bad", "<uncertified strategy>", false);
+        assert!(!bad.admits_write, "an uncertified strategy never admits");
+        let ev2 = select_evolution_writes(std::slice::from_ref(&bad), &[], &no_prior);
+        assert_eq!(
+            ev2.written_count(),
+            0,
+            "an uncertified strategy NEVER ACCUMULATEs (the P-HALL gate)"
+        );
+        assert_eq!(ev2.unverified.len(), 1);
     }
 
     #[test]

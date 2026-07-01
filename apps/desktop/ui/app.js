@@ -245,6 +245,8 @@ const ICONS = {
   plus:     '<path d="M12 5.6v12.8M5.6 12h12.8"/>',
   arrowUp:  '<path d="M12 18.4V6M6.2 11.8 12 6l5.8 5.8"/>',
   code:     '<path d="m9 8.5-4 3.5 4 3.5"/><path d="m15 8.5 4 3.5-4 3.5"/>',
+  panelLeft:  '<rect x="3.4" y="5" width="17.2" height="14" rx="2"/><path d="M9.2 5.2v13.6"/>',
+  panelRight: '<rect x="3.4" y="5" width="17.2" height="14" rx="2"/><path d="M14.8 5.2v13.6"/>',
 };
 function icon(name) {
   const p = ICONS[name]; if (!p) return "";
@@ -407,44 +409,66 @@ function inboundTelegramCardHTML(p) {
     </div>`;
 }
 
+// The collapsed meta under a chat answer: ONE quiet line — the route (frontier/local ·
+// model) + the tool count — that expands into the full route ribbon + the step-by-step
+// agent trace + the verification/cost receipts. Nothing is removed (the honest render is
+// intact, one click away); it's just no longer shouting around a one-line reply.
+function consultMetaHTML(sc) {
+  const lede = sc.lede || "";
+  const live = /^LIVE /.test(lede);
+  const mm = lede.match(/:\s*([^:]+)\s*$/);
+  const model = mm ? mm[1].trim() : "";
+  const routeTxt = (live ? "frontier" : "local") + (model ? " · " + model : "");
+  const tr = parseAgentTrail(sc.receipts);
+  const toolTxt = tr ? `${tr.steps.length} tool${tr.steps.length === 1 ? "" : "s"}` : "";
+  const bits = [routeTxt, toolTxt].filter(Boolean).join("  ·  ");
+  const ribbon = sc.lede ? routeRibbonHTML(sc.lede) : "";
+  const trail = tr ? agentTrailHTML(tr) : "";
+  const receipts = `<div class="receipts-body">${sc.receipts.map(bodyLineHTML).join("")}</div>`;
+  return `<details class="answer-meta">`
+    + `<summary class="answer-meta-sum"><span class="am-bits">${esc(bits) || "verification"}</span><span class="am-toggle">details</span></summary>`
+    + `<div class="answer-meta-body">${ribbon}${trail}${receipts}</div>`
+    + `</details>`;
+}
+
 function cardHTML(p) {
   if (p && p.kind === "inbound-telegram") return inboundTelegramCardHTML(p);
-  const chips = `
-    <span class="pill pill-risk ${riskClass(p.risk)}">${esc(p.risk || "read-only")}</span>
-    <span class="pill pill-state ${stateClass(p.state)}">${esc(p.state || "LOCAL-ONLY")}</span>
-    <span class="pill pill-truth ${truthClass(p.truth)}">${esc(p.truth || "UNKNOWN")}</span>`;
-  const env = p.envelope ? `<span class="card-env"><b>seal</b> ${esc(p.envelope)}</span>` : "";
   const sc = splitConsult(p);
-  let body;
+  // ── chat answer: answer-FIRST and clean (the owner asked for "just the answer").
+  // No pills, no route wall, no "ACTED" strip, no hint button — the answer is the card;
+  // route/trail/receipts fold into one quiet line underneath. ──
   if (sc) {
-    // answer-first: the model answer renders big + first; the receipt block folds.
-    const lede = sc.lede ? routeRibbonHTML(sc.lede) : "";
-    // P2 — agent activity timeline: the autonomous tool trail, surfaced above the answer.
-    const tr = parseAgentTrail(sc.receipts);
-    const trail = tr ? agentTrailHTML(tr) : "";
     const answer = sc.answer.length
       ? `<div class="card-answer">${sc.answer.map(answerLineHTML).join("")}</div>`
       : `<div class="card-answer"><div class="answer-line answer-empty">(no answer text)</div></div>`;
-    const receipts = `<details class="receipts-details">
-        <summary>verification &amp; cost</summary>
-        <div class="receipts-body">${sc.receipts.map(bodyLineHTML).join("")}</div>
-      </details>`;
-    body = lede + trail + answer + receipts;
-  } else {
-    body = p.body.length
-      ? p.body.map(bodyLineHTML).join("")
-      : `<div class="body-line${p.error ? " card-error" : ""}">${esc(p.error ? "(no output)" : "ok")}</div>`;
+    return `
+    <div class="card card-consult">
+      <div class="card-body">${answer}${consultMetaHTML(sc)}</div>
+    </div>`;
   }
+  // ── command output — CLEAN, like an agent tool result (owner 2026-07-01: "커서/코덱스/
+  // 클루드 어디에도 이런 seal/PD-6 없다"). Just the result; the audit chrome (seal · risk ·
+  // state · truth) folds into ONE quiet `details` line — available for the security-minded,
+  // never a receipt wall. A LOCKED gated preview still routes to the clean Continue flow
+  // (intentConfirmHTML, rendered by the message view). ──
+  const body = p.body.length
+    ? p.body.map(bodyLineHTML).join("")
+    : `<div class="body-line${p.error ? " card-error" : ""}">${esc(p.error ? "(no output)" : "ok")}</div>`;
   let hint = "";
   for (const l of p.body) { const h = nextHint(l); if (h) { hint = h; break; } }
   const hintRow = hint
     ? `<div class="card-hint"><button class="suggest" data-card-run="${esc(hint)}"><span class="sg-glyph">›</span>run ${esc(hint)}</button></div>`
     : "";
+  const locked = String(p.state || "").toUpperCase() === "LOCKED";
+  const metaBits = `${esc((p.command || "").split(/\s+/)[0] || "command")} · ${esc(p.risk || "read-only")}${locked ? " · needs approval" : ""}`;
+  const meta = `<details class="answer-meta">`
+    + `<summary class="answer-meta-sum"><span class="am-bits">${metaBits}</span><span class="am-toggle">details</span></summary>`
+    + `<div class="answer-meta-body mono">seal ${esc(p.envelope || "—")} · ${esc(p.state || "")} · ${esc(p.truth || "")}</div>`
+    + `</details>`;
   return `
-    <div class="card${sc ? " card-consult" : ""}">
-      <div class="card-head">${env}<div class="card-chips">${chips}</div></div>
+    <div class="card${p.error ? " card-error" : ""}">
       <div class="card-body${p.error ? " card-error" : ""}">${body}</div>
-      ${hintRow}
+      ${meta}${hintRow}
     </div>`;
 }
 
@@ -1688,7 +1712,7 @@ function walrusSettingsSectionHTML(statuses, wstat) {
   const active = pubOk && aggOk; // token optional — some publishers are open
   const L = CONNECTOR_LOGOS;
   const tokClear = tokPresent ? kBtn("Clear", 'data-secret-clear="WALRUS_PUBLISHER_TOKEN"', true) : "";
-  const intro = kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Your OWN Walrus (mainnet)", "Enter your self-host publisher + aggregator https URLs (and a bearer token if your publisher needs one); your encrypted memory then lives on YOUR Walrus. Our app holds NO Sui key, never signs, never pays — your publisher pays (PD-6 custody HARD-LOCKED).", kPill(active ? "active" : "set urls", active ? "ok" : ""));
+  const intro = kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Your OWN Walrus (mainnet)", "Enter your self-host publisher + aggregator https URLs (and a bearer token if your publisher needs one); your encrypted memory then lives on YOUR Walrus. The app holds no Sui key and never signs — your publisher pays.", kPill(active ? "active" : "set urls", active ? "ok" : ""));
   const pubInput = kRow(icon("database"), "Publisher URL", "https only — no IP / localhost.", `<input class="panel-input" data-config-key="walrus_publisher_endpoint" placeholder="https://publisher.your-walrus…" autocomplete="off" spellcheck="false" />`);
   const aggInput = kRow(icon("database"), "Aggregator URL", "The GET / read side.", `<input class="panel-input" data-config-key="walrus_aggregator_endpoint" placeholder="https://aggregator.your-walrus…" autocomplete="off" spellcheck="false" />`);
   const saveBtn = kRow(icon("refresh"), "Save endpoints", "Persisted via the gated config-save to ~/.mnemos/config.toml.", kBtn("Save → config.toml", "data-config-save"));
@@ -1701,7 +1725,7 @@ function walrusSettingsSectionHTML(statuses, wstat) {
     kFact("Token", `${tokPresent ? "● memory" : "○ none"}`),
     kRow(icon("zap"), "Self-host status", active ? "MAINNET self-host ACTIVE — reads auto-use it; a fresh write is the owner ceremony." : "Set BOTH https URLs to activate.", kPill(active ? "active" : "inactive", active ? "ok" : "")),
   ]);
-  const note = kCard(kRow(icon("shield"), "Safety", "https-only + SSRF-walled at use; the token is memory-only (cleared on close, never written to disk). Owner write ceremony: memory backup-walrus-mainnet &lt;phrase&gt;.", kPill("custody hard-locked", "lock")));
+  const note = kCard(kRow(icon("shield"), "Safety", "https-only + SSRF-walled at use; the token is memory-only (cleared on close, never written to disk). The app holds no Sui key and never signs.", kPill("no key · never signs", "ok")));
   return kCard([intro, pubInput, aggInput, saveBtn, tokRow]) + status + note;
 }
 
@@ -1736,15 +1760,19 @@ async function settingsPanelHTML() {
 }
 async function modelPanelHTML() {
   const keyOk = keyPresent === true;
+  // A#1 (owner "모델 설정 아예 안됨"): show the model the core will ACTUALLY use (from the
+  // backend resolver), not a hardcoded "deepseek-chat" that lied about an explicit selection.
+  let activeModel = "deepseek/deepseek-chat (default)";
+  try { activeModel = await invoke("frontier_model_view"); } catch (_) {}
   return `
     <div class="set-title">Models &amp; provider</div>
     <div class="set-lede">A frontier model reasons; an executor model implements — each can be a LOCAL loopback (zero-egress) or a REMOTE provider (egress · gated). Routing lives in Settings.</div>
     ${kGroup("Frontier")}
     ${kCard([
       kRow(icon("sparkles"), `Provider key ${keyOk ? '<span class="sdot ok"></span>' : '<span class="sdot off"></span>'}`, keyOk ? "OPENROUTER_API_KEY set — read only at the TLS boundary, never shown." : "Set OPENROUTER_API_KEY to consult the frontier.", kBtn(keyOk ? "Change key" : "Set key", 'data-ov-nav="general"', true)),
-      kRow(icon("zap"), "Model", "OPENROUTER_MODEL · default deepseek/deepseek-chat.", `<span class="set-val mono">deepseek-chat</span>`),
+      kRow(icon("zap"), "Active model", "OPENROUTER_MODEL · your Settings pick is now authoritative (an explicit choice is never downgraded). Pick below.", `<span class="set-val mono">${esc(activeModel)}</span>`),
       kRow(icon("shield"), "Egress", "One-shot, bounded, phrase auto-injected; no silent fallback (core-enforced).", kPill("gated", "ok")),
-      kRow(icon("zap"), "Routing · BYO model", "Pick the frontier provider (OpenRouter / Sakana Fugu) and the executor brain (local loopback or a remote provider). Local stays first-class; custody HARD-LOCKED.", kBtn("Configure", 'data-ov-nav="general"', true)),
+      kRow(icon("zap"), "Routing · BYO model", "Pick the frontier provider (OpenRouter / Sakana Fugu) and the executor brain (local loopback or a remote provider). Local stays first-class.", kBtn("Configure", 'data-ov-nav="general"', true)),
     ])}
     ${kGroup("Live consult")}
     ${kCard(kRow(icon("list"), "Provider status", "", kBtn("Run", 'data-panel-run="provider status"', true)))}`;
@@ -1864,19 +1892,23 @@ async function walrusPanelHTML() {
   catch (e) { view = { kind: "unavailable", reason: String(e && e.message ? e.message : e) }; }
   // S5: the READ routes to the configured self-host aggregator (mainnet) when set, else
   // testnet — label the MAIN INDEX node with which store the owner is looking at.
-  let wstat = {};
+  let wstat = {}, secrets = [];
   try { wstat = await invoke("walrus_status"); } catch (_) { wstat = {}; }
+  try { secrets = await invoke("secret_status"); } catch (_) { secrets = []; }
   const L = CONNECTOR_LOGOS;
   const title = `<div class="set-title">Memory · Walrus</div><div class="set-lede">Encrypted two-tier memory the agent roams on its own — ciphertext on the wire, decrypted only here.</div>`;
-  const intro = kCard(kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Encrypted · decrypted only here", "", kPill("encrypted", "ok") + " " + kPill("hard-locked", "lock")));
+  // Owner "월러스 붙여넣기 어디간데": the paste-and-set (publisher/aggregator URL + token) lives
+  // HERE now, at the top of the Walrus section — paste your URLs, Save, done.
+  const connect = kGroup("Connect your Walrus — paste + save") + walrusSettingsSectionHTML(secrets, wstat);
+  const intro = kCard(kRow(`<span class="set-ico plain">${L.walrus}</span>`, "Encrypted · decrypted only here", "", kPill("encrypted", "ok")));
   const detailSlot = `<div id="walrus-detail">${kCard(kRow(icon("folder"), "Sub-store detail", "Select a memory above to fetch + decrypt its detail.", ""))}</div>`;
   if (!view || view.kind !== "index") {
     const reason = (view && view.reason) || "no main index";
     const empty = kCard([
-      kRow(icon("database"), "No main index", esc(reason), kPill("empty", "")),
-      kRow(icon("refresh"), "Publish the encrypted index", "", kBtn("backup-walrus", 'data-panel-run="memory backup-walrus"')),
+      kRow(icon("database"), "No main index yet", esc(reason), kPill("empty", "")),
+      kRow(icon("refresh"), "Publish the encrypted index to Walrus testnet", "One touch — publishes your encrypted memory + round-trip verifies (no phrase to type).", kBtn("Publish now", 'data-panel-run="memory backup-walrus backup-encrypted-memory-to-walrus-testnet"')),
     ]);
-    return `${title}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${empty}`;
+    return `${title}${connect}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${empty}`;
   }
   const entries = view.entries || [];
   const net = wstat && wstat.aggregator_configured ? "MAINNET self-host" : "testnet";
@@ -1891,7 +1923,7 @@ async function walrusPanelHTML() {
     ? `<div class="walrus-feed walrus-fan">${entries.map((e, i) => walrusRowHTML(e, i)).join("")}</div>`
     : kCard(kRow(icon("database"), "Index is empty", "No memories published yet.", kPill("empty", "")));
   const indexCard = `<div class="set-card">${mainNode}${rows}</div>`;
-  return `${title}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${indexCard}${kGroup("Sub-store detail")}${detailSlot}`;
+  return `${title}${connect}${kGroup("Two-tier Walrus memory")}${intro}${kGroup("Main index")}${indexCard}${kGroup("Sub-store detail")}${detailSlot}`;
 }
 /* ── R10: first-run capability disclosure + progressive disclosure ─────────────
    Research D-3 (NN/G — declare the capability range on first entry) + D-5 #5
@@ -2129,9 +2161,18 @@ async function submitPlanmodeRun(out) {
   let res;
   try { res = await invoke("orchestrate_run", { payload: { phrase: "orchestrate-two-model-live", task: planmodeTask, approved } }); }
   catch (e) { out.innerHTML = `<div class="viewer-msg">run failed: ${esc(e && e.message ? e.message : e)}</div>`; return; }
-  const verdicts = (res.subtasks || []).map((l) => `<div class="mono pm-verdict">${esc(l)}</div>`).join("");
+  // Render the REAL per-worker fleet the backend returns (id/kind/model/port/verdict/admits/
+  // preview). Fixes the owner's "I can't tell if the worker loop even runs" — it was reading a
+  // dead `res.subtasks` field (orchestrate_run returns `workers`), so the fleet was discarded.
+  const workers = Array.isArray(res.workers) ? res.workers : [];
+  const rows = workers.map((w) => {
+    const ok = w.admits ? '<span class="pm-ok">✓ admits</span>' : '<span class="pm-no">✗ rejected</span>';
+    const prev = w.preview ? `<div class="pm-preview mono">${esc(w.preview)}</div>` : "";
+    return `<div class="pm-worker"><div class="mono pm-verdict"><b>#${w.id} ${esc(w.kind)}</b> · ${esc(w.model_id)} · :${w.port} · ${ok} · ${esc(w.verdict)}</div>${prev}</div>`;
+  }).join("");
+  const fleet = rows || `<div class="viewer-msg">no workers ran</div>`;
   const synth = res.synthesis ? `<div class="pm-synth mono">${esc(res.synthesis)}</div>` : `<div class="viewer-msg">no synthesis</div>`;
-  out.innerHTML = `<div class="pm-head" style="opacity:.7;margin:6px 0;">stop=${esc(res.stop)}</div>${verdicts}`
+  out.innerHTML = `<div class="pm-head" style="opacity:.7;margin:6px 0;">stop=${esc(res.stop)} · ${workers.length} worker(s)</div>${fleet}`
     + `<div class="pm-head" style="opacity:.7;margin:8px 0 4px;">synthesis</div>${synth}`;
 }
 /* ── P2-S3: Settings as a CENTER tab (SS2 — left icon rail + sectioned content) ──
@@ -2715,8 +2756,24 @@ function bindPanelActions(root) {
       toast("layout reset — default pane widths restored");
     })
   );
+  // Owner "왼쪽 프롬프트 창에 띄우지말고, 저 버튼 누르면 실제로 실행하고 보여줘": a panel/ceremony
+  // button now RUNS its verb and shows the result INLINE in the panel (right below the button),
+  // NEVER as a chat-conversation message. The chat pane stays the agent conversation.
   $$("[data-panel-run]", root).forEach((b) =>
-    b.addEventListener("click", () => { closePanel(); dispatch(b.dataset.panelRun); })
+    b.addEventListener("click", async () => {
+      if (b.disabled) return;
+      b.disabled = true; b.classList.add("running");
+      let card;
+      try { card = await runLine(b.dataset.panelRun, b.dataset.panelRun.split(/\s+/)[0]); }
+      finally { b.disabled = false; b.classList.remove("running"); }
+      root.querySelectorAll(".panel-run-result").forEach((el) => el.remove());
+      const slot = document.createElement("div");
+      slot.className = "panel-run-result";
+      slot.style.marginTop = "10px";
+      (b.closest(".set-card") || b).insertAdjacentElement("afterend", slot);
+      slot.innerHTML = cardHTML(card);
+      slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    })
   );
   // TIER-2 (B#4): config.toml editor — collect non-empty fields → the gated setup-persist
   // verb (the CORE validates + secret-screens + atomic-writes; no new IPC, no JS gate).
@@ -3332,6 +3389,28 @@ function relJoin(project, rel) {
 }
 
 // Centralized action handler (delegated, so dynamically rendered buttons work).
+// Pane focus toggles — hide/show the left (chat) or right (files) pane so the center
+// pane can fill the window (read code · or Settings full-screen). Persisted; the state
+// is INDEPENDENT of Settings — opening Settings never re-shows a hidden pane (the owner:
+// "full-screen Settings must not snap the side panes back on"). Suppressed under hero-mode.
+function paneHidden(side) {
+  try { return localStorage.getItem(side === "agent" ? "sinabro.hideAgent" : "sinabro.hideFiles") === "1"; }
+  catch (_) { return false; }
+}
+function applyPaneVisibility() {
+  const body = $("#body"); if (!body) return;
+  const ha = paneHidden("agent"), hf = paneHidden("files");
+  body.classList.toggle("hide-agent", ha);
+  body.classList.toggle("hide-files", hf);
+  const bl = $('[data-action="toggle-left"]'); if (bl) bl.classList.toggle("on", !ha);
+  const br = $('[data-action="toggle-right"]'); if (br) br.classList.toggle("on", !hf);
+}
+function togglePane(side) {
+  const key = side === "agent" ? "sinabro.hideAgent" : "sinabro.hideFiles";
+  try { localStorage.setItem(key, paneHidden(side) ? "0" : "1"); } catch (_) {}
+  applyPaneVisibility();
+}
+
 function handleAction(a) {
   if (a === "new-session") { newSession(); closeSessionPopover(); }
   else if (a === "session-switcher") toggleSessionPopover();
@@ -3354,6 +3433,8 @@ function handleAction(a) {
   else if (a === "notifications") openNotifications();
   else if (a === "disclosure") { closeSessionPopover(); openPanel("disclosure"); }
   else if (a === "theme") toggleTheme();
+  else if (a === "toggle-left") togglePane("agent");
+  else if (a === "toggle-right") togglePane("files");
   else if (a === "overlay-close") closeOverlay();
   else if (a === "panel-close") closePanel();
 }
@@ -4538,6 +4619,7 @@ async function init() {
   refreshKeyPresence(); // A#13: key-conditional empty-screen onboarding; fire-and-forget
   initFileDrop();
   initSplitters();
+  applyPaneVisibility();   // restore the chat/files pane toggles + reflect state on the topbar buttons
   renderFiles();
   renderEditor();
   restoreRoot();

@@ -84,14 +84,24 @@ use crate::chunk_schema::PublishPayloadClass;
 /// [`StageBChunkError::PublishClassDenied`] at the publish boundary atom, not
 /// here (atom #81–#87 reject-as-predicate precedent).
 ///
-/// Written as explicit positive `matches!` arms (synthetic + encrypted ciphertext)
-/// so a future payload class added to the `#[non_exhaustive]` enum is denied by
-/// construction.
+/// Written as explicit positive `matches!` arms so a future payload class added to the
+/// `#[non_exhaustive]` enum is denied by construction (default-deny).
+///
+/// Admitted arms: `SyntheticPublicFixture` (hand-authored public fixture),
+/// `EncryptedUserMemory` (AEAD ciphertext, key stays local), and — D-3, owner-directed
+/// 2026-07-01 ("공개 비공개 둘다 유저가 설정할수있게") — `PublicRegistryArtifact`
+/// (a GitHub-style PUBLIC registry artifact). The public artifact is PLAINTEXT, admitted
+/// ONLY because its SOLE constructor, the registry public-publish chokepoint in
+/// `dispatch.rs`, runs a mandatory fail-closed secret-scan first — so a secret-shaped
+/// artifact is never published. The safety is that construction confinement, not this
+/// predicate. (The mainnet self-host `put_blob` still rejects it via its `_` arm.)
 #[inline]
 pub const fn stage_b_publish_allowed(class: PublishPayloadClass) -> bool {
     matches!(
         class,
-        PublishPayloadClass::SyntheticPublicFixture | PublishPayloadClass::EncryptedUserMemory
+        PublishPayloadClass::SyntheticPublicFixture
+            | PublishPayloadClass::EncryptedUserMemory
+            | PublishPayloadClass::PublicRegistryArtifact
     )
 }
 
@@ -155,6 +165,9 @@ mod tests {
         let all = [
             (PublishPayloadClass::SyntheticPublicFixture, true),
             (PublishPayloadClass::EncryptedUserMemory, true),
+            // D-3: the owner-directed public-registry artifact is admitted (its sole
+            // constructor secret-scans fail-closed first; see `stage_b_publish_allowed`).
+            (PublishPayloadClass::PublicRegistryArtifact, true),
             (PublishPayloadClass::RealUserMemory, false),
             (PublishPayloadClass::PromptOrProviderText, false),
             (PublishPayloadClass::ToolOutput, false),

@@ -62,7 +62,8 @@ edition = "2024.beta"
 # `scripts/deploy_testnet.sh` in
 # `ops/evidence/phase_0/atom_019/deploy_run/published_at.txt`. atom #19
 # does NOT autonomously edit this value (USER_APPROVAL_REQUIRED).
-# published-at = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# Testnet deploy (owner-directed 2026-07-01 "배포해라 테스트넷에"): published to Sui TESTNET.
+published-at = "0xaec1fb33be84ad07ad85bb5ba0300bf2df8e2612ae8a5e9838125a06155986be"
 
 [addresses]
 # `mnemos = "0x0"` is the Sui Move pre-publish placeholder. After a

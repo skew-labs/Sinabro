@@ -30,9 +30,10 @@ use crate::StageFTraceLink;
 use crate::agent_loop::{
     AgentLoopOutcome, AgentLoopStop, AgentTransport, MemoryToolState, run_agent_loop,
 };
-use crate::commands::authority::{EgressCapability, MutateCapability};
+use crate::chain_execute::{ChainTxReceipt, execute_authorized_chain_tx};
+use crate::commands::authority::{ChainTxCapability, EgressCapability, MutateCapability};
 use crate::commands::budget::{BudgetCap, BudgetReject, DispatchRequest};
-use crate::commands::grant::{EgressGrant, MutateGrant};
+use crate::commands::grant::{ChainTxRequest, CustodyGrant, EgressGrant, MutateGrant};
 use crate::daemon::budget_kill::{BudgetKillIntegration, SideEffectClass};
 use crate::daemon::control_express::{BackgroundQueueDepths, ControlExpressRouter, ExpressClass};
 use crate::daemon::supervisor::DaemonSupervisorView;
@@ -99,6 +100,23 @@ pub enum MutateProceedOutcome {
     Terminated,
 }
 
+/// The outcome of one PROCEED with an owner-BOUNDED chain tx through the runtime (ONCHAIN
+/// PIVOT C-0). `Ran` carries the INERT chokepoint receipt (C-0 does not sign/broadcast — money
+/// 0); every other variant is a fail-closed terminal that performed NO side effect.
+#[derive(Debug)]
+pub enum ChainTxProceedOutcome {
+    /// The owner-authorized, within-bounds chain tx passed the chokepoint (INERT in C-0). The
+    /// inner [`ChainTxReceipt`] records what was authorized (status `WouldExecute`).
+    Ran(ChainTxReceipt),
+    /// No installed custody grant, or the tx breached a bound (per-tx / budget / allowlist /
+    /// expired / rate / revoked) — fail-closed: ZERO side effect, no silent fallback.
+    ChainTxDenied,
+    /// Control halted this step (pause / express STOP) — no side effect.
+    Paused,
+    /// The job is terminal (killed / done) — a no-op (no zombie).
+    Terminated,
+}
+
 /// The budget-gate request for ONE autonomous turn. Modeled on a bounded `Slow`
 /// consult (the route state that permits a bounded frontier consult) with a
 /// minimal token + cost estimate, so the cap re-check (IV-R2) is exercised on
@@ -146,6 +164,18 @@ pub struct AutonomyRuntime {
     /// MUTATE actions consumed under the installed grant (the rate budget used).
     /// Advances once per proceed; the re-derivation fails closed at the grant cap.
     mutate_actions_used_u32: u32,
+    /// ONCHAIN PIVOT C-0: the OPTIONAL owner-armed user-BOUNDED CUSTODY grant. `None` ⇒ NO
+    /// on-chain tx can proceed (fail-closed — custody has no per-action fallback). Stored as the
+    /// GRANT (not a capability, never a key/wallet — PD-6) so the `ChainTxCapability` is
+    /// re-derived live per tx at `(now, used, spent)`. Tier-distinct: only a `CustodyGrant` can
+    /// occupy this field.
+    custody_grant: Option<CustodyGrant>,
+    /// Chain txs consumed under the custody grant (the rate budget used). Advances once per
+    /// proceed; the re-derivation fails closed at the grant's action cap.
+    chain_tx_actions_used_u32: u32,
+    /// Cumulative value spent under the custody grant (minor units). Advances by the tx amount
+    /// per proceed; the re-derivation fails closed when `spent + amount > total_budget`.
+    chain_tx_spent_minor: u128,
 }
 
 impl AutonomyRuntime {
@@ -191,6 +221,9 @@ impl AutonomyRuntime {
             turn_u32: 0,
             mutate_grant: None,
             mutate_actions_used_u32: 0,
+            custody_grant: None,
+            chain_tx_actions_used_u32: 0,
+            chain_tx_spent_minor: 0,
         }
     }
 
@@ -402,6 +435,76 @@ impl AutonomyRuntime {
     #[must_use]
     pub const fn mutate_actions_used(&self) -> u32 {
         self.mutate_actions_used_u32
+    }
+
+    /// ONCHAIN PIVOT C-0: install an owner-armed user-BOUNDED CUSTODY grant — the chain-tx
+    /// mirror of [`install_mutate_grant`](Self::install_mutate_grant). The per-grant action +
+    /// spent counters reset to 0 (the new grant carries its OWN bounds). The runner still MINTS
+    /// nothing (it stores the grant; the `ChainTxCapability` is re-derived per tx) and holds no
+    /// key/wallet (PD-6). Tier-distinct: only a `CustodyGrant` installs here.
+    pub fn install_custody_grant(&mut self, grant: CustodyGrant) {
+        self.custody_grant = Some(grant);
+        self.chain_tx_actions_used_u32 = 0;
+        self.chain_tx_spent_minor = 0;
+    }
+
+    /// Revoke the custody grant — the next chain-tx re-derivation yields `None` (fail-closed;
+    /// on-chain txs stop).
+    pub fn revoke_custody_grant(&mut self) {
+        self.custody_grant = self.custody_grant.take().map(CustodyGrant::revoke);
+    }
+
+    /// PROCEED with ONE owner-BOUNDED chain tx (ONCHAIN PIVOT C-0). The order is the security
+    /// spine: control re-read (terminal/paused ⇒ proceed nothing) → RE-DERIVE the
+    /// [`ChainTxCapability`] from the installed custody grant at the LIVE `(now, used, spent)`
+    /// against THIS tx (fail-closed on per-tx / budget / allowlist / expired / rate / revoked) →
+    /// (only then) the SINGLE gated chokepoint [`execute_authorized_chain_tx`], which is INERT in
+    /// C-0 (no sign/broadcast — money 0; C-2 adds the signer). No grant / a bound breach ⇒
+    /// [`ChainTxProceedOutcome::ChainTxDenied`] — ZERO side effect, no silent fallback. Blanket
+    /// custody is unreachable (PD-6, `CustodyCapability` uninhabited). On a `Ran`, the action +
+    /// spent counters advance once (so the budget tightens for the next tx).
+    pub fn proceed_authorized_chain_tx(
+        &mut self,
+        now_epoch_ms: u64,
+        tx: &ChainTxRequest,
+    ) -> ChainTxProceedOutcome {
+        if self.is_terminal() {
+            return ChainTxProceedOutcome::Terminated;
+        }
+        if self.is_paused() {
+            return ChainTxProceedOutcome::Paused;
+        }
+        // RE-DERIVE the capability at the LIVE (now, used, spent) — never cached.
+        let Some(grant) = self.custody_grant.as_ref() else {
+            return ChainTxProceedOutcome::ChainTxDenied;
+        };
+        let Some(capability) = ChainTxCapability::from_grant(
+            grant,
+            now_epoch_ms,
+            self.chain_tx_actions_used_u32,
+            self.chain_tx_spent_minor,
+            tx,
+        ) else {
+            return ChainTxProceedOutcome::ChainTxDenied;
+        };
+        // The single gated chokepoint (INERT in C-0). One capability = one tx; the action +
+        // spent counters advance exactly once, so the bound tightens for the next tx.
+        let receipt = execute_authorized_chain_tx(capability, tx);
+        self.chain_tx_actions_used_u32 = self.chain_tx_actions_used_u32.saturating_add(1);
+        self.chain_tx_spent_minor = self.chain_tx_spent_minor.saturating_add(tx.amount_minor);
+        ChainTxProceedOutcome::Ran(receipt)
+    }
+
+    /// Chain txs consumed under the installed custody grant so far (the rate budget used).
+    #[must_use]
+    pub const fn chain_tx_actions_used(&self) -> u32 {
+        self.chain_tx_actions_used_u32
+    }
+
+    /// Cumulative value spent under the installed custody grant so far (minor units).
+    #[must_use]
+    pub const fn chain_tx_spent_minor(&self) -> u128 {
+        self.chain_tx_spent_minor
     }
 
     /// Try to admit an INTERACTIVE request against the concurrency bound. The
@@ -977,6 +1080,105 @@ mod tests {
             rt.try_admit_interactive(),
             "interactive preempts via the reserved slot"
         );
+    }
+
+    /// ONCHAIN PIVOT C-0: the runtime drives owner-BOUNDED chain txs — the capability is
+    /// re-derived per tx at the live `(now, used, spent)`, the budget tightens per tx, a denied
+    /// tx never advances spent, and revoke / no-grant / kill fail closed. INERT (C-0): each
+    /// authorized proceed is a `WouldExecute` receipt (money 0).
+    #[test]
+    fn runtime_custody_session_is_bounded_and_fail_closed() {
+        use crate::command::ApprovalRequirement;
+        use crate::commands::grant::{
+            CUSTODY_ARM_PHRASE, ChainTxRequest, CustodyBounds, CustodyGrant, GrantBounds,
+            GrantTier, OwnerArmCeremony,
+        };
+        use crate::repl::approval::ApprovalPrompt;
+
+        fn custody_grant() -> CustodyGrant {
+            let mut p = ApprovalPrompt::new(ApprovalRequirement::TypedPhrase, CUSTODY_ARM_PHRASE);
+            let cer = OwnerArmCeremony::complete(
+                &mut p,
+                CUSTODY_ARM_PHRASE,
+                GrantTier::Custody,
+                [9u8; 32],
+            )
+            .expect("ceremony");
+            CustodyGrant::arm(
+                cer,
+                CustodyBounds {
+                    base: GrantBounds {
+                        max_actions_u32: 3,
+                        expires_at_epoch_ms: 1000,
+                    },
+                    per_tx_max_minor: 100,
+                    total_budget_minor: 150,
+                    chain_allowlist: vec!["ethereum".to_string()],
+                    protocol_allowlist: vec!["uniswap".to_string()],
+                },
+            )
+            .expect("arm")
+        }
+        let tx = |amt: u128| ChainTxRequest {
+            chain: "ethereum".to_string(),
+            protocol: "uniswap".to_string(),
+            amount_minor: amt,
+        };
+
+        let mut rt = AutonomyRuntime::arm(860, None, budget(1_000), 2, trace());
+        // no grant ⇒ fail-closed (custody has no per-action fallback).
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &tx(10)),
+            ChainTxProceedOutcome::ChainTxDenied
+        ));
+        rt.install_custody_grant(custody_grant());
+        // first tx (100) within bounds ⇒ Ran (INERT); spent advances to 100.
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &tx(100)),
+            ChainTxProceedOutcome::Ran(_)
+        ));
+        assert_eq!(rt.chain_tx_spent_minor(), 100);
+        assert_eq!(rt.chain_tx_actions_used(), 1);
+        // second tx (100) would push spent to 200 > 150 ⇒ budget fail-closed.
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &tx(100)),
+            ChainTxProceedOutcome::ChainTxDenied
+        ));
+        assert_eq!(
+            rt.chain_tx_spent_minor(),
+            100,
+            "a denied tx never advances spent"
+        );
+        // a within-budget tx (50) still authorizes (100 + 50 = 150 <= 150) ⇒ Ran.
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &tx(50)),
+            ChainTxProceedOutcome::Ran(_)
+        ));
+        assert_eq!(rt.chain_tx_spent_minor(), 150);
+        // off-allowlist chain ⇒ denied even within budget.
+        let solana = ChainTxRequest {
+            chain: "solana".to_string(),
+            protocol: "uniswap".to_string(),
+            amount_minor: 1,
+        };
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &solana),
+            ChainTxProceedOutcome::ChainTxDenied
+        ));
+        // revoke ⇒ fail-closed.
+        rt.revoke_custody_grant();
+        assert!(matches!(
+            rt.proceed_authorized_chain_tx(1, &tx(1)),
+            ChainTxProceedOutcome::ChainTxDenied
+        ));
+        // a killed runner proceeds nothing (Terminated; no zombie).
+        let mut rt2 = AutonomyRuntime::arm(861, None, budget(1_000), 2, trace());
+        rt2.install_custody_grant(custody_grant());
+        rt2.kill();
+        assert!(matches!(
+            rt2.proceed_authorized_chain_tx(1, &tx(10)),
+            ChainTxProceedOutcome::Terminated
+        ));
     }
 
     /// IV-R3 (threaded teardown): the REAL worker thread terminates on `kill` and

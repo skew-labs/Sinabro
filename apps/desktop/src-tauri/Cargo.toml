@@ -50,7 +50,12 @@ tauri-plugin-log = "2"
 # All stay gated at runtime (typed phrase / owner-arm / sender-pin); custody HARD-LOCKED.
 # E13-1 (owner-directed 2026-06-13 "웹서치도 자율적으로") — `web-egress` makes the
 # agent's web fetch/search LIVE (SSRF-walled, GET-only, secret-zero, READ-class).
-sinabro = { path = "../../../prototype/crates/mnemos-cli", features = ["put-fixture-net", "provider-egress", "telegram-egress", "telegram-inbound", "local-mlx", "local-vllm", "web-egress", "download-egress"] }
+# ★ SKEW TRADING (owner-directed 2026-07-01 "제 1목적이 스큐체인 거래") — the desktop app's
+# PRIMARY purpose is to TRADE on Skew. `web3-egress` = the LIVE Skew READ socket (positions/
+# portfolio/markets/oracle via getProgramAccounts, SSRF-walled, READ-class); `chain-write` = the
+# owner-armed K-2 chain-WRITE chokepoint (every trade still gated by the exact custody arm phrase +
+# the K-1 oracle + the bounded CustodyGrant — the GUI/model can NEVER auto-trade; mainnet locked).
+sinabro = { path = "../../../prototype/crates/mnemos-cli", features = ["put-fixture-net", "provider-egress", "telegram-egress", "telegram-inbound", "local-mlx", "local-vllm", "web-egress", "download-egress", "web3-egress", "chain-write"] }
 tauri-plugin-dialog = "2.7.1"
 
 # Standalone workspace root: keeps this GUI crate fully decoupled from the

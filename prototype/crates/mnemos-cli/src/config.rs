@@ -252,6 +252,12 @@ pub struct RawCliConfig {
     /// intact) and no chain WRITE is ever representable here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web3_rpc_endpoint: Option<String>,
+    /// ONCHAIN PIVOT C-1: the owner-configured MULTI-CHAIN READ registry. Each entry is
+    /// `"name:family:endpoint"` (e.g. `"ethereum:evm:https://rpc..."`; family ∈ solana/sui/evm).
+    /// The agent reads ONLY these chains (the bound — it supplies a chain NAME, never a URL). Each
+    /// endpoint is SSRF-walled again at dial time. A chain WRITE is never representable here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub web3_rpc_chains: Vec<String>,
     /// Walrus self-host (BYO) PUBLISHER endpoint — a deploy-time seam (WALRUS_MAINNET_SELFHOST).
     /// The deployer runs their OWN `walrus publisher` (their wallet pays) or a hosted one and
     /// plugs in its https URL; the agent then stores its two-tier encrypted memory there. The
@@ -540,6 +546,31 @@ pub fn effective_web3_rpc_endpoint(layers: &[(ConfigLayer, RawCliConfig)]) -> Op
         }
     }
     endpoint
+}
+
+/// ONCHAIN PIVOT C-1: resolve the owner-configured MULTI-CHAIN READ registry across config layers
+/// (lowest to highest precedence; entries from all layers are collected, a later duplicate of a
+/// name is ignored — first wins, via [`crate::provider::web3_rpc::Web3ChainRegistry::from_entries`]).
+/// Each config entry is `"name:family:endpoint"` (split on the FIRST two `:`, so the endpoint keeps
+/// its `://`). A malformed / empty-field entry is dropped (fail-closed). The agent reads ONLY these
+/// chains (the bound); each endpoint is SSRF-walled again at dial time.
+#[must_use]
+pub fn effective_web3_chain_registry(
+    layers: &[(ConfigLayer, RawCliConfig)],
+) -> crate::provider::web3_rpc::Web3ChainRegistry {
+    use crate::provider::web3_rpc::{Web3ChainEntry, Web3ChainRegistry};
+    let mut ordered: Vec<&(ConfigLayer, RawCliConfig)> = layers.iter().collect();
+    ordered.sort_by_key(|(layer, _)| layer.precedence());
+    let mut entries: Vec<Web3ChainEntry> = Vec::new();
+    for (_, cfg) in ordered {
+        for raw in &cfg.web3_rpc_chains {
+            let parts: Vec<&str> = raw.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                entries.push(Web3ChainEntry::new(parts[0], parts[1], parts[2]));
+            }
+        }
+    }
+    Web3ChainRegistry::from_entries(entries)
 }
 
 /// S2 (WALRUS_MAINNET_SELFHOST) — presence-only posture of the Walrus self-host

@@ -256,8 +256,14 @@ fn redact_input(line: String) -> RedactedInput {
         _ => None,
     };
     match redacted_label {
-        Some(display) => RedactedInput { redacted: true, display },
-        None => RedactedInput { redacted: false, display: line },
+        Some(display) => RedactedInput {
+            redacted: true,
+            display,
+        },
+        None => RedactedInput {
+            redacted: false,
+            display: line,
+        },
     }
 }
 
@@ -287,6 +293,41 @@ fn load_sessions(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn save_sessions(app: tauri::AppHandle, json: String) -> Result<(), String> {
     let path = sessions_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Resolve the GUI settings-store path (`…/settings.json`) — durable across restarts,
+/// INDEPENDENT of the webview's localStorage (P0 #16/#17, owner 2026-06-30: "닫으면
+/// 세팅값 초기화" — the UI prefs must persist regardless of webview storage durability).
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("settings.json"))
+}
+
+/// Load the persisted GUI settings JSON (the `sinabro.*` UI prefs: mode / layout / root
+/// / wrap …). Empty string when none yet. SECRET-ZERO: the API key is NOT stored here
+/// (it goes through `set_secret`); funds / wallet are unreachable from this surface.
+#[tauri::command]
+fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
+    let path = settings_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Persist the GUI settings JSON (atomic: write temp, then rename).
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let path = settings_path(&app)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -399,11 +440,10 @@ fn register_file_roots(dirs: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file().blocking_pick_folder()
-    })
-    .await
-    .map_err(|e| format!("folder dialog task failed: {e}"))?;
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| format!("folder dialog task failed: {e}"))?;
     let Some(file_path) = picked else {
         return Ok(None); // owner cancelled — clean no-op
     };
@@ -439,6 +479,24 @@ fn secret_status() -> Vec<SecretStatus> {
             present: std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false),
         })
         .collect()
+}
+
+/// A#1 (owner 2026-07-01 "모델 설정 아예 안됨") — the RESOLVED frontier consult model, so the
+/// Settings panel shows the model the core will ACTUALLY use (not a hardcoded "deepseek-chat"
+/// label that lied about an explicit GLM selection). The model id is a public routing string
+/// (NOT a credential), so returning it is secret-zero-safe.
+#[tauri::command]
+fn frontier_model_view() -> String {
+    let v = std::env::var("OPENROUTER_MODEL").unwrap_or_default();
+    let v = v.trim();
+    if v.is_empty() {
+        format!(
+            "{} (default)",
+            sinabro::commands::model_select::FRONTIER_DEFAULT_MODEL
+        )
+    } else {
+        v.to_string()
+    }
 }
 
 /// S4 (WALRUS_MAINNET_SELFHOST) — presence-only posture of the self-host Walrus config,
@@ -496,7 +554,13 @@ enum FileView {
     // editor sends it back to owner_save_file so a since-changed file is refused). `sha` stays the
     // short display form.
     #[serde(rename = "text")]
-    Text { content: String, bytes: usize, sha: String, sha_full: String, path: String },
+    Text {
+        content: String,
+        bytes: usize,
+        sha: String,
+        sha_full: String,
+        path: String,
+    },
     #[serde(rename = "binary")]
     Binary { bytes: usize, sha: String },
     #[serde(rename = "withheld")]
@@ -525,7 +589,11 @@ struct IndexEntry {
 #[serde(tag = "kind")]
 enum IndexView {
     #[serde(rename = "index")]
-    Index { root: String, truncated: bool, entries: Vec<IndexEntry> },
+    Index {
+        root: String,
+        truncated: bool,
+        entries: Vec<IndexEntry>,
+    },
     #[serde(rename = "withheld")]
     Withheld,
     #[serde(rename = "denied")]
@@ -540,7 +608,11 @@ fn read_file_view(path: String) -> FileView {
     let policy = sinabro::file_context::FileReadPolicy::cwd_default();
     let result = match policy.read(std::path::Path::new(&path)) {
         Ok(result) => result,
-        Err(deny) => return FileView::Denied { reason: deny.class_label().to_string() },
+        Err(deny) => {
+            return FileView::Denied {
+                reason: deny.class_label().to_string(),
+            }
+        }
     };
     // Read the non-text fields BEFORE moving `text` out of `result`.
     let bytes = result.len_bytes();
@@ -568,7 +640,13 @@ fn read_file_view(path: String) -> FileView {
             if denied {
                 FileView::Withheld { bytes, sha }
             } else {
-                FileView::Text { content: text, bytes, sha, sha_full, path: canonical }
+                FileView::Text {
+                    content: text,
+                    bytes,
+                    sha,
+                    sha_full,
+                    path: canonical,
+                }
             }
         }
     }
@@ -709,11 +787,13 @@ struct InlineOracleIn {
 
 #[tauri::command]
 async fn inline_edit_oracle(payload: InlineOracleIn) -> Result<String, String> {
-    Ok(tauri::async_runtime::spawn_blocking(move || {
+    // (clippy::needless_question_mark — newer toolchain; the JoinError→String map already yields
+    //  the Result<String, String> this command returns. Behavior-identical to the prior Ok(…?)).
+    tauri::async_runtime::spawn_blocking(move || {
         sinabro::dispatch::inline_edit_oracle_for(&payload.id, &payload.path)
     })
     .await
-    .map_err(|e| format!("inline-oracle task failed: {e}"))?)
+    .map_err(|e| format!("inline-oracle task failed: {e}"))
 }
 
 // ── B⑬: PLAN MODE — run the frontier PLAN, then execute the OWNER-APPROVED sub-task subset ───────
@@ -753,24 +833,51 @@ struct OrchestrateRunIn {
     approved: Vec<String>,
 }
 
-/// The Run-phase result: the typed stop, the synthesis, and one verdict line per implemented sub-task.
+/// One STRUCTURED routed worker for the GUI fleet pane (K-5b): the (port, model_id) the
+/// orchestrator fanned out + the DETERMINISTIC verify-oracle verdict/admission. Mirrors
+/// `sinabro::dispatch::OrchestrateWorkerView`. Money 0 — a render of an already-gated local
+/// loop result; NO custody / sign / chain field exists here (IV-FG7).
+#[derive(serde::Serialize)]
+struct OrchestrateWorkerOut {
+    id: u32,
+    kind: String,
+    port: u16,
+    model_id: String,
+    verdict: String,
+    admits: bool,
+    preview: String,
+}
+
+/// The Run-phase result: the typed stop, the synthesis, and the STRUCTURED routed workers
+/// (the fleet pane reads fields, never re-parses lines — the single-truth-source law).
 #[derive(serde::Serialize)]
 struct OrchestrateRunOut {
     stop: String,
     synthesis: Option<String>,
-    subtasks: Vec<String>,
+    workers: Vec<OrchestrateWorkerOut>,
 }
 
 #[tauri::command]
 async fn orchestrate_run(payload: OrchestrateRunIn) -> Result<OrchestrateRunOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        sinabro::dispatch::orchestrate_run_for(&payload.phrase, &payload.task, &payload.approved).map(
-            |v| OrchestrateRunOut {
+        sinabro::dispatch::orchestrate_run_for(&payload.phrase, &payload.task, &payload.approved)
+            .map(|v| OrchestrateRunOut {
                 stop: v.stop,
                 synthesis: v.synthesis,
-                subtasks: v.subtasks,
-            },
-        )
+                workers: v
+                    .workers
+                    .into_iter()
+                    .map(|w| OrchestrateWorkerOut {
+                        id: w.id,
+                        kind: w.kind,
+                        port: w.port,
+                        model_id: w.model_id,
+                        verdict: w.verdict,
+                        admits: w.admits,
+                        preview: w.preview,
+                    })
+                    .collect(),
+            })
     })
     .await
     .map_err(|e| format!("orchestrate-run task failed: {e}"))?
@@ -783,7 +890,11 @@ fn read_index_view(path: String) -> IndexView {
     let policy = sinabro::file_context::FileReadPolicy::cwd_default();
     let index = match sinabro::project_index::index_project(&policy, std::path::Path::new(&path)) {
         Ok(index) => index,
-        Err(deny) => return IndexView::Denied { reason: deny.class_label().to_string() },
+        Err(deny) => {
+            return IndexView::Denied {
+                reason: deny.class_label().to_string(),
+            }
+        }
     };
     // Safety parity with `redact_or_withhold`: a secret-SHAPED name ⇒ withhold the
     // WHOLE listing (the precise inline-secret detector, never the path-false-
@@ -871,7 +982,11 @@ fn read_proposals() -> Result<Vec<ProposalView>, String> {
                             Err(_) => true,
                         };
                         if secret {
-                            (None, stale, Some("current file is secret-shaped (redaction)".to_string()))
+                            (
+                                None,
+                                stale,
+                                Some("current file is secret-shaped (redaction)".to_string()),
+                            )
                         } else {
                             (Some(text), stale, None)
                         }
@@ -950,6 +1065,38 @@ fn read_status_view() -> StatusView {
         // No live TPS feed exists in the consult path — honest absence, not a 0.
         tps: None,
     }
+}
+
+/// WAVE G — the deterministic payoff-diagram SVG for the Skew §8 payoff pane. Calls the PURE core
+/// `sinabro::skew_payoff_svg` (NO float / clock / network / key / chain ⇒ byte-deterministic) and
+/// returns a self-contained `<svg>…</svg>` string the GUI inlines (the title is XML-escaped; no
+/// `<script>`). READ-class, money 0: it VISUALIZES a payoff the agent could PROPOSE, signs nothing.
+/// `kind` = "straddle" (`f = |S−strike| − premium`) or "forward" (`f = S − strike`, the affine WCC
+/// forward). A degenerate domain returns the honest empty-state SVG (never a fabricated curve).
+#[tauri::command]
+fn skew_payoff_svg(kind: String, lo: i64, hi: i64, tau: u64, strike: i64, premium: i64) -> String {
+    use sinabro::skew_payoff_svg::{
+        affine_forward_segments, render_payoff_svg, sample_piecewise, straddle_payoff_segs,
+    };
+    let (lo, hi, strike, premium) = (
+        i128::from(lo),
+        i128::from(hi),
+        i128::from(strike),
+        i128::from(premium),
+    );
+    let (title, segs) = if kind == "forward" {
+        (
+            format!("forward Pc={strike} [{lo},{hi}]"),
+            affine_forward_segments(hi, 1, strike.saturating_neg()),
+        )
+    } else {
+        (
+            format!("straddle K={strike} prem={premium} [{lo},{hi}]"),
+            straddle_payoff_segs(hi, strike, premium),
+        )
+    };
+    let points = sample_piecewise(lo, hi, u128::from(tau), &segs).unwrap_or_default();
+    render_payoff_svg(&title, &points, 360, 220)
 }
 
 /// Opt-in OTel telemetry toggle (R7b privacy viz). Sets/clears `SINABRO_OTEL_EXPORT`
@@ -1232,7 +1379,10 @@ struct PerfLedgerView {
 #[tauri::command]
 fn read_perf_ledger() -> PerfLedgerView {
     let Ok(dir) = sinabro::memory_store::data_dir() else {
-        return PerfLedgerView { entries: Vec::new(), path: sinabro::autonomy_evolve::EVOLUTION_LEDGER_FILE.to_string() };
+        return PerfLedgerView {
+            entries: Vec::new(),
+            path: sinabro::autonomy_evolve::EVOLUTION_LEDGER_FILE.to_string(),
+        };
     };
     let path = dir.join(sinabro::autonomy_evolve::EVOLUTION_LEDGER_FILE);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1245,7 +1395,10 @@ fn read_perf_ledger() -> PerfLedgerView {
             demoted: p.demoted,
         })
         .collect();
-    PerfLedgerView { entries, path: path.display().to_string() }
+    PerfLedgerView {
+        entries,
+        path: path.display().to_string(),
+    }
 }
 
 // ── P2-S4a: the dynamic-LoRA routing-table editor (Settings → LoRA / Routing) ─────────────
@@ -1345,6 +1498,129 @@ fn write_routing_table(payload: RoutingTableIn) -> Result<(), String> {
     sinabro::dispatch::write_routing_table_rows(&rows, payload.default_port, &payload.default_model)
 }
 
+/// K-6: read the honest dynamic-LoRA status — the certified corpus→adapter MANIFEST
+/// (P-HALL: only a certified strategy backs an adapter), the SERVED set (empty ⇒ honest
+/// no-server), and the per-kind RESOLUTION for the routing table (requested adapter →
+/// wire model, served/degraded). Returns the SAME core render string the CLI `provider
+/// lora-status` emits — the GUI shows it VERBATIM (no JS re-implementation; one truth
+/// source). An unserved adapter is shown honest-degrading to the base, never faked as
+/// served (PD-1). READ-class, money 0; `CustodyCapability` stays uninhabited (PD-6).
+#[tauri::command]
+fn read_lora_status() -> String {
+    sinabro::dispatch::lora_status_render()
+}
+
+/// W5: read the owner-declared served-adapter ids (the ids a real multi-LoRA server serves) for the
+/// GUI served-editor. READ-only, money 0.
+#[tauri::command]
+fn read_served_adapters() -> Vec<String> {
+    sinabro::dispatch::read_served_adapter_lines()
+}
+
+/// W5: persist the owner-declared served-adapter ids (the GUI served-editor + the connect-adapter
+/// seam). The core validates each (fail-closed) + atomic-writes. HONEST: declaring an id served does
+/// NOT make it served — `resolve_adapter` still honest-degrades the send to the base if the real
+/// server is down. NOT custody (a plain local config; PD-6 untouched).
+#[tauri::command]
+fn write_served_adapters(ids: Vec<String>) -> Result<(), String> {
+    sinabro::dispatch::write_served_adapter_lines(&ids)
+}
+
+// ── K-5c: the WALLET SETTINGS WINDOW — the CustodyGrant dial cockpit (READ-class) ──────────
+// Surfaces the custody-dial state (per-tx · budget · allowlist · TTL · max-actions · network ·
+// isolated-signer presence · armed) the K-2 `daemon trade` path arms WITHIN. The single truth
+// source is the CORE `skew_custody_dial()` (the SAME bounds the trade path uses); the GUI never
+// re-derives bounds in JS. This command CONFIGURES nothing and SIGNS nothing — it READS the dial
+// (IV-FG8). ARM/REVOKE/KILL + isolated-key setup are the owner's typed-phrase ceremony via
+// `dispatch_line` (`daemon trade <CUSTODY_ARM_PHRASE> …` / `daemon trade-addr`), never this
+// command. `signer_pubkey` is the PUBLIC fee-payer key — NEVER the seed. The wallet window itself
+// moves nothing: custody/funds reach real value ONLY through the owner-armed K-2 path (PD-6).
+
+/// The CustodyGrant dial state for the wallet cockpit (mirrors `sinabro::dispatch::CustodyDialView`).
+/// Money 0: no sign / mint / spend field exists here; `signer_pubkey` is the PUBLIC fee-payer key.
+/// The u128 bounds cross as strings (JSON number-safe; no precision loss in the webview).
+#[derive(serde::Serialize)]
+struct CustodyDialOut {
+    network: String,
+    protocol: String,
+    signer_pubkey: Option<String>,
+    per_tx_max_minor: String,
+    total_budget_minor: String,
+    ttl_ms: u64,
+    max_actions: u32,
+    armed: bool,
+}
+
+/// Read the custody-dial state for the wallet settings window (K-5c). READ-only: reuses the core
+/// `skew_custody_dial()` single source of truth (the SAME bounds the K-2 trade path arms within);
+/// no egress, no fs write, no sign / mint / spend.
+#[tauri::command]
+fn read_custody_dial() -> CustodyDialOut {
+    let d = sinabro::dispatch::skew_custody_dial();
+    CustodyDialOut {
+        network: d.network,
+        protocol: d.protocol,
+        signer_pubkey: d.signer_pubkey,
+        per_tx_max_minor: d.per_tx_max_minor.to_string(),
+        total_budget_minor: d.total_budget_minor.to_string(),
+        ttl_ms: d.ttl_ms,
+        max_actions: d.max_actions,
+        armed: d.armed,
+    }
+}
+
+// ── W8: the owner-configured WEB PANE url (the center web view — e.g. skew.deals) ───────────
+// A plain local string the GUI iframes (sandboxed). Stored as `web_pane_url.txt` in the SAME
+// GUI-owned app-data home as host.json / settings.json / sessions.json. HONEST-ABSENT by
+// construction: an empty string ⇒ the GUI shows its no-feed card, NEVER a fabricated embed.
+// READ-class: no secret, no funds / wallet / chain — custody/mainnet untouched (PD-6).
+
+/// Resolve the web-pane url store path (`…/web_pane_url.txt` under the OS app-data dir).
+fn web_pane_url_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app_data_dir(app)?.join("web_pane_url.txt"))
+}
+
+/// Read the owner-configured web-pane URL (empty string when unset — honest absence, never a
+/// fabricated default). READ-only; no egress, no secret surface.
+#[tauri::command]
+fn read_web_pane_url(app: tauri::AppHandle) -> Result<String, String> {
+    let path = web_pane_url_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Persist the owner-configured web-pane URL. Validates `https://` (the iframe is sandboxed; we
+/// refuse `http`/`file`/`javascript`/`data`). An EMPTY string CLEARS it (back to honest-absent).
+/// The owner's Save IS the authorization (like `save_settings` / `set_host`); the model has no
+/// path here. Never a secret, never custody (PD-6). Atomic write (temp + rename).
+#[tauri::command]
+fn write_web_pane_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    let path = web_pane_url_path(&app)?;
+    if trimmed.is_empty() {
+        // Clear — remove the file (a NotFound is already "cleared").
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    // https-only (a sandboxed iframe source — never http/file/javascript/data schemes).
+    if !trimmed.to_ascii_lowercase().starts_with("https://") || trimmed.len() <= "https://".len() {
+        return Err("web pane URL must be an https:// URL".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("txt.tmp");
+    std::fs::write(&tmp, trimmed.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1366,11 +1642,14 @@ pub fn run() {
             redact_input,
             load_sessions,
             save_sessions,
+            load_settings,
+            save_settings,
             get_host,
             set_host,
             set_secret,
             clear_secret,
             secret_status,
+            frontier_model_view,
             walrus_status,
             register_file_roots,
             pick_folder,
@@ -1385,6 +1664,13 @@ pub fn run() {
             walrus_memory_fetch,
             read_routing_table,
             write_routing_table,
+            read_lora_status,
+            read_served_adapters,
+            write_served_adapters,
+            read_custody_dial,
+            read_web_pane_url,
+            write_web_pane_url,
+            skew_payoff_svg,
             read_perf_ledger,
             owner_save_file,
             fim_complete,
