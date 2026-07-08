@@ -1,0 +1,14 @@
+<svg width="980" height="260" viewBox="0 0 980 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="sinabro">
+  <!-- horizontal lockup · black on transparent (use sinabro_mark.svg for the dark app-icon) -->
+  <g transform="translate(132,130)">
+    <!-- accreting orbit -->
+    <circle r="108" fill="none" stroke="#0a0a0b" stroke-width="25" stroke-linecap="round"
+            stroke-dasharray="500 679" transform="rotate(-104)"/>
+    <circle r="68" fill="none" stroke="#0a0a0b" stroke-width="12" stroke-linecap="round"
+            stroke-dasharray="205 427" transform="rotate(150)" opacity="0.92"/>
+    <circle r="32" fill="#0a0a0b"/>
+  </g>
+  <!-- wordmark -->
+  <text x="296" y="168" font-family="'Helvetica Neue','Inter','Segoe UI',Arial,sans-serif"
+        font-size="120" font-weight="700" letter-spacing="-7" fill="#0a0a0b">sinabro</text>
+</svg>

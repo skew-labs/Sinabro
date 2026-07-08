@@ -1,0 +1,10 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+# forge-std is fetched by the owner (`forge install foundry-rs/forge-std`); not vendored.
+lib/
+# sui move build byproducts in the verified-pattern fixture (the .move SOURCE is the
+# anchored artifact; build/ + Move.lock are regenerable and not part of the hash).
+fixtures/verified_pattern/build/
+fixtures/verified_pattern/Move.lock

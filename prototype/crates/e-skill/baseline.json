@@ -1,0 +1,11 @@
+{
+  "op": "verify_skill_package_small",
+  "metadata_bytes": 1741,
+  "max_metadata_bytes": 65536,
+  "warmup": 100,
+  "measured": 1000,
+  "p50_nanos": 147667,
+  "p95_nanos": 158125,
+  "alloc_count_per_run": 833,
+  "alloc_bytes_per_run": 150027
+}

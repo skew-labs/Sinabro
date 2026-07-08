@@ -1,0 +1,83 @@
+[package]
+name = "mnemos-e-skill"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #39 · E.0.1 — manifest.rs (TOML parse + validate skill manifests).
+# Path-dep on mnemos-m-agent for the canonical `ToolId` (atom #24 ·
+# M.0.4); workspace toml + serde for the parser surface (both crates
+# already vendored in the local registry cache → offline-safe build).
+#
+# atom #40 · E.0.2 — builtins.rs (Phase 0 builtin whitelist). Adds a
+# path-dep on mnemos-a-core for the atom #2 reuse surface
+# (`MnemosError::tool_denied` / `ToolProgram` / `ToolDenyReason` /
+# `ErrorCode`).
+#
+# D-WP-01A (#241-#254) — signed skill package surface. Stage D wraps the
+# A `SkillManifest` in `SkillPackageV1` and never re-mints A/B/C canonical
+# types. Three NEW one-way path edges, each carrying pure types only (no
+# network / wallet / secret / chain action):
+#   - e-skill -> mnemos-f-seal   : reuse `CapabilityKind` (atom #36 · §4.F)
+#                                  for `CapabilityDiff.a_capabilities`.
+#   - e-skill -> mnemos-c-walrus : reuse `SignatureBytes` (64 B, atom #10
+#                                  · §4.C codec) for `SkillPackageSignature`.
+#   - e-skill -> mnemos-d-move   : reuse `SuiAddress`/`ObjectId` (32 B, atom
+#                                  #15 · §4.D) for `ProvenanceNode.author`.
+# Cycle check (cargo metadata, D-WP-01A): f-seal closure = {d-move, c-walrus,
+# a-core}; d-move = {c-walrus, a-core}; c-walrus = {a-core}; a-core depends on
+# no workspace member; the sole e-skill consumer is j-ux (and cli -> j-ux),
+# which none of these reach — so all three edges are acyclic. `blake2`
+# (workspace-pinned, already vendored) supplies the Blake2b-256 content
+# digest used for every `*_digest_32` field, matching the k-devex
+# `stage_c_ceremony` preimage/finalize pattern.
+[dependencies]
+mnemos-a-core = { path = "../a-core" }
+mnemos-m-agent = { path = "../m-agent" }
+mnemos-f-seal = { path = "../f-seal" }
+mnemos-c-walrus = { path = "../c-walrus" }
+mnemos-d-move = { path = "../d-move" }
+# D-WP-03A (#290 · ptb.rs): reuse C `GasStationPolicy` for PTB dry-run policy
+# checks (package binding + gas cap + wildcard reject). One NEW one-way edge
+# e-skill -> mnemos-g-wallet carrying pure policy types only (no signing, no
+# wallet secret, no chain action). Acyclic: g-wallet has no e-skill dep
+# (cargo tree -i mnemos-e-skill = {j-ux -> cli} only), so this reverses the
+# D-WP-02 "no e-skill->g-wallet" property by owner lock (2026-06-04).
+mnemos-g-wallet = { path = "../g-wallet" }
+serde = { workspace = true }
+toml = { workspace = true }
+blake2 = { workspace = true }
+
+# D-WP-01A (#250 / #253 / #254): malicious-fixture + property + bench harness.
+# All dev-only — release bins stay byte-identical (none of these link into
+# `mnemos-agent` / `mnemos-cli`).
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# atom #254 · D.0.13: package-verify criterion bench. `harness = false`
+# hands `fn main` to `criterion` directly (atom #13 · C.0.7 precedent); the
+# p50/p95 + max-metadata-size + alloc-snapshot record is emitted to
+# `ops/evidence/stage_d/package_bench.md`.
+[[bench]]
+name = "package_verify"
+harness = false
+
+# atom #273 · D.1.17 (D-WP-02): WASM Tier-2 policy overhead bench. Dev-only —
+# does not link into the release bins. Measures module-id validation, metering,
+# the hostcall-table hash, and a filesystem deny check; the p50/p95 record is
+# emitted to `ops/evidence/stage_d/wasm_bench.md`.
+[[bench]]
+name = "wasm_tier2"
+harness = false
+
+# atom #309 · D.3.13 (D-WP-05A): catalog search/rank/cache benchmark. Dev-only —
+# does not link into the release bins. Measures deterministic ranking (#303) +
+# signed catalog cache rebuild (#306) at 1k/10k/100k entries; the warm top-20
+# query p50/p95 + entry footprint record is emitted to
+# `ops/evidence/stage_d/catalog_index_bench.md`.
+[[bench]]
+name = "catalog_index"
+harness = false

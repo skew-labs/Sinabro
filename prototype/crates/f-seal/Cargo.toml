@@ -1,0 +1,32 @@
+[package]
+name = "mnemos-f-seal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #37 · F.0.1 — capability check stub. The only canonical-IN reuse from a
+# sibling domain is `SuiAddress` from `mnemos-d-move` (atom #15 · D.0.1) per
+# ATOM_PLAN §4.F line 693 + atom #37 reuse line 1199. Byte-for-byte reuse —
+# the f-seal `Capability.owner` and the d-move `MemoryRoot.owner` are the
+# same 32-byte Sui account address (atom #33/#34/#35/#36 precedent for
+# `SuiAddress` cross-domain reuse). Phase 0 = ownership gate ONLY; the real
+# Seal AEAD / key-server / threshold cryptography are deferred to Phase 1
+# (§3.4 master), so no new crypto crate enters f-seal here.
+[dependencies]
+mnemos-d-move = { path = "../d-move" }
+# atom #156 · B.4.10: the Stage B Seal stub envelope reuses the canonical
+# publish-payload classifier `PublishPayloadClass` whose home-of-record is
+# `mnemos-c-walrus` (`publisher.rs`, atom #8) — re-exported verbatim, no second
+# classifier minted. `c-walrus` is a leaf crate (no `mnemos-*` deps), so the
+# edge `f-seal -> c-walrus` introduces no cycle (f-seal does not, and must not,
+# depend on `b-memory`). Path-only workspace dep: no network / HTTP / TLS.
+mnemos-c-walrus = { path = "../c-walrus" }
+
+[dev-dependencies]
+# atom #160 · B.4.14: the Seal redteam matrix names `PublishPayloadClass`
+# directly in the integration test (a separate crate that does not inherit the
+# library's normal deps), so `c-walrus` is also declared dev-only here. No
+# cycle (c-walrus is a leaf). No live network, no signing.
+mnemos-c-walrus = { path = "../c-walrus" }

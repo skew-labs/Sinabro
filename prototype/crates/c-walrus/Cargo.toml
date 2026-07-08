@@ -1,0 +1,53 @@
+[package]
+name = "mnemos-c-walrus"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[features]
+# Network is isolated behind this feature (atom #12 · C.0.6). Default build
+# pulls 0 transport code and 0 transitive HTTP/TLS deps. Enabling
+# `net-testnet` brings in `reqwest::blocking` + rustls-tls and unlocks the
+# `c0_6_testnet_put_get_round_trip_synthetic_only` integration test in
+# `tests/reqwest_transport_offline.rs`. That test is `#[ignore]`d so it
+# never runs automatically; it requires explicit operator approval
+# (gate G-WALRUS-NET) and a `--ignored` flag to exercise.
+#
+# bridge atom #116.5 · B.2.15.5: the same feature additionally pulls the
+# official `walrus-core` blob-id oracle (`dep:walrus-core`), used ONLY by the
+# isolated `blob_id_rs2` adapter. The default build compiles neither `reqwest`
+# nor `walrus-core`, so the offline placeholder derive/verify path (atoms
+# #10/#11) stays byte-identical with the feature off.
+net-testnet = ["dep:reqwest", "dep:walrus-core"]
+
+[dependencies]
+reqwest = { workspace = true, optional = true }
+# bridge atom #116.5 · B.2.15.5: official Walrus RS2 blob-id oracle, optional +
+# `net-testnet`-gated. Pure in-process computation (no network, no `Command`),
+# consumed only by `src/blob_id_rs2.rs`. See the workspace-root comment for the
+# rev pin and 3-way parity rationale.
+walrus-core = { workspace = true, optional = true }
+# atom #220 · C.2.1 (C-WP-06A): the Stage C Walrus *mainnet* endpoint wrapper
+# (`stage_c_mainnet_endpoint`) is constructed only from the sealed §4.4 mainnet
+# config (`SealedMainnetConfig`, atom #219) + `StageCChainEnv`, whose home is the
+# dependency-root `a-core`. This adds the one-way edge `c-walrus -> a-core`;
+# `a-core` depends on **no** workspace member (serde/toml/tracing only), so the
+# edge is acyclic. Path-only workspace dep: pure types, no network / HTTP / TLS,
+# 0 new transitive deps. Mirrors the user-blessed b-memory/d-move/k-devex ->
+# a-core (C-WP-01) and g-wallet -> a-core (C-WP-05) edges.
+mnemos-a-core = { path = "../a-core" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# atom #13 · C.0.7: codec/blob_id criterion bench harness. `harness = false`
+# disables libtest in favour of `criterion::Criterion::configure_from_args`
+# driven directly from `benches/codec.rs::fn main`. Baseline numbers are
+# emitted to `ops/evidence/phase_0/atom_013/baseline.json` as a CI-comparable
+# JSON record; ±5% regression / alloc+0 enforcement is carried by K.0.1.
+[[bench]]
+name = "codec"
+harness = false

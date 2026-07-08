@@ -1,0 +1,499 @@
+[package]
+name = "sinabro"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io
+
+# Stage F (#401-#410, F-WP-01) — the Sinabro CLI Cockpit crate.
+#
+# Directory is the plan-mandated `crates/mnemos-cli`; the *package* is named
+# `sinabro` because the legacy `bin/mnemos-cli` already owns the package name
+# `mnemos-cli` (a duplicate would be a cargo collision). `sinabro` is the public
+# product/binary name; `mnemos` is the legacy/internal alias. The crate depends
+# on core crates by interface only (no business truth is copied into the CLI) and
+# pulls NO CLI/TUI framework: the command surface is a hand-rolled *closed* enum,
+# matching the offline-clean `bin/mnemos-cli` convention and keeping the
+# `--locked --offline` build dependency surface minimal.
+#
+# Two `[[bin]]` targets share `src/main.rs` so the single entry point ships as
+# both `sinabro` (primary) and `mnemos` (legacy alias). The binary inspects
+# argv[0] only for its banner; behaviour is identical.
+
+[[bin]]
+name = "sinabro"
+path = "src/main.rs"
+
+[[bin]]
+name = "mnemos"
+path = "src/main.rs"
+
+# atom #416 REPL latency harness. `harness = false` (no criterion — deferred per
+# build-state): a plain `fn main()` measures hot-path ops with `std::time` and
+# scores p95 against `LatencyBudget`. Run: `cargo bench --bench repl_latency`.
+[[bench]]
+name = "repl_latency"
+harness = false
+
+# atom #426 (F-WP-03A) TUI refresh latency harness. Same `harness = false`
+# offline `std::time` posture as `repl_latency`: measures the cockpit pane
+# `render`/projection hot path and scores p95 against the §4.3 `LatencyBudget`
+# (TUI refresh ceiling 250ms). Run: `cargo bench --bench tui_latency`.
+[[bench]]
+name = "tui_latency"
+harness = false
+
+# atom #474 (F-WP-08) Stage F latency scorecard harness. Same `harness = false`
+# offline `std::time` posture: measures the new F-WP-08 hot paths (audit 10k
+# filter, trace-line write, release secret scan) and scores p95 against the §4.3
+# `LatencyBudget`. Run: `cargo bench --bench stage_f_latency`.
+[[bench]]
+name = "stage_f_latency"
+harness = false
+
+# atom #639 (G.9.15) — Stage G live incident drill. A standalone cargo integration
+# test whose source lives OUTSIDE the crate, under `ops/drills/stage_g/`, exercising
+# the sinabro PUBLIC API (incident pause + budget hard-stop + gated resume). No live
+# action: a pure in-memory control-plane drill. Run: `cargo test -p sinabro --test
+# stage_g_live_incident`.
+[[test]]
+name = "stage_g_live_incident"
+path = "../../../ops/drills/stage_g/live_incident.rs"
+
+# atom #648 (G.9.24) — Stage G full live-agent E2E + injection/tool-abuse redteam.
+# A standalone cargo integration test under `ops/e2e/stage_g/` over the sinabro
+# PUBLIC API: CLI/TG one-envelope turn, control-express, cancel + rollback drill,
+# incident pause, and the injection redteam (no scope-widen / exfiltrate / reach
+# funds / bypass approval). No live action. Companion evidence: redteam.md. Run:
+# `cargo test -p sinabro --test stage_g_live_agent_e2e`.
+[[test]]
+name = "stage_g_live_agent_e2e"
+path = "../../../ops/e2e/stage_g/live_agent_e2e.rs"
+
+[dependencies]
+mnemos-a-core = { path = "../a-core" }
+# F-WP-03A (atom #422 · §4.4): reuse the canonical `OfficialTrustDecision`
+# (repr(u8), 5-variant pure verdict enum, g-wallet/src/stage_c_gas_policy.rs) as
+# `SkillCardView.trust_state` instead of re-minting it. User-locked T2 decision
+# (T2_WALLET; AskUserQuestion 2026-06-06 -> option A). Acyclic: `cargo tree -i
+# mnemos-g-wallet` lists consumers {e-skill, i-cli, j-ux, k-devex, legacy
+# bin/mnemos-cli} — `sinabro` is NOT among them, and g-wallet depends on none of
+# them back. No new lockfile crate (g-wallet is already vendored via the legacy
+# bin/mnemos-cli -> j-ux -> e-skill -> g-wallet path), so `--locked --offline`
+# stays valid. Pure-type edge only: no signing / wallet secret / live action is
+# reachable from this crate.
+mnemos-g-wallet = { path = "../g-wallet" }
+# F-WP-04B (#438-#440 · §4.4): reuse the canonical Stage D skill catalog /
+# install / try-before-use surface (SkillCatalogIndexEntry, SignedCatalogCache,
+# rank, progressive_inspect, InstallPlan, run_try_before_use, mint_receipt /
+# LocalInstallReceipt, apply_transition / LocalSkillState, InstallState,
+# scan_surfaces, PermissionPreview) instead of re-minting a rich, stateful
+# subsystem. USER-LOCKED T2 decision (T2_SKILL_SANDBOX; AskUserQuestion
+# 2026-06-07 -> Option A: reuse the real types, honoring 'reuse D' + the
+# no-canonical-reinvention law). Acyclic: `cargo tree -i mnemos-e-skill` lists
+# consumers {i-cli, j-ux, k-devex} — `sinabro` is NOT among them, and e-skill
+# does not depend back on `sinabro`. NO new lockfile crate (e-skill and its deps
+# are already vendored via the legacy bin/mnemos-cli -> j-ux -> e-skill path), so
+# `--locked --offline` stays valid. Tradeoff disclosed + mitigated: e-skill
+# depends on `mnemos-m-agent` (the LLM-client crate), so this edge pulls m-agent
+# into sinabro's transitive closure (reversing the 03B/04A m-agent-free-closure
+# convention). HISTORY: Stage F mitigated that edge with the
+# G-F-NO-MAGENT-SYMBOL convention (sinabro source used ZERO m-agent live
+# symbols, so the LLM client sat uncalled). SUPERSEDED 2026-06-10 — see the
+# direct `mnemos-m-agent` dependency below.
+mnemos-e-skill = { path = "../e-skill" }
+# Agent-core lane step 4 (owner-authorized 2026-06-10; MEMORY_INDEX_DESIGN.md
+# §8): `agent_loop` consumes m-agent's PURE bounded-loop types directly
+# (ToolLoop / LoopStop / DailyTokenBudget / TokenCount — atoms #25-#27;
+# m-agent has zero IO/egress code, verified `[dependencies]` = a-core only).
+# This SUPERSEDES the Stage-F G-F-NO-MAGENT-SYMBOL zero-symbol convention by
+# owner direction ("m-agent LlmClient/ToolLoop/LoopStop/DailyTokenBudget
+# 재사용"). The isolation that still matters is unchanged: the live LLM
+# transport stays feature-gated (`provider-egress`), so the default build is
+# egress-free and the loop driver is fully testable offline. NO new lockfile
+# crate (m-agent already vendored via e-skill); the relock adds only the
+# sinabro->m-agent edge.
+mnemos-m-agent = { path = "../m-agent" }
+# P1-1 (owner-authorized 2026-06-11): persisted memory store encrypt-at-rest.
+# `aes-gcm-siv` (AES-256-GCM-SIV, nonce-misuse-resistant AEAD) is the SAME
+# cipher the workspace `g-wallet` keystore uses (atom #34) — reused, not a new
+# surface; both are already in Cargo.lock, so `--locked --offline` stays valid
+# with 0 new crate. `getrandom` (workspace) generates the 32-byte local key.
+# This is the honest encrypt-at-rest the index design deferred to a real seal
+# seam; it is a LOCAL memory key, never a wallet/custody key (funds untouched).
+# Threat model: ops/evidence/stage_g/agent_loop/PERSISTED_MEMORY_THREAT_MODEL.md.
+aes-gcm-siv = { workspace = true }
+getrandom = { workspace = true }
+# F-WP-05B (#443-#445 · §4.6 Cluster 6 memory): reuse the canonical Stage B/C/D
+# memory truth (StorageObjectRef / StorageBackendKind / MemoryId / MemoryPersist /
+# StorageWritePlan / ReplayCursor / StageBReplayReport / StageBTranscriptHash32 /
+# BackgroundCompactor / ImportanceModel / UserModel / TombstonePolicy /
+# PortableMemoryBundle / export_bundle / import_bundle / ProviderMigration /
+# SigningPublicKey / StageDEvidenceRef) read-only instead of re-minting any memory
+# type. USER-LOCKED T3 decision (T3_MAINNET_OR_GAS; AskUserQuestion 2026-06-07 ->
+# Option A: b-memory=prod, c-walrus=dev). Acyclic: `cargo tree -p mnemos-b-memory`
+# contains NO sinabro/mnemos-cli, and sinabro is a leaf (`cargo tree -i sinabro` =
+# self only). NO new lockfile crate (mnemos-b-memory already in Cargo.lock); so
+# `--locked --offline` stays valid. Default features pull 0 network: `net-testnet`
+# is opt-in and forwards to c-walrus/net-testnet, which gates reqwest+walrus-core
+# behind `dep:` optional. Transitive disclosure: this edge pulls d-move + f-seal
+# into sinabro's closure (both already vendored, 0 new crate). Pure read-only
+# projection: no live network / wallet / chain / gas action is reachable from this
+# crate (all storage modes are dry-run or deny in Stage F).
+mnemos-b-memory = { path = "../b-memory" }
+# F-WP-06A (#451-#453 · §4.4 chain/package/multisig): reuse the canonical Stage C
+# package gate (`mnemos_d_move::stage_c_package_lock::MainnetPackageLock`) plus
+# `ObjectId`/`SuiAddress` (`types`) so the chain-env / publish-gate / multisig
+# cockpit projects the real package-lock evidence instead of re-minting it.
+# USER-LOCKED T2 decision (AskUserQuestion 2026-06-07 -> Option A: add d-move
+# direct dep, reuse MainnetPackageLock). Acyclic: `cargo tree -i sinabro` = self
+# only (leaf), and `cargo tree -p mnemos-d-move` contains NO sinabro/mnemos-cli, so
+# the sinabro -> d-move edge closes no cycle. NO new lockfile crate: mnemos-d-move
+# is already in Cargo.lock (pulled transitively via b-memory), so `--locked
+# --offline` stays valid. Pure-type edge: d-move types are inert data records (no
+# I/O, no sui invocation); no live chain / wallet / gas action is reachable.
+mnemos-d-move = { path = "../d-move" }
+# F-WP-06B (#454-#458 · §4.x dataset/eval/audit): reuse the canonical Stage E
+# AtomDiet dataset truth (AtomDietRecord / ExportKind / TrainingSplit / SplitAssignment /
+# S1GroundTruthRecord / S2NarrativeRecord / StreamKind / RewardEligibility / QualityReport /
+# DatasetShardManifest / EvidenceLakeReceipt / DatasetCard / StageGUnlockPacket / EvalSummaryView /
+# SecuritySignal / AuditFinding / privacy_scanner) read-only instead of re-minting any dataset type.
+# USER-LOCKED T2_ABI_OR_WIRE decision (AskUserQuestion 2026-06-07 -> Option A: add the prod dep and
+# reuse the real canonical types, honoring 'reuse E' + the no-canonical-reinvention law). Acyclic:
+# `cargo metadata` shows l-dataset's forward normal-closure excludes sinabro/mnemos-cli, and sinabro is
+# a leaf. NO new lockfile crate: mnemos-l-dataset is already a Cargo.lock workspace member and its only
+# normal deps (serde_json + sha2) are already in sinabro's closure, so the sinabro node merely gains the
+# edge and `--locked --offline` stays valid. Pure read-only projection: no training execution / dataset
+# upload / network is reachable from this crate (Stage F is a control surface only).
+mnemos-l-dataset = { path = "../l-dataset" }
+# F-WP-06C (#459 · F.7.0 platform telegram): reuse the canonical Telegram
+# adapter (`mnemos_j_ux::telegram::{TelegramUserId, Allowlist, TelegramGateway,
+# GatewayError}`) — an authorization-only spine that performs ZERO live transport
+# (j-ux/src/telegram.rs:5 "Phase 0 ships zero live Telegram transport") — as the
+# `platform telegram bind`/`authorize`/`test` primitive, instead of re-minting
+# the canonical Telegram identity types. USER-LOCKED T2 decision (T2_LIVE;
+# AskUserQuestion 2026-06-07 -> Option A, honoring 'reuse: A Telegram adapter' +
+# the no-canonical-reinvention law). Acyclic: `cargo tree -i sinabro` = self only
+# (leaf) and `cargo tree -i mnemos-j-ux` = {legacy bin/mnemos-cli} only (j-ux does
+# not depend back on sinabro), so the sinabro -> j-ux edge closes no cycle. NO new
+# lockfile crate: j-ux's only normal deps are mnemos-a-core + mnemos-e-skill, both
+# already in sinabro's closure, so `--locked --offline` stays valid. Pure-type /
+# auth edge: no bot token and no live send is reachable (transport_live is
+# structurally false in Stage F).
+mnemos-j-ux = { path = "../j-ux" }
+# F-WP-07A (#466 · F.7.7 Seal/WinFLoRA locked): reuse the canonical Stage B Seal
+# stub (`mnemos_f_seal::{StageBSealStubPolicy, STAGE_B_SEAL_STUB_BOUNDARY_PHRASE,
+# stage_b_wording_ok, StageBSealStubError}`, atom #156/#157) so the locked
+# Seal/WinFLoRA future-gate VIEW projects the real default-deny Seal boundary +
+# the misleading-encryption-claim wording guard, instead of re-minting a local
+# "locked" flag. USER-LOCKED T2 decision (T2_WALLET; AskUserQuestion 2026-06-07
+# -> Option A: add the f-seal direct edge, honoring 'reuse: B Seal stub' + the
+# no-canonical-reinvention law). Acyclic: f-seal depends on c-walrus + d-move
+# (both already in sinabro's closure) and NOT on sinabro/mnemos-cli, so the
+# sinabro -> f-seal edge closes no cycle (sinabro is a leaf). NO new lockfile
+# crate: f-seal is already vendored transitively via b-memory, so `--locked
+# --offline` stays valid. Pure-type edge: the Seal-stub types are inert boundary
+# markers (no encryption, no key server, no I/O); no live action is reachable.
+mnemos-f-seal = { path = "../f-seal" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+# MNEMOS × SKEW K-2 / ONCHAIN PIVOT C-2 (owner-authorized 2026-06-30) — the ISOLATED ed25519
+# SIGNER + the byte-exact Solana legacy-message / PDA codec. Both are ALREADY in the build closure
+# (ed25519-dalek + curve25519-dalek are pulled by `g-wallet`, a sinabro dep, and pinned in
+# Cargo.lock at 2.2.0 / 4.1.3), so adding these DIRECT edges links the already-compiled crates with
+# 0 new crate fetch and no version churn — `--offline` stays valid, no heavy `solana-sdk` (seam-lock
+# D-K2-1). `ed25519-dalek` signs the assembled Solana message (zeroize-on-drop secret, never the
+# keeper key / model context — IV-K2-4/5). `curve25519-dalek` is the EXACT off-curve check Solana's
+# `find_program_address` uses (`CompressedEdwardsY::decompress().is_some()`) for byte-exact PDA
+# derivation (IV-K2-9). PURE (no network); the chain WRITE socket is gated behind `chain-write`.
+ed25519-dalek = { workspace = true }
+curve25519-dalek = { version = "4.1.3", default-features = false, features = ["alloc"] }
+# zeroize-on-drop for the isolated ed25519 SEED (IV-K2-5: the secret never lingers in freed memory,
+# never logged/rendered). Already in the closure (aes-gcm-siv / g-wallet / ed25519-dalek), pinned in
+# Cargo.lock at 1.8 ⇒ the direct edge adds 0 new crate, `--offline` stays valid.
+zeroize = { workspace = true }
+toml = { workspace = true }
+# CURSOR PARITY A④-rg find-in-files (owner-approved 2026-06-17): ALWAYS-compiled
+# regex engine for `crate::search` (a READ-class loop tool + `context search` verb).
+# Already in Cargo.lock at 1.12.3 (pulled by criterion) with sources vendored in the
+# offline cache ⇒ adding this direct edge brings 0 new lockfile crate / no download
+# (a trivial offline lock-edge refresh; `--locked --offline` stays valid).
+regex = { workspace = true }
+# P (owner-authorized 2026-06-10) — OPTIONAL JSON codec edge for the gated live
+# `provider consult` Anthropic Messages call. OFF by default (mirrors the
+# `reqwest`-optional pattern): the default/offline build never links serde_json
+# from this crate. Already in Cargo.lock (workspace dep `serde_json = "1"`, pulled
+# by l-dataset and others) => 0 new lockfile crate, `--locked --offline` valid.
+serde_json = { workspace = true, optional = true }
+# G-WP-09 (#603 · G.8.9) optional PROVIDER egress transport — gated behind the
+# `provider-egress` feature (OFF by default). Already in Cargo.lock (workspace dep
+# vendored via c-walrus net-testnet: reqwest 0.12 blocking + rustls-tls, no
+# OpenSSL system coupling); the optional edge adds 0 new lockfile crate and
+# `--locked --offline` stays valid. Never linked into the default offline build;
+# even when enabled, every send is triple-gated (live-dispatch + same-message
+# approval + provider allowlist) and funds hosts are unreachable.
+reqwest = { workspace = true, optional = true }
+# C (G-WP-13, owner-authorized 2026-06-10 + X-decision) — OPTIONAL prod edge for the
+# gated `memory put-fixture` live Walrus TESTNET PUT. OFF by default (mirrors the
+# `reqwest`-optional egress pattern above): the default/offline build never links
+# c-walrus as a prod dep, so the 2026-06-07 `c-walrus=dev` *default-build* posture is
+# preserved (c-walrus is still the dev-only test-fixture edge below). Activated ONLY by
+# the `put-fixture-net` feature, which also turns on c-walrus/net-testnet (reqwest +
+# walrus-core, already in Cargo.lock => `--locked --offline` stays valid). Even compiled
+# in, a PUT fires only behind an exact typed-phrase approval + content-class
+# (SyntheticPublicFixture) gate; funds/wallet/mainnet are unreachable. Threat model:
+# ops/evidence/stage_g/gui_desktop/C_EGRESS_THREAT_MODEL.md.
+mnemos-c-walrus = { path = "../c-walrus", optional = true }
+# G-WP-12 (2026-06-10, owner-approved vendoring) — the platform-cockpit render/input
+# stack: crossterm (terminal backend), ratatui (layout/widget renderer), reedline
+# (Hermes/Codex-style chat prompt: history, completion, hints, keymaps). Pure
+# render/input libraries: ZERO network egress at runtime, so the Phase-0 posture
+# (funds LOCKED, no live action) is unchanged — only the build dependency surface
+# grows. This supersedes the earlier "0 new crate / std+ANSI" lock (owner reversed
+# it 2026-06-10 after the std+ANSI hand-rolled cockpit proved visually inadequate);
+# the std-first core remains the non-TTY / piped / checker fallback, byte-unchanged.
+crossterm = "0.29.0"
+ratatui = "0.29.0"
+reedline = "0.48.0"
+
+# atom #570/#575 (G-WP-08) — interactive cockpit gating, REVISED by G-WP-12.
+#
+# The std-first core (offline) is ALWAYS compiled and stays the headless surface:
+# a real read-eval REPL loop + a real raw-mode TUI event loop (raw input via
+# `tui::raw` libc termios on unix; cooked fallback otherwise). Every pipe / test /
+# checker exercises it byte-unchanged.
+#
+# The former `tui-rich` / `repl-rich` empty feature markers documented a deferred
+# crossterm/ratatui/reedline upgrade; that upgrade landed 2026-06-10 (G-WP-12) as
+# UNCONDITIONAL dependencies above, so the markers are removed (a repo-wide grep
+# proved zero `#[cfg(feature = ...)]` references — prose mentions only).
+[features]
+# E13-1 (owner-directed 2026-06-13): `web-egress` is ON by default so the agent's
+# web fetch/search is autonomous out of the box (SSRF-walled, GET-only, secret-zero,
+# READ-class — `reqwest` is already vendored ⇒ `--locked --offline` stays valid).
+# custody/funds/chain-write stay HARD-LOCKED; this only unlocks read-only web GETs.
+# P1 S2-4 deploy-flip (owner-directed 2026-06-14, "배포할때도 다 반영"): `put-fixture-net`
+# joins the terminal CLI default so the shipped `sinabro` binary self-runs the E14-W2
+# two-tier autonomous Walrus memory (READ `memory walrus-index/walrus-fetch` + the P1-4
+# `daemon evolve` durable WRITE) out of the box — parity with the Tauri desktop deploy
+# (which already lists it). TESTNET read/write of AES ciphertext ONLY; `reqwest`/
+# `walrus-core` are already vendored ⇒ relock-free, `--locked --offline` stays valid, and
+# `--no-default-features` still builds a pure-offline core. funds/mainnet/chain-write stay
+# HARD-LOCKED separately (PD-6); the funded-mainnet publisher is a distinct go-live gate.
+default = ["web-egress", "put-fixture-net", "walrus-mainnet"]
+# G-WP-09 (#603 · G.8.9) — bounded PROVIDER HTTP egress transport. OFF by default:
+# the offline std-core has no transport (`provider::egress::ProviderTransport::send`
+# returns `TransportNotCompiled`). `reqwest` is already vendored in Cargo.lock
+# (workspace dep, pulled by c-walrus net-testnet), so enabling this relocks OFFLINE
+# with 0 new crate. Even compiled in, every send stays gated (live-dispatch +
+# same-message approval + provider allowlist + key present); funds hosts unreachable.
+# P (owner-authorized 2026-06-10) — the feature now also unlocks the REAL Anthropic
+# Messages codec behind `provider consult` (exact typed-phrase approval + redaction
+# gate + bounded caps + one-shot). `serde_json` is the optional codec edge (already
+# in Cargo.lock via the workspace => `--locked --offline` stays valid; the default
+# build gains NO new dependency edge). Threat model:
+# ops/evidence/stage_g/gui_desktop/PROVIDER_EGRESS_THREAT_MODEL.md.
+provider-egress = ["dep:reqwest", "dep:serde_json"]
+
+# G-WP-10 (#636 · G.9.12) — bounded TELEGRAM Bot-API egress transport. OFF by
+# default (same posture as `provider-egress`): the offline std-core has no
+# transport (`telegram::egress::TelegramTransport::send` returns
+# `TransportNotCompiled`). `reqwest` is already vendored, so enabling this relocks
+# OFFLINE with 0 new crate. Even compiled in, every send stays gated (live-send +
+# same-message approval + Telegram-host allowlist + bot-token present); funds and
+# provider hosts are unreachable. The bot token is a `SecretRefView` (never logged).
+# T (owner-authorized 2026-06-10) — the feature now also unlocks the REAL Bot-API
+# `sendMessage` codec behind `platform send` (exact typed-phrase approval +
+# redaction gate + bounded text + one-shot; token rides in the URL path, so the
+# URL is never logged/hashed/rendered). `serde_json` is the shared optional codec
+# edge (already a declared optional dep => no lockfile change). Threat model:
+# ops/evidence/stage_g/gui_desktop/TELEGRAM_EGRESS_THREAT_MODEL.md.
+telegram-egress = ["dep:reqwest", "dep:serde_json"]
+
+# MNEMOS × SKEW K-2 / ONCHAIN PIVOT C-2 (owner-authorized 2026-06-30) — the bounded SOLANA
+# chain-WRITE transport (the ONLY `simulateTransaction` / `sendTransaction` / `getGenesisHash`
+# socket). OFF by default AND distinct from the read `web3-egress`: a chain WRITE is a strictly
+# more dangerous capability than a read, so it is its OWN feature the owner turns on deliberately —
+# the default + terminal build compiles NO chain-write socket (the seam returns
+# `TransportNotCompiled`, honest-degrade). Reuses the SAME vendored `reqwest` + `serde_json` edges
+# (already in Cargo.lock ⇒ `--locked --offline` stays valid; 0 new crate). Even compiled in, a
+# broadcast fires ONLY behind the full K-2 gate chain: the K-1 oracle AffordableInBounds verdict +
+# an owner-armed within-bounds `ChainTxCapability` witness + amount-binding + D13 (signed ==
+# assembled) + D14 (devnet genesis pin); the isolated key never reaches the model; mainnet is a
+# further owner arm. Threat model: ops/evidence/stage_g/agent_loop/SKEW_SIGNING_THREAT_MODEL.md.
+chain-write = ["dep:reqwest", "dep:serde_json"]
+
+# ENDGAME E4 (owner-ratified 2026-06-12) — bounded TELEGRAM Bot-API INBOUND
+# transport (getUpdates long-poll) for remote-approve-while-away. OFF by default
+# AND independent of `telegram-egress`: the default build and the egress-only build
+# both have NO inbound at all — inbound is a strictly separate capability the owner
+# turns on deliberately (owner pick: a new feature, not a reuse of telegram-egress).
+# Reuses the SAME vendored `reqwest` + `serde_json` edges (already in Cargo.lock ⇒
+# `--locked --offline` stays valid; 0 new crate, no second HTTP client). The inbound
+# bytes are UNTRUSTED: every field is length-bounded, the offset advances
+# monotonically (no rewind/replay), the sender is pinned to `TELEGRAM_CHAT_ID`
+# (E4-2), and an approval mints authority ONLY via the unforgeable SI-3 path, bound
+# to a SPECIFIC pending action (narrow — never a broad grant). Threat model:
+# ops/evidence/stage_g/agent_loop/TELEGRAM_INBOUND_THREAT_MODEL.md (⑪ IV-T1..).
+telegram-inbound = ["dep:reqwest", "dep:serde_json"]
+
+# C (G-WP-13 · owner-authorized 2026-06-10) — gated live Walrus TESTNET PUT of a
+# synthetic public fixture (`memory put-fixture`). OFF by default. Pulls the optional
+# c-walrus prod edge + its reqwest transport (net-testnet). The default build has NO
+# transport: the verb is recognized + classified Network->Confirm and renders the
+# locked surface (no execution, no egress). With the feature ON, a PUT still fires only
+# behind an exact typed-phrase approval + the SyntheticPublicFixture content-class gate.
+# `reqwest`/`walrus-core` are already vendored in Cargo.lock => `--locked --offline` valid.
+put-fixture-net = ["dep:mnemos-c-walrus", "mnemos-c-walrus/net-testnet"]
+
+# S2 (WALRUS_MAINNET_SELFHOST, owner-locked 2026-06-21) — the self-host (BYO) MAINNET
+# Walrus transport. ON by default so the shipped binary self-activates the moment the
+# owner configures an endpoint + token ("실제 메인넷 키 넣으면 자동 활성화"); writes still
+# fire only behind the owner ceremony (S3). Enables mnemos-cli's OWN `reqwest`
+# (`dep:reqwest`, already vendored via web-egress) for the direct PUT/GET path, and
+# pulls `put-fixture-net` (c-walrus + net-testnet) for the canonical blob-id / payload-class
+# / response-classifier reuse. 0 new lockfile crate (reqwest + c-walrus + net-testnet are
+# all already in `default`), so `--locked --offline` stays valid and `--no-default-features`
+# still builds a pure-offline core (the executable transport is `#[cfg]`-gated; the SSRF
+# wall stays always-compiled). The bearer rides `WALRUS_PUBLISHER_TOKEN` (memory-only,
+# `Authorization: Bearer`), NEVER a Sui key — our app holds no key / never signs / never
+# pays; funds/custody/mainnet-chain-WRITE stay HARD-LOCKED (PD-6). Kickoff:
+# ops/evidence/stage_g/agent_loop/WALRUS_MAINNET_SELFHOST_KICKOFF.md.
+walrus-mainnet = ["dep:reqwest", "put-fixture-net"]
+
+# W2-C (0G Storage round-trip, owner-directed 2026-06-23): gates the KEYLESS proof-verified
+# `0g-storage-client download` SUBPROCESS (the Go sidecar; 0G has no Rust SDK). NO new lockfile
+# crate (std::process only). The agent NEVER handles the signer key — the funds-bearing UPLOAD
+# is owner-run; this feature only enables the keyless download+verify. Off by default; the verb
+# is recognized + renders an honest "not compiled" surface with the feature off.
+zerog-storage = []
+
+# W2-B (0G Compute TEE attestation, owner-directed 2026-06-24): gates the build that may
+# spawn the external Node sidecar (prototype/sidecar/zerog-attestation). KEYLESS + read-only
+# — the sidecar verifies a provider's TEE quote with an ephemeral UNFUNDED wallet (no key, no
+# funds, no chain write). Off by default; the verb renders an honest "not compiled" surface.
+zerog-attestation = []
+
+# G-WP-09 (#595 · G.8.1) — MLX/ollama loopback adapter (Apple-Silicon dev target).
+# P3-3 (owner-authorized 2026-06-11) UPGRADED from an empty marker: the feature now
+# compiles `provider::local_chat::LocalChatTransport` — the REAL loopback
+# OpenAI-compatible chat transport behind the `provider consult
+# consult-local-naite-live` ceremony (threat model:
+# ops/evidence/stage_g/agent_loop/LOCAL_ENDPOINT_THREAT_MODEL.md ⑧). Pulls the
+# SAME optional `reqwest` + `serde_json` edges the egress features use (both
+# already in Cargo.lock ⇒ relock-free, `--locked --offline` stays valid; 0 new
+# crate). Loopback (127.0.0.1) only = LOCAL serving, not egress — the transport's
+# only target type is `LoopbackBind` (non-loopback unrepresentable), the client is
+# no-proxy + no-redirect, and the only route off-box remains the separate
+# triple-gated `provider-egress` path. `MlxEndpoint`'s GenStream seam stays an
+# in-process double (honest; the consult transport is the filled seam).
+local-mlx = ["dep:reqwest", "dep:serde_json"]
+
+# G-WP-09 (#596 · G.8.2) — vLLM loopback adapter (Linux/GPU prod target).
+# P3-3: same upgrade as `local-mlx` (the consult-shaped loopback transport is
+# backend-agnostic — mlx/ollama/vLLM speak the same OpenAI-compatible wire);
+# same relock-free optional `reqwest`/`serde_json` edges. `VllmEndpoint`'s
+# GenStream seam stays an in-process double; KV-cache mode stays route-visible
+# (no hidden compression).
+local-vllm = ["dep:reqwest", "dep:serde_json"]
+
+# E11-1 (owner-directed 2026-06-13) — the agent's LIVE web READ. OFF by default
+# (same posture as `provider-egress`): the offline std-core compiles NO web
+# transport (`provider::web_fetch::WebFetchTransport` is `#[cfg(feature =
+# "web-egress")]`; a `TOOL: web fetch` in the default build yields the honest
+# `WebFetchDenied::TransportNotCompiled`). The ALWAYS-COMPILED SSRF wall
+# (`classify_url`) needs no feature. Reuses the SAME vendored `reqwest` edge the
+# egress features use (already in Cargo.lock => `--locked --offline` stays valid;
+# 0 new crate). The fetch is an UNAUTHENTICATED GET (secret-zero), redirect(none),
+# no_proxy, timeout + body-cap; IP-literal / localhost / chain-RPC hosts are
+# SSRF-refused. GET-only is the structural chain-WRITE wall. Threat model:
+# ops/evidence/stage_g/agent_loop/WEB_FETCH_THREAT_MODEL.md (⑭ IV-WF1..WF10).
+web-egress = ["dep:reqwest"]
+
+# M-1 (Mycel) — the S3 content-store adapter: an S3-compatible backend for the agent
+# registry, over `reqwest` + a HAND-ROLLED SigV4 (no AWS SDK, no `hmac` crate — HMAC-SHA256
+# is built on the always-present `sha2` via `crate::sha256_32`). OFF by default; the default
+# non-chain backend is `LocalCasStore`. Backend independence is SAFE by IV-M1 (the registry
+# content-hash seatbelt re-hashes content→artifact_id, so any S3-returned bytes are untrusted
+# until that gate passes). Threat model: CONTENT_STORE_ADAPTER_THREAT_MODEL.md.
+s3 = ["dep:reqwest"]
+
+# E13-3 (⑲, owner AskUserQuestion 2026-06-13) — the agent's owner-armed BOUNDED
+# DOWNLOAD (a GET that fetches UNTRUSTED bytes into a temp file). OFF by default (same
+# posture as `web-egress`): the offline std-core compiles NO download transport
+# (`provider::download_fetch::DownloadTransport` is `#[cfg(feature = "download-egress")]`;
+# a `daemon fetch` in the default build yields the honest
+# `DownloadDenied::TransportNotCompiled`). The ALWAYS-COMPILED SSRF wall
+# (`classify_download_url` = `classify_url` + the allowlist) + capability/grant need no
+# feature. Reuses the SAME vendored `reqwest` edge (already in Cargo.lock => `--locked
+# --offline` stays valid; 0 new crate). The fetch is an UNAUTHENTICATED GET (secret-zero),
+# redirect(none), no_proxy, timeout + byte-cap; the bytes land ONLY under
+# std::env::temp_dir() and are NEVER executed. GET-only is the structural chain-WRITE wall;
+# the download is owner-armed only (a single-shot `DownloadGrant`), and custody/funds/chain
+# stay HARD-LOCKED (`CustodyCapability` uninhabited, PD-6). Threat model:
+# ops/evidence/stage_g/agent_loop/GATED_DOWNLOAD_THREAT_MODEL.md (⑲ IV-DL1..DL8).
+download-egress = ["dep:reqwest"]
+
+# [3] Web3 RPC reader (E10-3b, MEGA build 2026-06-17) — the agent's owner-armed CHAIN
+# READ (a READ-ONLY JSON-RPC POST to the OWNER's configured `web3_rpc_endpoint`). OFF by
+# default (same posture as `download-egress`): the offline std-core compiles NO web3
+# transport (`provider::web3_rpc::Web3RpcTransport` is `#[cfg(feature = "web3-egress")]`;
+# a `daemon web3-read` in the default build yields the honest
+# `Web3Denied::TransportNotCompiled`). The ALWAYS-COMPILED SSRF wall
+# (`classify_rpc_endpoint`) + the READ-only method allowlist (`Web3RpcMethod`; a write
+# method is unrepresentable) + capability/grant need no feature. Reuses the SAME vendored
+# `reqwest` edge (already in Cargo.lock => `--locked --offline` stays valid; 0 new crate).
+# The dial is SECRET-ZERO (no auth header), the outbound params are REDACTED before send,
+# the method is READ-only (no chain WRITE), and the read is owner-armed only (a single-shot
+# `EgressGrant`); custody/funds/chain-write stay HARD-LOCKED (`CustodyCapability`
+# uninhabited, PD-6). Threat model:
+# ops/evidence/stage_g/agent_loop/WEB3_RPC_READER_THREAT_MODEL.md (IV-W3R1..IV-W3R9).
+web3-egress = ["dep:reqwest", "dep:serde_json"]
+
+# A① LSP (CURSOR PARITY keystone-1, owner §9 Q2 lock 2026-06-16) — the agent's
+# language-server READ. OFF by default (same posture as `web-egress`): the
+# always-compiled `lsp` module's base framing + honest-degrade entry need no
+# feature, but the JSON-RPC build/parse rides `serde_json` (the SAME optional
+# workspace codec the consult build already links — already in Cargo.lock ⇒
+# `--locked --offline` stays valid, 0 new crate). Without the feature
+# `lsp::diagnose` honest-degrades ("the language-server codec is not compiled").
+# The real server (`rust-analyzer`/`move-analyzer`) runs under
+# `seatbelt_profile_for(ReadOnly)` (network + write kernel-DENIED) = READ-class
+# (T3); an absent binary honest-degrades; custody/funds stay HARD-LOCKED (PD-6).
+# Design: ops/evidence/stage_g/agent_loop/CURSOR_PARITY_REFRAME_DESIGN.md §3 A①.
+lsp = ["dep:serde_json"]
+
+# B⑫ MCP CLIENT (CURSOR PARITY keystone-3, owner §6 B⑫ triangle lock 2026-06-16) —
+# the agent's capability-typed MCP host. OFF by default (same posture as `lsp`): the
+# always-compiled `mcp` module's NDJSON framing + the chokepoint
+# (`render_mcp_call`) + the fail-closed gates need no feature, but the hand-rolled
+# JSON-RPC 2.0 build/parse + the sandboxed stdio session ride `serde_json` (the SAME
+# optional workspace codec the consult/lsp builds already link — already in
+# Cargo.lock ⇒ `--locked --offline` stays valid, 0 new crate, NO MCP SDK crate).
+# Without the feature `mcp::render_mcp_call` honest-degrades ("the MCP stdio client
+# is not compiled"). v1 = stdio LOCAL servers + read-only tools only (T1/T2 locked):
+# the child runs under `seatbelt_profile_for(ReadOnly)` (network + write
+# kernel-DENIED) = READ-class; an unconfigured server / an un-advertised tool ⇒
+# DENY; the tool ARG and RESULT both pass `redact()`; every call lands in the E5
+# audit chain. http/SSE remote (EGRESS) + mutating tools = a separate owner-armed
+# v2. custody/funds stay HARD-LOCKED (PD-6). Design:
+# ops/evidence/stage_g/agent_loop/CURSOR_PARITY_REFRAME_DESIGN.md §3 B⑫ + §6 B⑫.
+mcp = ["dep:serde_json"]
+
+# libc is unix-only here: it backs `tui::raw` termios raw-mode. On non-unix the
+# `tui::raw` stub returns None and the loop uses cooked input (no libc needed).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# F-WP-05B (#443 test fixtures only): c-walrus owns `VerifiedBlobId`, which has NO
+# public constructor — the only legitimate way to obtain one is the verify path
+# (`derive_blob_id` -> `PublisherReportedBlobId::try_from_text` ->
+# `verify_reported_blob_id`). Production code reaches a `VerifiedBlobId` solely via
+# `StorageObjectRef::walrus_blob()` method-chaining (no type-name import), so the
+# c-walrus edge is DEV-ONLY (test fixtures). Default features only (no net-testnet
+# => 0 network). Already in Cargo.lock; `--locked --offline` stays valid.
+mnemos-c-walrus = { path = "../c-walrus" }

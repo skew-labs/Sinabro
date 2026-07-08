@@ -1,0 +1,25 @@
+# cargo-audit configuration — atom #194 · C-WP-03A (Stage C GA / mainnet-gate).
+#
+# `cargo audit` reads the FULL Cargo.lock, independent of cargo features. The three
+# advisories below live ONLY on the OPTIONAL `net-testnet` dependency path
+# (walrus-core git → fastcrypto 0.1.9 → rsa/bincode/derivative). The default-feature
+# `--workspace` shipping binary (mnemos-agent / mnemos-cli) does NOT link them:
+#     cargo tree --workspace | grep -c "rsa v0.8"   →   0   (verified)
+#
+# These are AUDITED, auditor-visible ignores (NOT silent mutes) — each retained with
+# an explicit reason so a reviewer sees exactly what is accepted and why. Full run
+# output, provenance, and the four resolution options are in
+# ops/evidence/stage_c/dependency_audit.md. Re-evaluate on any fastcrypto/walrus-core
+# upgrade or if net-testnet ever becomes a default/shipping feature.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071 — rsa 0.8.2 Marvin Attack (5.9 MEDIUM, timing sidechannel).
+  # Optional net-testnet path only; not in shipping graph. No fix released for 0.8.x
+  # in the pinned fastcrypto tree. Accepted for the optional testnet transport only.
+  "RUSTSEC-2023-0071",
+  # RUSTSEC-2025-0141 — bincode unmaintained (transitive via fastcrypto). Optional path.
+  "RUSTSEC-2025-0141",
+  # RUSTSEC-2024-0388 — derivative unmaintained (transitive via fastcrypto). Optional path.
+  "RUSTSEC-2024-0388",
+]

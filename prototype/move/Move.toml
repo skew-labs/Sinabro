@@ -1,0 +1,80 @@
+# atom #15 · D.0.1 — Sui Move package for the MNEMOS memory-root module.
+# atom #19 · D.0.5 — testnet 배포 표면: `published-at` placeholder + Sui rev
+#                    carve-out 정착(자율 갱신 X) + `[addresses] mnemos`
+#                    pre-publish placeholder 보존.
+#
+# Phase 0 scope completed in earlier atoms:
+#   - atom #15 (D.0.1): struct/event definitions.
+#   - atom #16 (D.0.2): `add_chunk` entry + `ChunkAnchored` emit.
+#   - atom #17 (D.0.3): `transfer_root` entry (owner-only).
+#   - atom #18 (D.0.4): Move Prover spec file `memory_root.spec.move`
+#       (G-PROVER NOT_RUN_TOOL_ABSENT — Stage K / atom #46 K.0.1 carry per
+#       MNEMOS_BUILD_STATE.md §2 ⚠).
+#   - atom #20 (D.0.6): Rust SDK call builder (separate crate, no Move
+#       package change).
+#
+# atom #19 / D.0.5 (this atom) introduces the *testnet deploy procedure*
+# without performing the live on-chain transaction:
+#   1. `scripts/deploy_testnet.sh` — dry-run-first deploy wrapper with
+#      mainnet ban, G-MOVE-NET user-approval gating, G.0 key-separation
+#      guard, and `add_chunk` synthetic-call PTB synthesizer (live-call
+#      blocked by the production-module factory-entry absence; see
+#      DEPLOY_TESTNET.md §6 disparity flag).
+#   2. `prototype/move/DEPLOY_TESTNET.md` — operator runbook + disparity
+#      flags + post-publish manual `Move.toml` patch instructions.
+#   3. This file — the *Move.toml-side* artifacts: a commented-out
+#      `published-at = "0x..."` line operators must fill after a
+#      successful testnet publish, plus a re-statement of the Sui rev
+#      pinning policy (NO autonomous rev-bump this atom; the cached
+#      `~/.move/git/` rev remains the build truth).
+#
+# # Sui rev pinning policy (atom #19 carve-out — NOT changed)
+#
+# atom #15's commit pinned `Sui = { rev = "73dd2c..." }` to the revision
+# already vendored under `~/.move/git/` so the offline build resolves
+# without a network fetch. atom #19's plan-text says "re-pin this
+# revision to the latest official testnet branch tag prior to the
+# on-chain deploy". Per `[[mainnet-safety-over-speed]]` +
+# `[[plan-document-authority-read-all-before-work]]` + `[[ai-advisory-
+# user-decides]]`, this Session 1 **deliberately does NOT bump the
+# rev** — a rev-bump would invalidate the cached resolution, force a
+# network fetch (Phase 0 ban + macOS offline preference), and risk
+# touching test results that atom #16/#17 verified. The bump is logged
+# as an advisory item in DEPLOY_TESTNET.md §5 for explicit user
+# decision before live publish (see `ai_advisory_user_decides` law).
+#
+# # `[addresses] mnemos` policy (atom #19)
+#
+# `mnemos = "0x0"` is the Sui Move *pre-publish* placeholder convention.
+# `sui move build` and the dry-run path tolerate `0x0`; `sui client
+# publish --gas-budget N` returns the assigned `package_id` which the
+# operator then writes into `published-at` (below) and into
+# `[addresses] mnemos`. atom #19 does NOT autonomously mutate either
+# value — the script captures `package_id` to
+# `ops/evidence/phase_0/atom_019/deploy_run/published_at.txt` and the
+# operator (or a Stage K post-publish atom) edits this file.
+
+[package]
+name = "mnemos"
+edition = "2024.beta"
+# `published-at` is set by the operator AFTER a successful
+# `sui client publish` on testnet, using the `package_id` captured by
+# `scripts/deploy_testnet.sh` in
+# `ops/evidence/phase_0/atom_019/deploy_run/published_at.txt`. atom #19
+# does NOT autonomously edit this value (USER_APPROVAL_REQUIRED).
+# Testnet deploy (owner-directed 2026-07-01 "배포해라 테스트넷에"): published to Sui TESTNET.
+published-at = "0xaec1fb33be84ad07ad85bb5ba0300bf2df8e2612ae8a5e9838125a06155986be"
+
+[addresses]
+# `mnemos = "0x0"` is the Sui Move pre-publish placeholder. After a
+# successful testnet publish the operator replaces it with the assigned
+# `package_id`. See module-header §`[addresses] mnemos` policy.
+mnemos = "0x0"
+
+[dependencies]
+# Sui rev pinned to the vendored cache by atom #15. atom #19 does NOT
+# bump this rev (carve-out — see module header). Bump is gated on user
+# approval prior to live testnet publish.
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "73dd2c2ba6f9fdb21d7ffde2b50a3f2f0ac39bc1" }
+
+[dev-dependencies]

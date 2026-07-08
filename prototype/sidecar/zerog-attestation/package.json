@@ -1,0 +1,15 @@
+{
+  "name": "zerog-attestation-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "sinabro W2-B — 0G Compute TEE attestation verifier (read-only, keyless, no funds)",
+  "license": "MIT",
+  "main": "verify.js",
+  "scripts": {
+    "verify": "node verify.js"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-compute-ts-sdk": "0.8.4",
+    "ethers": "^6.13.0"
+  }
+}

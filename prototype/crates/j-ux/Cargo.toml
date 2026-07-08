@@ -1,0 +1,25 @@
+[package]
+name = "mnemos-j-ux"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+# atom #43 · J.0.3 — slash.rs (control command grammar). Adds a path-dep on
+# mnemos-e-skill for the canonical `SkillId` (atom #39 · E.0.1, the
+# `/skill <id>` payload type). This is the only cross-crate import on the
+# atom #43 surface; mnemos-a-core / mnemos-m-agent reuse is concept-only
+# (Stage F/H wires `/kill` to the supervisor and `/budget` to the cost
+# ledger on the express control rail per ATOM_PLAN line 1263).
+#
+# atom #44 · J.0.4 — redact.rs (outbound redaction forwarder). Adds the
+# second path-dep `mnemos-a-core` for the atom #4 canonical reuse
+# (`redact_for_log` / `RedactedLogValue` / `LogRedactionKind`). The
+# outbound Telegram / CLI surfaces re-use the structured-log redaction
+# kernel verbatim. 0 new transitive crates: a-core is already in
+# Cargo.lock via the atom #43 e-skill path-dep edge (e-skill itself
+# depends on a-core per crates/e-skill/Cargo.toml:18).
+[dependencies]
+mnemos-a-core = { path = "../a-core" }
+mnemos-e-skill = { path = "../e-skill" }

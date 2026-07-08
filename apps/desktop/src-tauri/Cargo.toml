@@ -1,0 +1,64 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.2", features = [] }
+tauri-plugin-log = "2"
+# The mnemos core (package `sinabro` = prototype/crates/mnemos-cli) consumed as a
+# LIBRARY. Path dep into the prototype workspace; this desktop crate is its OWN
+# workspace (see [workspace] below) so prototype/Cargo.toml stays byte-unchanged
+# and the terminal `sinabro` (G-WP-12) keeps building under its strict gates.
+# C (G-WP-13, owner-authorized 2026-06-10) — the GUI build enables `put-fixture-net`
+# so the gated live Walrus TESTNET PUT is reachable (still gated at runtime by an
+# exact typed-phrase approval + SyntheticPublicFixture content-class; funds locked).
+# First feature-on build fetches reqwest+walrus-core into this (separate) workspace
+# → then vendor (fetch-once-then-vendor per MNEMOS_SINABRO_1_0_SCOPE.md). The
+# terminal/default sinabro build is unaffected (the feature is set HERE only).
+# P (owner-authorized 2026-06-10) — `provider-egress` additionally unlocks the gated
+# live LLM consult (`provider consult`: exact typed-phrase approval + redaction gate +
+# bounded caps + one-shot Anthropic Messages call). The GUI chat composer routes
+# non-command lines onto that verb; the core stays the sole gate verifier. Threat
+# model: ops/evidence/stage_g/gui_desktop/PROVIDER_EGRESS_THREAT_MODEL.md.
+# T (owner-authorized 2026-06-10) — `telegram-egress` additionally unlocks the gated
+# live Telegram send (`platform send`: exact typed-phrase + redaction + bounded text +
+# one-shot Bot-API sendMessage; token-in-URL never logged/rendered). Threat model:
+# ops/evidence/stage_g/gui_desktop/TELEGRAM_EGRESS_THREAT_MODEL.md.
+# E4/E2/E8 (owner-authorized 2026-06-12 "너가 다해") — the GUI now also compiles:
+#  * `telegram-inbound` => `platform poll` remote-approve edge (getUpdates long-poll;
+#    sender-pinned, replay-refused, narrow single-shot grant; threat model ⑪).
+#  * `local-mlx` + `local-vllm` => the LOCAL Naite consult route + `daemon run`
+#    (loopback 127.0.0.1, zero egress; the autonomy default PD-7).
+# All stay gated at runtime (typed phrase / owner-arm / sender-pin); custody HARD-LOCKED.
+# E13-1 (owner-directed 2026-06-13 "웹서치도 자율적으로") — `web-egress` makes the
+# agent's web fetch/search LIVE (SSRF-walled, GET-only, secret-zero, READ-class).
+# ★ SKEW TRADING (owner-directed 2026-07-01 "제 1목적이 스큐체인 거래") — the desktop app's
+# PRIMARY purpose is to TRADE on Skew. `web3-egress` = the LIVE Skew READ socket (positions/
+# portfolio/markets/oracle via getProgramAccounts, SSRF-walled, READ-class); `chain-write` = the
+# owner-armed K-2 chain-WRITE chokepoint (every trade still gated by the exact custody arm phrase +
+# the K-1 oracle + the bounded CustodyGrant — the GUI/model can NEVER auto-trade; mainnet locked).
+sinabro = { path = "../../../prototype/crates/mnemos-cli", features = ["put-fixture-net", "provider-egress", "telegram-egress", "telegram-inbound", "local-mlx", "local-vllm", "web-egress", "download-egress", "web3-egress", "chain-write"] }
+tauri-plugin-dialog = "2.7.1"
+
+# Standalone workspace root: keeps this GUI crate fully decoupled from the
+# prototype cargo workspace (no member edit there). Tauri toolchain builds here
+# are fetch-once-then-vendor per MNEMOS_SINABRO_1_0_SCOPE.md.
+[workspace]

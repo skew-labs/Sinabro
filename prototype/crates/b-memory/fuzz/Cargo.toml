@@ -1,0 +1,47 @@
+# Stage B chunk codec fuzz harness (atom #97 · B.1.16).
+#
+# A `cargo-fuzz` (libFuzzer) harness for the Stage B canonical decoder. It is a
+# SEPARATE crate from the prototype workspace on purpose:
+#
+#   * the empty `[workspace]` table below makes this crate its own workspace
+#     root, so the parent virtual workspace (prototype/Cargo.toml, explicit
+#     `members` list — this path is not a member) never absorbs it; and
+#   * `libfuzzer-sys` is NOT in `[workspace.dependencies]` and requires nightly +
+#     a network fetch to build, so it is kept out of the offline `--locked`
+#     workspace link graph entirely.
+#
+# Consequence: `cargo build/test/clippy --workspace --locked --offline` from the
+# prototype root is completely unaffected by this directory.
+#
+# RUN STATUS (this machine, offline): NOT RUN. `cargo-fuzz` is not installed
+# (`cargo fuzz --version` → "no such command") and `libfuzzer-sys` is absent from
+# the local cargo cache, so the coverage-guided run is deferred to the K.0.1 CI
+# nightly job — the same posture historical atoms used for deferred gates. The
+# offline panic-freedom coverage is carried by `tests/chunk_prop.rs`
+# (`prop_arbitrary_bytes_never_panic`, proptest, stable) and the real miri
+# byte-sweep (`miri_parser_byte_sweep_no_panic_and_canonical`, G-B-MIRI).
+[package]
+name = "mnemos-b-memory-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mnemos-b-memory]
+path = ".."
+
+# Detach from the prototype virtual workspace (see header).
+[workspace]
+
+[[bin]]
+name = "chunk_decode"
+path = "fuzz_targets/chunk_decode.rs"
+test = false
+doc = false
+bench = false

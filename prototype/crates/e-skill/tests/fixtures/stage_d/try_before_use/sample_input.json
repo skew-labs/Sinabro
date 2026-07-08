@@ -1,0 +1,6 @@
+{
+  "fixture_kind": "sample",
+  "description": "A bundled benign sample input — always eligible for a try-before-use dry-run (FixtureSource::Sample).",
+  "declared_reads": ["input/sample.json"],
+  "payload": {"note": "deterministic sample; carries no secret, no path traversal, no real workspace content"}
+}

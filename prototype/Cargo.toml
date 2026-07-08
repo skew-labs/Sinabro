@@ -1,0 +1,118 @@
+# MNEMOS Phase 0 — virtual workspace root (atom #1 · A.0.1).
+# 14 domain crates (a-core .. n-sandbox) + 2 binaries (agent/cli).
+# Single source of dependency versions lives in [workspace.dependencies];
+# members opt in per-atom via `dep = { workspace = true }` so version drift = 0.
+[workspace]
+resolver = "2"
+members = [
+    "crates/a-core",
+    "crates/b-memory",
+    "crates/c-walrus",
+    "crates/d-move",
+    "crates/e-skill",
+    "crates/f-seal",
+    "crates/g-wallet",
+    "crates/i-cli",
+    "crates/j-ux",
+    "crates/k-devex",
+    "crates/l-dataset",
+    "crates/l-train",
+    "crates/m-agent",
+    "crates/n-sandbox",
+    "crates/o-stage-c-e2e",
+    "crates/mnemos-cli",
+    "bin/mnemos-agent",
+    "bin/mnemos-cli",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+# Central version table. Declared now; consumed by later atoms. Declaring an
+# entry here does NOT pull it until a member references it (skeleton stays
+# network-free and `--offline`-clean from atom #1).
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# CURSOR PARITY A④-rg find-in-files (owner-approved 2026-06-17): the regex match
+# engine for `crate::search` (the `search`/`context search` READ tool). Linear-time
+# matcher (no catastrophic backtracking) ⇒ ReDoS-safe for an agent/owner pattern.
+# Already in Cargo.lock at 1.12.3 (pulled transitively by criterion) with all
+# sources vendored in the offline cache ⇒ 0 new lockfile crate, no download.
+regex = "1"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+proptest = "1"
+# atom #12 · C.0.6: pulled by `mnemos-c-walrus` only when its `net-testnet`
+# cargo feature is enabled. default-features off + minimal feature set
+# ("blocking" + "rustls-tls") keeps the optional dependency surface narrow;
+# rustls-tls avoids any system OpenSSL coupling.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# bridge atom #116.5 · B.2.15.5: the official Walrus blob-id oracle source.
+# Pulled by `mnemos-c-walrus` ONLY when its `net-testnet` cargo feature is on
+# (optional dep). `walrus-core` is the pure-compute crate (no network / no
+# chain deps; `sui-types` is its own optional feature, left OFF) that computes
+# the RS2/RedStuff sliver-pair metadata -> Blake2b256 Merkle root -> blob id.
+# Pinned to the exact rev the installed `walrus` CLI (1.49.1-a00e390) was built
+# from, so the in-process oracle and the CLI oracle agree byte-for-byte on the
+# #116 fixture (3-way parity: CLI == walrus-core == local Rust). Upstream
+# `publish = false` => git source is the only distribution; the rev is
+# SHA-pinned in `Cargo.lock` and the optional dep never links into the default
+# `cargo build --locked --offline --workspace`.
+walrus-core = { git = "https://github.com/MystenLabs/walrus", rev = "a00e390b4a1d641832b9decdc80a51d1b64ebb52" }
+# atom #13 · C.0.7: criterion bench harness, dev-dep only (consumed by
+# `mnemos-c-walrus`'s `benches/codec.rs`). default-features off drops
+# `html_reports` / `plotters` surface; we only need throughput numbers in
+# a baseline JSON. Release bins remain byte-identical (criterion never
+# enters the link graph for default builds).
+criterion = { version = "0.5", default-features = false }
+# atom #33 · G.0.1 — g-wallet at-rest sealed keystore primitives.
+#
+# Disparity recorded in no_op_decisions.jsonl: ATOM_PLAN §4.G prose names
+# "age 암호화"; the canonical OUT struct field signature
+# `SealedKeypair { ciphertext, kdf_salt: [u8;16], nonce: [u8;24] }` is
+# implementation-agnostic over the AEAD primitive choice. The `age` /
+# `chacha20poly1305` / `argon2` crates are NOT in the local cargo cache,
+# so this atom realises the envelope with `aes-gcm-siv` (AES-256-GCM-SIV,
+# nonce-misuse-resistant AEAD) + `pbkdf2-hmac-sha256` (OWASP 2023 600k
+# iterations) — same on-disk byte layout (16-byte KDF salt + 24-byte
+# stored nonce + opaque ciphertext blob of `pubkey || aead_ciphertext`).
+# All seven crates are present in `~/.cargo/registry/cache/`
+# (offline-safe). `default-features = false` minimises feature surface.
+zeroize = { version = "1.8", default-features = false, features = ["alloc", "zeroize_derive"] }
+aes-gcm-siv = { version = "0.11", default-features = false, features = ["aes", "alloc", "getrandom"] }
+pbkdf2 = { version = "0.11", default-features = false, features = ["hmac"] }
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+blake2 = { version = "0.10", default-features = false }
+getrandom = "0.2"
+# Compile-time trait-absence assertions for `ScopedSecretKey`
+# (§10.3 광기: no `Debug` / `Display` / `Clone` / serde). Dev-dep only.
+static_assertions = "1.1"
+# atom #570 (G-WP-08 · G.7.0) — libc `termios` for the offline std-first TUI
+# raw-mode core (the crate's only `unsafe`, isolated in `mnemos-cli`'s `tui::raw`).
+# Already in `Cargo.lock` (transitive via tokio/mio); consumed only as a unix-gated
+# direct edge in `mnemos-cli`. No new lockfile crate; `--offline` relock from cache.
+libc = "0.2"
+
+# Release profile: optimize for the <15MB single-binary completion criterion
+# (GOAL §1.1). Measured baseline recorded at atom #1; tightened by later atoms.
+#
+# atom #172 · C.0.1 (C-WP-01) FROZEN: this GA release profile is locked. The
+# five keys below (opt-level / lto / codegen-units / panic / strip) are the
+# deterministic GA build settings; the measured binary-size baseline is recorded
+# in `ops/evidence/stage_c/release_profile.md`. No profile drift is permitted
+# after gas/proof evidence — any change re-opens the C-WP-01 GA gate.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

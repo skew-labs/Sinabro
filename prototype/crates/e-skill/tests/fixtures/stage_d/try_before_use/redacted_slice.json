@@ -1,0 +1,7 @@
+{
+  "fixture_kind": "redacted_workspace_slice",
+  "description": "A user-approved redacted workspace slice — eligible for a dry-run ONLY when a non-zero redaction token is present (FixtureSource::RedactedWorkspaceSlice). A raw (un-redacted) workspace slice is never eligible.",
+  "declared_reads": ["fixtures/case_a.txt"],
+  "redaction_token_present": true,
+  "payload": {"note": "secret-shaped runs are redacted; no raw workspace bytes, no persistence, no network, no wallet, no chain write"}
+}

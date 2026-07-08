@@ -1,0 +1,10 @@
+[package]
+name = "mnemos-i-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[dependencies]
+mnemos-e-skill = { path = "../e-skill" }

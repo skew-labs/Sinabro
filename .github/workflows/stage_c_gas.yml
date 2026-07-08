@@ -1,0 +1,115 @@
+# MNEMOS · .github/workflows/stage_c_gas.yml — atom #187 C.0.16 gas trace CI gate.
+#
+# Canonical OUT: a CI job that runs the Stage C gas-trace dry-run collectors and
+# the gas regression comparator as MERGE BLOCKERS (not dashboard trivia).
+#
+# Madness invariants (#187):
+#   - add_chunk gas hard cap < 800_000 MIST is enforced in CI: the comparator
+#     test `over_cap_is_red_even_when_proof_equivalent` (atom #184) must pass,
+#     i.e. an over-cap sample is Red even when proof-equivalent.
+#   - "faster but unproved is red": `faster_but_unproved_is_red` (#184) — a cheap
+#     gas number with no proof is a regression of trust, blocked at merge.
+#   - injected over-cap / missing-proof samples are Red (the #184 test matrix).
+#
+# Fail-closed by construction (mirrors .github/workflows/ci.yml, atom #46):
+#   - `permissions: contents: read` (no write tokens).
+#   - no `pull_request_target`, no `continue-on-error`, no `--no-verify`.
+#   - every cargo invocation is `--locked --offline` (Cargo.lock is the pin).
+#   - the aggregate job refuses an `auto-merge` label and requires a human merge.
+
+name: mnemos-stage-c-gas
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: prototype
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_NET_OFFLINE: "true"
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  g-c-gas-trace:
+    name: G-C-GAS-TRACE (dry-run collectors + effect delta + jsonl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: rustc --version && cargo --version
+      - name: gas trace sample / baseline / collectors (d-move)
+        run: |
+          set -eu
+          cargo test --locked --offline -p mnemos-d-move \
+            stage_c_gas_trace:: stage_c_gas_baseline:: \
+            stage_c_add_chunk_gas:: stage_c_audit_gas:: stage_c_effect_delta::
+      - name: gas/effect trace JSONL builder + schema keys (k-devex)
+        run: |
+          set -eu
+          cargo test --locked --offline -p mnemos-k-devex stage_c_gas_jsonl::
+      - name: gas trace JSONL schema is valid JSON
+        run: |
+          set -eu
+          python3 -c "import json,sys; json.load(open('../ops/schemas/stage_c_gas_trace.schema.json')); print('schema ok')"
+
+  g-c-gas-regression:
+    name: G-C-GAS-REGRESSION (add_chunk < 800k cap + proof-equivalence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: comparator matrix — over-cap red / unproved red / proved green
+        run: |
+          set -eu
+          # The whole comparator test module is the merge gate: it encodes the
+          # add_chunk 800k hard-cap enforcement, the faster-but-unproved=Red rule,
+          # the digest-mismatch=Red rule, and proved-under-cap=Green.
+          cargo test --locked --offline -p mnemos-d-move stage_c_gas_compare::
+
+  stage-c-gas-aggregate:
+    name: stage-c-gas-aggregate (no auto-merge)
+    needs:
+      - g-c-gas-trace
+      - g-c-gas-regression
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: predecessor status — all gas gates must be green
+        run: |
+          set -eu
+          fail=0
+          check() {
+            name=$1; result=$2
+            case "$result" in
+              success) ;;
+              *) echo "predecessor $name: $result → FAIL"; fail=1 ;;
+            esac
+          }
+          check g-c-gas-trace      '${{ needs.g-c-gas-trace.result }}'
+          check g-c-gas-regression '${{ needs.g-c-gas-regression.result }}'
+          if [ "$fail" = "1" ]; then exit 1; fi
+      - name: assert no `auto-merge` label
+        run: |
+          set -eu
+          LABEL_AUTO_MERGE=${{ contains(github.event.pull_request.labels.*.name, 'auto-merge') }}
+          if [ "$LABEL_AUTO_MERGE" = "true" ]; then
+            echo "stage-c-gas-aggregate: 'auto-merge' label forbidden"
+            exit 1
+          fi
+          echo "stage-c-gas-aggregate: gas gates green; human merge required"

@@ -1,0 +1,33 @@
+[package]
+name = "mnemos-k-devex"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false  # internal workspace crate; never published to crates.io (atom #194 deny-bans wildcard fix)
+
+[dependencies]
+# atom #177 · C.0.6 (C-WP-01): the Stage C evidence ref stamps a
+# `StageCTraceLink` whose definition home is the dependency root `a-core`
+# (`mnemos_a_core::trace`). Edge `k-devex -> a-core` is one-way and acyclic
+# (a-core depends on no workspace member; nothing depends on k-devex).
+# Path-only: pure types, no network.
+mnemos-a-core = { path = "../a-core" }
+# atom #186 · C.0.15 (C-WP-02A): the gas/effect trace JSONL builder reuses the
+# Stage C `GasTraceSample` (#178) and `EffectDelta` (#185) whose home is
+# `d-move`. Edge `k-devex -> d-move` is one-way and acyclic (d-move depends on
+# a-core + c-walrus only; nothing in d-move depends on k-devex). Path-only.
+mnemos-d-move = { path = "../d-move" }
+# atom #234 · C.2.15 (C-WP-07): the mainnet ceremony transcript is
+# hash-addressed with the workspace-standard Blake2b-256 (the same primitive
+# g-wallet/d-move use). Already pinned in Cargo.lock; offline-resolvable.
+blake2 = { workspace = true }
+# atom #294 · D.2.18 (D-WP-03C): the Stage D skill-gas trace + Gas Station
+# allowlist extension reuses the e-skill `SkillPtbAction` (#290) and the g-wallet
+# `GasStationPolicy` / `GasStationDecision` (C #217 / #218). Edges
+# `k-devex -> e-skill` and `k-devex -> g-wallet` are one-way and ACYCLIC (neither
+# crate's dependency closure includes k-devex; only `o-stage-c-e2e` depends on
+# k-devex). Path-only: pure types, no signer, no network. Stage C avoided these
+# edges (sponsor decision consumed as a `bool`); Stage D needs the typed types.
+mnemos-e-skill = { path = "../e-skill" }
+mnemos-g-wallet = { path = "../g-wallet" }
